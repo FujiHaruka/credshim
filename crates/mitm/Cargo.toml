@@ -1,0 +1,27 @@
+[package]
+name = "credshim-mitm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+testing = []
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+rustls-platform-verifier.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+credshim-mitm = { path = ".", features = ["testing"] }
+credshim-testkit.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

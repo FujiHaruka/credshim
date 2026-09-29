@@ -1,0 +1,24 @@
+[package]
+name = "credshim"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "credshim"
+path = "src/main.rs"
+
+[features]
+testing = ["credshim-mitm/testing"]
+
+[dependencies]
+anyhow.workspace = true
+clap = { version = "4", features = ["derive"] }
+credshim-mitm.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
