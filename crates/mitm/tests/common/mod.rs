@@ -1,13 +1,17 @@
 #![allow(dead_code)]
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use credshim_testkit::upstream::now_us;
 use credshim_testkit::{MockUpstream, SseTick, UploadSummary, pattern};
 use futures_util::StreamExt;
+use rustls::RootCertStore;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector;
+use tokio_rustls::client::TlsStream;
 
 pub const LARGE: u64 = 24 * 1024 * 1024;
 
@@ -97,4 +101,36 @@ pub async fn assert_large_bodies_intact(client: &reqwest::Client, mock: &MockUps
         .unwrap();
     assert_eq!(summary.len, LARGE);
     assert_eq!(summary.sha256, pattern::sha256_hex(LARGE));
+}
+
+pub async fn connect(proxy: SocketAddr, target: &str) -> (TcpStream, String) {
+    let mut tcp = TcpStream::connect(proxy).await.unwrap();
+    tcp.write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let head = read_head(&mut tcp).await;
+    (tcp, head)
+}
+
+pub async fn tls_over(
+    tcp: TcpStream,
+    roots: RootCertStore,
+    sni: &str,
+    send_sni: bool,
+) -> std::io::Result<TlsStream<TcpStream>> {
+    let mut config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    config.enable_sni = send_sni;
+    TlsConnector::from(Arc::new(config))
+        .connect(sni.to_string().try_into().unwrap(), tcp)
+        .await
+}
+
+pub async fn exchange(tls: &mut TlsStream<TcpStream>, request: &str) -> String {
+    tls.write_all(request.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    let _ = tls.read_to_end(&mut response).await;
+    String::from_utf8(response).unwrap()
 }

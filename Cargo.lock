@@ -580,7 +580,9 @@ name = "credshim-mitm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "bytes",
+ "credshim-core",
  "credshim-mitm",
  "credshim-testkit",
  "futures-util",
@@ -597,6 +599,7 @@ dependencies = [
  "rustls-native-certs",
  "rustls-pki-types",
  "rustls-platform-verifier",
+ "secrecy",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",

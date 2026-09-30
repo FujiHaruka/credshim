@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use common::{assert_large_bodies_intact, assert_sse_unbuffered, client_via, read_head};
+use common::{
+    assert_large_bodies_intact, assert_sse_unbuffered, client_via, connect, exchange, tls_over,
+};
 use credshim_mitm::{CertificateAuthority, Intercept, Proxy, ProxyConfig, TestingHooks, Upstream};
 use credshim_testkit::{
     Echo, LeafCert, LeafOptions, MockUpstream, TestCa, capture_logs, fake_secret,
@@ -15,7 +17,6 @@ use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
@@ -88,31 +89,6 @@ impl Setup {
     }
 }
 
-async fn connect(proxy: SocketAddr, target: &str) -> (TcpStream, String) {
-    let mut tcp = TcpStream::connect(proxy).await.unwrap();
-    tcp.write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes())
-        .await
-        .unwrap();
-    let head = read_head(&mut tcp).await;
-    (tcp, head)
-}
-
-async fn tls_over(
-    tcp: TcpStream,
-    roots: RootCertStore,
-    sni: &str,
-    send_sni: bool,
-) -> std::io::Result<TlsStream<TcpStream>> {
-    let mut config = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
-    config.enable_sni = send_sni;
-    TlsConnector::from(Arc::new(config))
-        .connect(sni.to_string().try_into().unwrap(), tcp)
-        .await
-}
-
 #[derive(Debug)]
 struct AcceptAnyCertificate(Arc<rustls::crypto::CryptoProvider>);
 
@@ -173,13 +149,6 @@ async fn tls_skipping_verification(
     TlsConnector::from(Arc::new(config))
         .connect(sni.to_string().try_into().unwrap(), tcp)
         .await
-}
-
-async fn exchange(tls: &mut TlsStream<TcpStream>, request: &str) -> String {
-    tls.write_all(request.as_bytes()).await.unwrap();
-    let mut response = Vec::new();
-    let _ = tls.read_to_end(&mut response).await;
-    String::from_utf8(response).unwrap()
 }
 
 async fn assert_connect_502(setup: &Setup) {

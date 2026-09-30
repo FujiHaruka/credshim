@@ -19,6 +19,9 @@ use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
+use credshim_core::Injector;
+
+use crate::audit::{self, Outcome};
 use crate::intercept::{Intercept, Session};
 use crate::upstream::{ConnectError, Upstream};
 
@@ -31,6 +34,7 @@ pub struct ProxyConfig {
     pub idle_timeout: Duration,
     pub header_read_timeout: Duration,
     pub intercept: Option<Intercept>,
+    pub injector: Arc<Injector>,
 }
 
 impl ProxyConfig {
@@ -41,6 +45,7 @@ impl ProxyConfig {
             idle_timeout: Duration::from_secs(90),
             header_read_timeout: Duration::from_secs(30),
             intercept: None,
+            injector: Arc::new(Injector::default()),
         }
     }
 }
@@ -49,6 +54,8 @@ impl ProxyConfig {
 pub enum BindError {
     #[error("refusing to listen on non-loopback address {0}")]
     NotLoopback(SocketAddr),
+    #[error("rule host {0} is not in the intercept list, so its rule could never apply")]
+    RuleHostNotIntercepted(String),
     #[error("could not listen on {addr}: {source}")]
     Io { addr: SocketAddr, source: io::Error },
 }
@@ -62,6 +69,14 @@ impl Proxy {
     pub async fn bind(config: ProxyConfig, upstream: Upstream) -> Result<Self, BindError> {
         if !config.listen.ip().is_loopback() {
             return Err(BindError::NotLoopback(config.listen));
+        }
+        if let Some(host) = config
+            .injector
+            .rules()
+            .hosts()
+            .find(|host| !config.intercept.as_ref().is_some_and(|i| i.covers(host)))
+        {
+            return Err(BindError::RuleHostNotIntercepted(host.to_string()));
         }
         let listener = TcpListener::bind(config.listen)
             .await
@@ -129,6 +144,7 @@ struct Handler {
     connect_timeout: Duration,
     handshake_timeout: Duration,
     intercept: Option<Intercept>,
+    injector: Arc<Injector>,
 }
 
 impl Handler {
@@ -147,6 +163,7 @@ impl Handler {
             connect_timeout: config.connect_timeout,
             handshake_timeout: config.header_read_timeout,
             intercept: config.intercept.clone(),
+            injector: config.injector.clone(),
         }
     }
 
@@ -201,6 +218,7 @@ impl Handler {
     ) -> Response<ProxyBody> {
         let session = match Session::open(
             self.upstream.clone(),
+            self.injector.clone(),
             host.clone(),
             port,
             self.connect_timeout,
@@ -235,6 +253,28 @@ impl Handler {
             return status(StatusCode::BAD_REQUEST);
         };
         tracing::debug!(method = %parts.method, %authority, path = parts.uri.path(), "forward");
+        let method = parts.method.clone();
+        let path = parts.uri.path().to_string();
+        let entry = audit::Entry {
+            scheme: "http",
+            host: authority.host(),
+            port: authority.port_u16().unwrap_or(80),
+            method: &method,
+            path: &path,
+        };
+        if let Some(rule) = self.injector.rules().first_dummy_in(&parts) {
+            tracing::warn!(
+                rule = rule.name(),
+                %authority,
+                "dummy credential sent over plain HTTP; refusing to forward"
+            );
+            audit::record(
+                &entry,
+                &Outcome::Denied(rule.name().to_string()),
+                StatusCode::FORBIDDEN,
+            );
+            return status(StatusCode::FORBIDDEN);
+        }
         strip_hop_by_hop(&mut parts.headers);
         match http::HeaderValue::from_str(authority.as_str()) {
             Ok(host) => {
@@ -244,7 +284,7 @@ impl Handler {
         }
         parts.version = http::Version::HTTP_11;
         let req = Request::from_parts(parts, body.boxed());
-        match self.client.request(req).await {
+        let response = match self.client.request(req).await {
             Ok(res) => {
                 let (mut parts, body) = res.into_parts();
                 strip_hop_by_hop(&mut parts.headers);
@@ -254,7 +294,9 @@ impl Handler {
                 tracing::warn!(%authority, error = %err, "upstream request failed");
                 status(StatusCode::BAD_GATEWAY)
             }
-        }
+        };
+        audit::record(&entry, &Outcome::Pass, response.status());
+        response
     }
 }
 

@@ -10,6 +10,7 @@ testing = []
 
 [dependencies]
 anyhow.workspace = true
+credshim-core.workspace = true
 bytes.workspace = true
 http.workspace = true
 http-body-util.workspace = true
@@ -30,6 +31,8 @@ pem.workspace = true
 time.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
+secrecy.workspace = true
 tempfile.workspace = true
 credshim-mitm = { path = ".", features = ["testing"] }
 credshim-testkit.workspace = true

@@ -15,6 +15,9 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::sync::Mutex;
 use tokio_rustls::LazyConfigAcceptor;
 
+use credshim_core::{Destination, InjectError, Injector, Verdict};
+
+use crate::audit::{self, Outcome};
 use crate::ca::CertificateAuthority;
 use crate::proxy::{ProxyBody, status, strip_hop_by_hop};
 use crate::upstream::{ConnectError, Upstream};
@@ -83,6 +86,13 @@ impl VerifiedTarget {
         }
     }
 
+    fn destination(&self) -> Destination<'_> {
+        Destination {
+            host: &self.host,
+            port: self.port,
+        }
+    }
+
     fn matches(&self, authority: &Authority) -> bool {
         authority.host().eq_ignore_ascii_case(&self.host)
             && authority.port_u16().unwrap_or(HTTPS_PORT) == self.port
@@ -99,9 +109,18 @@ pub(crate) enum SessionError {
     Handshake(#[from] hyper::Error),
 }
 
+fn inject(
+    target: &VerifiedTarget,
+    injector: &Injector,
+    parts: &mut http::request::Parts,
+) -> Result<Verdict, InjectError> {
+    injector.apply(target.destination(), parts)
+}
+
 pub(crate) struct Session {
     target: VerifiedTarget,
     upstream: Upstream,
+    injector: Arc<Injector>,
     connect_timeout: Duration,
     sender: Mutex<SendRequest<ProxyBody>>,
 }
@@ -109,6 +128,7 @@ pub(crate) struct Session {
 impl Session {
     pub(crate) async fn open(
         upstream: Upstream,
+        injector: Arc<Injector>,
         host: String,
         port: u16,
         connect_timeout: Duration,
@@ -117,6 +137,7 @@ impl Session {
         Ok(Self {
             target: VerifiedTarget { host, port },
             upstream,
+            injector,
             connect_timeout,
             sender: Mutex::new(sender),
         })
@@ -183,7 +204,26 @@ impl Session {
     }
 
     async fn handle(&self, req: Request<Incoming>) -> Response<ProxyBody> {
-        let (mut parts, body) = req.into_parts();
+        let (parts, body) = req.into_parts();
+        let method = parts.method.clone();
+        let path = parts.uri.path().to_string();
+        let (outcome, response) = self.relay(parts, body).await;
+        let entry = audit::Entry {
+            scheme: "https",
+            host: &self.target.host,
+            port: self.target.port,
+            method: &method,
+            path: &path,
+        };
+        audit::record(&entry, &outcome, response.status());
+        response
+    }
+
+    async fn relay(
+        &self,
+        mut parts: http::request::Parts,
+        body: Incoming,
+    ) -> (Outcome, Response<ProxyBody>) {
         let target = &self.target;
         if !self.addressed_to_target(&parts.uri, &parts.headers) {
             tracing::warn!(
@@ -192,7 +232,10 @@ impl Session {
                 method = %parts.method,
                 "request inside CONNECT tunnel names a different host"
             );
-            return status(StatusCode::MISDIRECTED_REQUEST);
+            return (
+                Outcome::Misdirected,
+                status(StatusCode::MISDIRECTED_REQUEST),
+            );
         }
         tracing::debug!(
             method = %parts.method,
@@ -201,16 +244,36 @@ impl Session {
             path = parts.uri.path(),
             "intercepted request"
         );
+        let outcome = match inject(target, &self.injector, &mut parts) {
+            Ok(Verdict::Pass) => Outcome::Pass,
+            Ok(Verdict::Injected(rules)) => Outcome::Injected(rules),
+            Ok(Verdict::Denied(rule)) => {
+                tracing::warn!(
+                    %rule,
+                    host = %target.host,
+                    port = target.port,
+                    "dummy credential sent to a destination its rule is not bound to"
+                );
+                return (Outcome::Denied(rule), status(StatusCode::FORBIDDEN));
+            }
+            Err(err) => {
+                tracing::error!(rule = %err.rule, "credential injection failed");
+                return (
+                    Outcome::Failed(err.rule),
+                    status(StatusCode::INTERNAL_SERVER_ERROR),
+                );
+            }
+        };
         strip_hop_by_hop(&mut parts.headers);
         let Ok(host_header) = HeaderValue::from_str(&target.host_header()) else {
-            return status(StatusCode::BAD_REQUEST);
+            return (outcome, status(StatusCode::BAD_REQUEST));
         };
         parts.headers.insert(header::HOST, host_header);
         parts.uri = origin_form(&parts.uri);
         parts.version = http::Version::HTTP_11;
         let req = Request::from_parts(parts, body.boxed());
 
-        match self.send(req).await {
+        let response = match self.send(req).await {
             Ok(res) => {
                 let (mut parts, body) = res.into_parts();
                 strip_hop_by_hop(&mut parts.headers);
@@ -220,7 +283,8 @@ impl Session {
                 tracing::warn!(host = %target.host, port = target.port, error = %err, "intercepted request failed");
                 status(StatusCode::BAD_GATEWAY)
             }
-        }
+        };
+        (outcome, response)
     }
 
     fn addressed_to_target(&self, uri: &Uri, headers: &http::HeaderMap) -> bool {
