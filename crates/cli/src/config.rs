@@ -27,6 +27,14 @@ pub struct Config {
     pub vault: VaultConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+    #[serde(default)]
+    pub scrub: ScrubConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScrubConfig {
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]

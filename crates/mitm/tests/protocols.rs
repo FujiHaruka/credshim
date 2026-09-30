@@ -397,8 +397,7 @@ async fn non_websocket_upgrades_are_forwarded_as_plain_requests() {
     .await;
 
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
-    let echo: Echo =
-        serde_json::from_str(&response[response.find("\r\n\r\n").unwrap() + 4..]).unwrap();
+    let echo: Echo = serde_json::from_str(&common::http1_body(&response)).unwrap();
     assert_eq!(echo.header("upgrade"), None);
     assert_eq!(
         echo.header("authorization"),

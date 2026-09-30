@@ -171,6 +171,10 @@ async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::
         .map(Rule::from_spec)
         .collect::<Result<Vec<_>, _>>()?;
     let mut proxy_config = ProxyConfig::new(listen.unwrap_or_else(|| config.listen()));
+    proxy_config.scrub = config.scrub.enabled.unwrap_or(true);
+    if !proxy_config.scrub {
+        tracing::warn!("response scrubbing is disabled");
+    }
     if !rules.is_empty() || !config.oauth.is_empty() {
         let store = config.secrets()?.open()?;
         let oauth = if config.oauth.is_empty() {

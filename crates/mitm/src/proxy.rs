@@ -23,7 +23,7 @@ use credshim_core::Injector;
 use credshim_oauth::OAuth;
 
 use crate::audit::{self, Outcome};
-use crate::intercept::{Intercept, Session};
+use crate::intercept::{Intercept, Services, Session};
 use crate::upstream::{ConnectError, Upstream};
 
 pub type ProxyBody = BoxBody<Bytes, hyper::Error>;
@@ -37,6 +37,7 @@ pub struct ProxyConfig {
     pub intercept: Option<Intercept>,
     pub injector: Arc<Injector>,
     pub oauth: Option<Arc<OAuth>>,
+    pub scrub: bool,
     pub purge_interval: Duration,
 }
 
@@ -50,6 +51,7 @@ impl ProxyConfig {
             intercept: None,
             injector: Arc::new(Injector::default()),
             oauth: None,
+            scrub: true,
             purge_interval: Duration::from_secs(60),
         }
     }
@@ -184,7 +186,7 @@ struct Handler {
     handshake_timeout: Duration,
     intercept: Option<Intercept>,
     injector: Arc<Injector>,
-    oauth: Option<Arc<OAuth>>,
+    services: Services,
 }
 
 impl Handler {
@@ -205,7 +207,11 @@ impl Handler {
             handshake_timeout: config.header_read_timeout,
             intercept: config.intercept.clone(),
             injector: config.injector.clone(),
-            oauth: config.oauth.clone(),
+            services: Services {
+                injector: config.injector.clone(),
+                oauth: config.oauth.clone(),
+                scrub: config.scrub,
+            },
         }
     }
 
@@ -260,8 +266,7 @@ impl Handler {
     ) -> Response<ProxyBody> {
         let session = match Session::open(
             self.upstream.clone(),
-            self.injector.clone(),
-            self.oauth.clone(),
+            self.services.clone(),
             host.clone(),
             port,
             self.connect_timeout,

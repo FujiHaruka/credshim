@@ -63,7 +63,8 @@ pub struct MockUpstream {
     accept_loop: JoinHandle<()>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(from = "EchoWire", into = "EchoWire")]
 pub struct Echo {
     pub method: String,
     pub path: String,
@@ -73,6 +74,60 @@ pub struct Echo {
     pub headers: BTreeMap<String, Vec<String>>,
     pub body: String,
     pub body_len: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+struct EchoWire {
+    method: String,
+    path: String,
+    authority: Option<String>,
+    query_hex: Option<String>,
+    version: String,
+    headers_hex: BTreeMap<String, Vec<String>>,
+    body_hex: String,
+    body_len: usize,
+}
+
+fn unhex(value: &str) -> String {
+    String::from_utf8_lossy(&hex::decode(value).expect("echo fields are hex")).into_owned()
+}
+
+impl From<Echo> for EchoWire {
+    fn from(echo: Echo) -> Self {
+        Self {
+            method: echo.method,
+            path: echo.path,
+            authority: echo.authority,
+            query_hex: echo.query.map(hex::encode),
+            version: echo.version,
+            headers_hex: echo
+                .headers
+                .into_iter()
+                .map(|(name, values)| (name, values.into_iter().map(hex::encode).collect()))
+                .collect(),
+            body_hex: hex::encode(echo.body),
+            body_len: echo.body_len,
+        }
+    }
+}
+
+impl From<EchoWire> for Echo {
+    fn from(wire: EchoWire) -> Self {
+        Self {
+            method: wire.method,
+            path: wire.path,
+            authority: wire.authority,
+            query: wire.query_hex.as_deref().map(unhex),
+            version: wire.version,
+            headers: wire
+                .headers_hex
+                .into_iter()
+                .map(|(name, values)| (name, values.iter().map(|v| unhex(v)).collect()))
+                .collect(),
+            body: unhex(&wire.body_hex),
+            body_len: wire.body_len,
+        }
+    }
 }
 
 impl Echo {
@@ -218,6 +273,7 @@ fn router(shared: Arc<Shared>) -> Router {
         .route("/upload", post(upload))
         .route("/ws", any(websocket))
         .route("/status/{code}", any(status))
+        .route("/reflect", post(reflect))
         .route("/v1/chat/completions", post(chat_completions))
         .fallback(echo)
         .layer(middleware::from_fn_with_state(shared.clone(), record))
@@ -262,6 +318,38 @@ async fn echo(
         body: String::from_utf8_lossy(&body).into_owned(),
         body_len: body.len(),
     })
+}
+
+#[derive(Deserialize)]
+struct ReflectParams {
+    chunk: Option<usize>,
+    interval_ms: Option<u64>,
+    header: Option<String>,
+    encoding: Option<String>,
+}
+
+async fn reflect(Query(params): Query<ReflectParams>, body: Bytes) -> Response {
+    let size = params.chunk.unwrap_or(body.len()).max(1);
+    let interval = Duration::from_millis(params.interval_ms.unwrap_or(0));
+    let chunks: Vec<Bytes> = body.chunks(size).map(Bytes::copy_from_slice).collect();
+    let stream = async_stream::stream! {
+        for (i, chunk) in chunks.into_iter().enumerate() {
+            if i > 0 && !interval.is_zero() {
+                tokio::time::sleep(interval).await;
+            }
+            yield Ok::<_, Infallible>(chunk);
+        }
+    };
+    let mut response = Response::builder()
+        .header("content-type", "application/octet-stream")
+        .header("content-length", body.len());
+    if let Some(value) = params.header {
+        response = response.header("x-reflected", value);
+    }
+    if let Some(encoding) = params.encoding {
+        response = response.header("content-encoding", encoding);
+    }
+    response.body(Body::from_stream(stream)).unwrap()
 }
 
 async fn status(Path(code): Path<u16>) -> StatusCode {

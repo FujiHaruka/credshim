@@ -5,6 +5,7 @@ pub mod audit;
 pub mod ca;
 pub mod intercept;
 pub mod proxy;
+mod scrub;
 pub mod upstream;
 
 pub use audit::AUDIT_TARGET;

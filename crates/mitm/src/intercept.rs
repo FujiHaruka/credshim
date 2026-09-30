@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use http::header::{self, HeaderValue};
 use http::uri::{Authority, PathAndQuery};
-use http::{Request, Response, StatusCode, Uri, Version};
+use http::{Method, Request, Response, StatusCode, Uri, Version};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
@@ -20,6 +20,7 @@ use credshim_oauth::{Exchange, OAuth};
 use crate::audit::{self, Outcome};
 use crate::ca::CertificateAuthority;
 use crate::proxy::{ProxyBody, status, strip_hop_by_hop};
+use crate::scrub::{self, ScrubBody};
 use crate::upstream::{ALPN_H2, ConnectError, TargetConnector, Upstream};
 
 const HTTPS_PORT: u16 = 443;
@@ -136,10 +137,18 @@ fn inject(
     injector.apply(target.destination(), parts)
 }
 
+#[derive(Clone)]
+pub(crate) struct Services {
+    pub(crate) injector: Arc<Injector>,
+    pub(crate) oauth: Option<Arc<OAuth>>,
+    pub(crate) scrub: bool,
+}
+
 pub(crate) struct Session {
     target: VerifiedTarget,
     injector: Arc<Injector>,
     oauth: Option<Arc<OAuth>>,
+    scrub: bool,
     connector: TargetConnector,
     client: Client<TargetConnector, ProxyBody>,
 }
@@ -147,8 +156,7 @@ pub(crate) struct Session {
 impl Session {
     pub(crate) async fn open(
         upstream: Upstream,
-        injector: Arc<Injector>,
-        oauth: Option<Arc<OAuth>>,
+        services: Services,
         host: String,
         port: u16,
         connect_timeout: Duration,
@@ -161,8 +169,9 @@ impl Session {
             .build(connector.clone());
         Ok(Self {
             target: VerifiedTarget { host, port },
-            injector,
-            oauth,
+            injector: services.injector,
+            oauth: services.oauth,
+            scrub: services.scrub,
             connector,
             client,
         })
@@ -311,11 +320,81 @@ impl Session {
         if let Some(exchange) = exchange {
             return self.exchange(exchange, parts, body).await;
         }
+        if self.scrub {
+            parts.headers.insert(
+                header::ACCEPT_ENCODING,
+                HeaderValue::from_static("identity"),
+            );
+        }
+        let method = parts.method.clone();
         let response = match websocket_upgrade(&parts) {
             Some(protocol) => self.upgrade(parts, body, protocol).await,
             None => self.forward(parts, body).await,
         };
-        (outcome, response)
+        (outcome, self.scrubbed(&method, response))
+    }
+
+    fn scrubbed(&self, method: &Method, response: Response<ProxyBody>) -> Response<ProxyBody> {
+        if !self.scrub {
+            return response;
+        }
+        let scrubber = self.injector.scrubber();
+        if scrubber.is_empty() {
+            return response;
+        }
+        let (mut parts, body) = response.into_parts();
+        let has_body = scrub::may_have_body(method, parts.status);
+        if has_body && scrub::is_encoded(&parts.headers) {
+            tracing::warn!(
+                host = %self.target.host,
+                port = self.target.port,
+                "upstream sent an encoded response that cannot be scrubbed"
+            );
+            return status(StatusCode::BAD_GATEWAY);
+        }
+        if scrubber.scrub_headers(&mut parts.headers) > 0 {
+            tracing::warn!(host = %self.target.host, "scrubbed secret values from response headers");
+        }
+        if !has_body {
+            return Response::from_parts(parts, body);
+        }
+        parts.headers.remove(header::CONTENT_LENGTH);
+        let body = ScrubBody::new(body, &scrubber, self.target.host.clone());
+        Response::from_parts(parts, body.boxed())
+    }
+
+    fn scrubbed_full(
+        &self,
+        mut parts: http::response::Parts,
+        body: bytes::Bytes,
+    ) -> Response<ProxyBody> {
+        if !self.scrub {
+            return Response::from_parts(parts, full(body));
+        }
+        let scrubber = self.injector.scrubber();
+        if scrub::is_encoded(&parts.headers) && !scrubber.is_empty() {
+            tracing::warn!(
+                host = %self.target.host,
+                port = self.target.port,
+                "upstream sent an encoded response that cannot be scrubbed"
+            );
+            return status(StatusCode::BAD_GATEWAY);
+        }
+        let mut replaced = scrubber.scrub_headers(&mut parts.headers);
+        let body = match scrubber.scrub(&body) {
+            Some(clean) => {
+                replaced += 1;
+                bytes::Bytes::from(clean)
+            }
+            None => body,
+        };
+        if replaced > 0 {
+            tracing::warn!(host = %self.target.host, "scrubbed secret values from an OAuth endpoint response");
+        }
+        parts
+            .headers
+            .insert(header::CONTENT_LENGTH, HeaderValue::from(body.len()));
+        Response::from_parts(parts, full(body))
     }
 
     async fn forward(&self, parts: http::request::Parts, body: Incoming) -> Response<ProxyBody> {
@@ -371,10 +450,7 @@ impl Session {
                 let (mut parts, body) = res.into_parts();
                 strip_hop_by_hop(&mut parts.headers);
                 parts.version = Version::HTTP_11;
-                (
-                    Outcome::Exchanged(rule),
-                    Response::from_parts(parts, full(body)),
-                )
+                (Outcome::Exchanged(rule), self.scrubbed_full(parts, body))
             }
             Err(err) => {
                 tracing::warn!(

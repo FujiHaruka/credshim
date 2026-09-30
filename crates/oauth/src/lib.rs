@@ -135,4 +135,12 @@ impl TokenResolver for OAuth {
             bindings.clone(),
         ))
     }
+
+    fn generation(&self) -> u64 {
+        self.vault.generation()
+    }
+
+    fn issued(&self) -> Vec<(String, secrecy::SecretString)> {
+        self.vault.issued()
+    }
 }

@@ -171,8 +171,8 @@ impl Fixture {
     }
 }
 
-fn body_of(response: &str) -> &str {
-    &response[response.find("\r\n\r\n").unwrap() + 4..]
+fn body_of(response: &str) -> String {
+    common::http1_body(response)
 }
 
 #[tokio::test]
@@ -289,6 +289,7 @@ async fn assert_basic_and_query_injected(fixture: &Fixture) {
 
 fn expected_unchanged_headers() -> std::collections::BTreeMap<String, Vec<String>> {
     [
+        ("accept-encoding", vec!["identity"]),
         ("authorization", vec!["Bearer sk-someone-else"]),
         ("x-custom", vec!["a  b", "second"]),
     ]
@@ -328,7 +329,7 @@ async fn request_without_dummies_is_forwarded_unchanged() {
             )
             .await;
         assert!(response.starts_with("HTTP/1.1 200"), "{response}");
-        assert_unchanged(serde_json::from_str(body_of(&response)).unwrap(), alpn);
+        assert_unchanged(serde_json::from_str(&body_of(&response)).unwrap(), alpn);
 
         let fixture = Fixture::with(Downstream::Http2, alpn).await;
         let request =

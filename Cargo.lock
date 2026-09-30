@@ -572,7 +572,9 @@ dependencies = [
 name = "credshim-core"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "base64 0.22.1",
+ "bytes",
  "getrandom 0.3.4",
  "http",
  "percent-encoding",
@@ -610,6 +612,7 @@ dependencies = [
  "futures-util",
  "hex",
  "http",
+ "http-body",
  "http-body-util",
  "hyper",
  "hyper-util",

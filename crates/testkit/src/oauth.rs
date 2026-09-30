@@ -113,6 +113,7 @@ impl MockOAuth {
             .route("/token", post(token))
             .route("/revoke", post(revoke))
             .route("/api/me", get(me))
+            .route("/api/reflect", post(reflect))
             .with_state(shared.clone());
         let acceptor = TlsAcceptor::from(leaf.server_config(&[b"h2", b"http/1.1"]));
         let accept_loop = tokio::spawn(async move {
@@ -246,6 +247,10 @@ fn client_authenticated(
     }
 }
 
+async fn reflect(body: Bytes) -> Bytes {
+    body
+}
+
 fn error(status: StatusCode, code: &str) -> Response {
     (status, Json(serde_json::json!({ "error": code }))).into_response()
 }
@@ -291,6 +296,7 @@ async fn token(
             shared.config.rotate_refresh
         }
         Some("client_credentials") => false,
+        Some("echo") => return (StatusCode::BAD_REQUEST, body).into_response(),
         _ => return error(StatusCode::BAD_REQUEST, "unsupported_grant_type"),
     };
     let mut tokens = shared.tokens.lock().unwrap();

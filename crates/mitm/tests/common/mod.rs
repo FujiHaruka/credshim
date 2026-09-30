@@ -96,6 +96,27 @@ pub async fn raw_exchange(proxy: SocketAddr, request: &str) -> String {
     response
 }
 
+pub fn http1_body(response: &str) -> String {
+    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+    if !head
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
+        return body.to_string();
+    }
+    let mut rest = body;
+    let mut decoded = String::new();
+    loop {
+        let (size, after) = rest.split_once("\r\n").unwrap();
+        let size = usize::from_str_radix(size.trim(), 16).unwrap();
+        if size == 0 {
+            return decoded;
+        }
+        decoded.push_str(&after[..size]);
+        rest = &after[size + 2..];
+    }
+}
+
 pub async fn read_head<S: AsyncRead + Unpin>(stream: &mut S) -> String {
     let mut head = Vec::new();
     while !head.ends_with(b"\r\n\r\n") {

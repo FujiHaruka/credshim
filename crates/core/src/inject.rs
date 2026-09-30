@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -14,6 +14,7 @@ use zeroize::Zeroizing;
 use crate::rule::{Location, Rule, SecretRef};
 use crate::rules::{self, Decision, Destination, Edit, RuleSet};
 use crate::scan;
+use crate::scrub::Scrubber;
 
 const QUERY_VALUE: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
@@ -71,6 +72,14 @@ pub enum Verdict {
 
 pub trait TokenResolver: Send + Sync + fmt::Debug {
     fn resolve(&self, dummy: &str) -> Option<Rule>;
+
+    fn generation(&self) -> u64 {
+        0
+    }
+
+    fn issued(&self) -> Vec<(String, SecretString)> {
+        Vec::new()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -78,6 +87,7 @@ pub struct Injector {
     rules: RuleSet,
     secrets: Secrets,
     tokens: Option<Arc<dyn TokenResolver>>,
+    scrubber: Mutex<Option<(u64, Arc<Scrubber>)>>,
 }
 
 impl Injector {
@@ -98,6 +108,7 @@ impl Injector {
             rules,
             secrets,
             tokens: None,
+            scrubber: Mutex::default(),
         })
     }
 
@@ -108,6 +119,36 @@ impl Injector {
 
     pub fn rules(&self) -> &RuleSet {
         &self.rules
+    }
+
+    pub fn scrubber(&self) -> Arc<Scrubber> {
+        let generation = self.tokens.as_ref().map_or(0, |tokens| tokens.generation());
+        let mut cached = self
+            .scrubber
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((built, scrubber)) = cached.as_ref()
+            && *built == generation
+        {
+            return scrubber.clone();
+        }
+        let issued = self
+            .tokens
+            .as_ref()
+            .map(|tokens| tokens.issued())
+            .unwrap_or_default();
+        let statics = self.rules.rules().iter().filter_map(|rule| {
+            let secret = match rule.secret() {
+                SecretRef::Named(name) => self.secrets.get(name)?,
+                SecretRef::Inline(secret) => secret,
+            };
+            Some((secret, rule.dummy()))
+        });
+        let scrubber = Arc::new(Scrubber::new(
+            statics.chain(issued.iter().map(|(dummy, real)| (real, dummy.as_str()))),
+        ));
+        *cached = Some((generation, scrubber.clone()));
+        scrubber
     }
 
     pub fn first_dummy_in(&self, parts: &Parts) -> Option<String> {

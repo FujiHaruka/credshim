@@ -549,3 +549,62 @@ async fn token_exchange_and_api_calls_work_over_http2() {
     f.assert_app_sees_only_dummies(&refreshed);
     assert_eq!(f.call_api(API_HOST, refreshed.access()).await, 200);
 }
+
+#[tokio::test]
+async fn real_tokens_echoed_by_an_api_are_scrubbed_to_their_dummies() {
+    let logs = capture_logs();
+    let f = Fixture::new(Options::new(ClientAuthMethod::Post, TokenFormat::Json)).await;
+    let tokens = f.exchange_code().await;
+    let issued = f.mock.issued();
+    let real = issued
+        .iter()
+        .rev()
+        .find(|token| token.starts_with("real-at"))
+        .unwrap();
+
+    let body = f
+        .client()
+        .post(format!("https://{API_HOST}/api/reflect"))
+        .body(format!("token={real}&again={real}"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        body,
+        format!("token={0}&again={0}", tokens.access()),
+        "the vault's real token must come back as its dummy"
+    );
+    logs.assert_absent(&[real]);
+}
+
+#[tokio::test]
+async fn token_endpoint_errors_echoing_the_client_secret_are_scrubbed() {
+    let f = Fixture::new(Options::new(ClientAuthMethod::Post, TokenFormat::Json)).await;
+
+    let response = f
+        .token_request(vec![("grant_type", "echo".to_string())])
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 400);
+    let length: usize = response.headers()["content-length"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let body = response.text().await.unwrap();
+    assert_eq!(length, body.len());
+    assert!(!body.contains(&f.options.mock.client_secret), "{body}");
+    assert!(body.contains(CLIENT_DUMMY), "{body}");
+    assert!(
+        f.mock
+            .requests()
+            .iter()
+            .any(|request| request.body.contains(&f.options.mock.client_secret))
+    );
+}

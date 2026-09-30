@@ -16,6 +16,7 @@ credshim-secrets = { path = "crates/secrets" }
 credshim-oauth = { path = "crates/oauth" }
 credshim-testkit = { path = "crates/testkit" }
 
+aho-corasick = "1"
 anyhow = "1"
 thiserror = "2"
 bytes = "1"
@@ -33,6 +34,7 @@ rustls-platform-verifier = "0.7"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }
 moka = { version = "0.12", features = ["sync"] }
 rustls-native-certs = "0.8"
+rustix = { version = "1", features = ["process"] }
 pem = "3"
 time = "0.3"
 tempfile = "3"

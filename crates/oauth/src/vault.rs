@@ -3,6 +3,7 @@ use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
@@ -84,6 +85,7 @@ struct VaultFile {
 pub struct Vault {
     tokens: Mutex<BTreeMap<String, Entry>>,
     file: Option<VaultFile>,
+    generation: AtomicU64,
 }
 
 impl std::fmt::Debug for Vault {
@@ -100,6 +102,7 @@ impl Vault {
         Self {
             tokens: Mutex::default(),
             file: None,
+            generation: AtomicU64::new(0),
         }
     }
 
@@ -133,6 +136,7 @@ impl Vault {
         Ok(Self {
             tokens: Mutex::new(tokens),
             file: Some(VaultFile { path, identity }),
+            generation: AtomicU64::new(0),
         })
     }
 
@@ -142,6 +146,17 @@ impl Vault {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    pub fn issued(&self) -> Vec<(String, SecretString)> {
+        self.lock()
+            .iter()
+            .map(|(dummy, entry)| (dummy.clone(), SecretString::from(entry.real.as_str())))
+            .collect()
     }
 
     pub fn issue(
@@ -203,6 +218,7 @@ impl Vault {
     }
 
     fn persist(&self, tokens: &BTreeMap<String, Entry>) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
         let Some(file) = &self.file else {
             return;
         };

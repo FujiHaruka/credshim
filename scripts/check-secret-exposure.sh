@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-allowed='^crates/(core/src/inject\.rs|secrets/src/|oauth/src/vault\.rs|oauth/src/token_exchange\.rs)'
+allowed='^crates/(core/src/(inject|scrub)\.rs|secrets/src/|oauth/src/vault\.rs|oauth/src/token_exchange\.rs)'
 
 matches=$(grep -rnE --include='*.rs' 'expose_secret[[:space:]]*\(' crates | grep -v '/tests/' || [[ $? == 1 ]])
 violations=$(printf '%s\n' "$matches" | grep -Ev "$allowed" | grep -v '^$' || [[ $? == 1 ]])

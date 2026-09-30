@@ -4,7 +4,7 @@
 
 ## ルール
 
-- 秘密は必ず `secrecy` の型で持つ。`expose_secret()` を呼べるのは core の差し替え関数（`crates/core/src/inject.rs`）、`crates/secrets/`、oauth の保管庫とトークン交換だけ。`scripts/check-secret-exposure.sh` がCIで検査する。許可先を増やすときはスクリプトの allowlist を変える。
+- 秘密は必ず `secrecy` の型で持つ。`expose_secret()` を呼べるのは core の差し替え関数（`crates/core/src/inject.rs`）とスクラブ（`crates/core/src/scrub.rs`）、`crates/secrets/`、oauth の保管庫とトークン交換だけ。`scripts/check-secret-exposure.sh` がCIで検査する。許可先を増やすときはスクリプトの allowlist を変える。
 - リクエスト／レスポンスのボディを丸ごと読み込まない。例外は oauth のトークンエンドポイント処理だけで、必ずサイズ上限を付ける。
 - ログ、エラー、パニックに秘密やトークンの値を出さない。テストでは `credshim_testkit::fake_secret` で偽秘密を作り、`capture_logs().assert_absent(..)` でログに出ていないことを検査する。
 - 新しい挙動には統合テストを付ける。完了の条件は `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`、`scripts/check-secret-exposure.sh` がすべて通ること。
