@@ -212,3 +212,35 @@ async fn websocket_echo_reports_authorization_and_echoes() {
     ws.send(Message::text("ping-1")).await.unwrap();
     assert_eq!(ws.next().await.unwrap().unwrap(), Message::text("ping-1"));
 }
+
+#[tokio::test]
+async fn trailers_route_sends_trailers_over_h2() {
+    let upstream = MockUpstream::http().alpn(Alpn::H2Only).start().await;
+    let tcp = tokio::net::TcpStream::connect(upstream.addr())
+        .await
+        .unwrap();
+    let (mut sender, connection) = hyper::client::conn::http2::handshake(
+        hyper_util::rt::TokioExecutor::new(),
+        hyper_util::rt::TokioIo::new(tcp),
+    )
+    .await
+    .unwrap();
+    tokio::spawn(connection);
+
+    let request = http::Request::get(upstream.url("127.0.0.1", "/trailers"))
+        .header("te", "trailers")
+        .body(http_body_util::Empty::<bytes::Bytes>::new())
+        .unwrap();
+    let response = sender.send_request(request).await.unwrap();
+    let collected = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .unwrap();
+
+    let trailers = collected.trailers().cloned().expect("trailers missing");
+    assert_eq!(trailers.get("grpc-status").unwrap(), "0");
+    assert_eq!(trailers.get("x-request-te").unwrap(), "trailers");
+    assert_eq!(
+        collected.to_bytes(),
+        credshim_testkit::TRAILER_BODY.as_bytes()
+    );
+}

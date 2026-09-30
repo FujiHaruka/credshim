@@ -142,6 +142,7 @@ struct Handler {
     upstream: Upstream,
     client: Client<Connector, ProxyBody>,
     connect_timeout: Duration,
+    idle_timeout: Duration,
     handshake_timeout: Duration,
     intercept: Option<Intercept>,
     injector: Arc<Injector>,
@@ -161,6 +162,7 @@ impl Handler {
             upstream,
             client,
             connect_timeout: config.connect_timeout,
+            idle_timeout: config.idle_timeout,
             handshake_timeout: config.header_read_timeout,
             intercept: config.intercept.clone(),
             injector: config.injector.clone(),
@@ -222,6 +224,7 @@ impl Handler {
             host.clone(),
             port,
             self.connect_timeout,
+            self.idle_timeout,
         )
         .await
         {

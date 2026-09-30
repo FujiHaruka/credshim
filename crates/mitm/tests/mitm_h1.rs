@@ -178,7 +178,7 @@ async fn intercepted_host_is_served_a_dev_ca_leaf_for_that_name_only() {
         .unwrap_or_else(|_| panic!("{response}"));
     assert_eq!(echo.path, "/mitm");
     assert_eq!(echo.query.as_deref(), Some("x=1"));
-    assert_eq!(echo.header("host"), Some(setup.target(API).as_str()));
+    assert_eq!(echo.authority.as_deref(), Some(setup.target(API).as_str()));
     assert_eq!(setup.mock.request_count(), 1);
 }
 

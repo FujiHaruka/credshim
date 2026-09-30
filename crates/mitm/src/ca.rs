@@ -140,7 +140,7 @@ impl CertificateAuthority {
         .with_no_client_auth()
         .with_single_cert(vec![cert.der().clone()], key_der)
         .map_err(|e| e.to_string())?;
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         Ok(Arc::new(config))
     }
 }

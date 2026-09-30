@@ -6,7 +6,8 @@ pub mod upstream;
 pub use ca::{LeafCert, LeafOptions, TestCa};
 pub use logs::{LogCapture, capture_logs, fake_secret};
 pub use upstream::{
-    Alpn, Echo, MOCK_COMPLETION, MockUpstream, RecordedRequest, SseTick, UploadSummary,
+    Alpn, Echo, MOCK_COMPLETION, MockUpstream, RecordedRequest, SseTick, TRAILER_BODY,
+    UploadSummary,
 };
 
 pub fn install_crypto_provider() {

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -15,6 +15,8 @@ use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{any, get, post};
 use futures_util::{Stream, StreamExt};
+use http_body_util::StreamBody;
+use hyper::body::Frame;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
@@ -46,6 +48,7 @@ pub struct RecordedRequest {
 struct Shared {
     requests: Mutex<Vec<RecordedRequest>>,
     sse_streams_closed: AtomicUsize,
+    bytes_produced: AtomicU64,
 }
 
 pub struct MockUpstreamBuilder {
@@ -64,6 +67,7 @@ pub struct MockUpstream {
 pub struct Echo {
     pub method: String,
     pub path: String,
+    pub authority: Option<String>,
     pub query: Option<String>,
     pub version: String,
     pub headers: BTreeMap<String, Vec<String>>,
@@ -130,6 +134,10 @@ impl MockUpstream {
 
     pub fn sse_streams_closed(&self) -> usize {
         self.shared.sse_streams_closed.load(Ordering::SeqCst)
+    }
+
+    pub fn bytes_produced(&self) -> u64 {
+        self.shared.bytes_produced.load(Ordering::SeqCst)
     }
 }
 
@@ -206,6 +214,7 @@ fn router(shared: Arc<Shared>) -> Router {
     Router::new()
         .route("/sse", get(sse))
         .route("/bytes/{len}", get(bytes))
+        .route("/trailers", any(trailers))
         .route("/upload", post(upload))
         .route("/ws", any(websocket))
         .route("/status/{code}", any(status))
@@ -238,9 +247,15 @@ async fn echo(
             .or_default()
             .push(String::from_utf8_lossy(value.as_bytes()).into_owned());
     }
+    let authority = uri.authority().map(ToString::to_string).or_else(|| {
+        headers
+            .get("host")
+            .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+    });
     Json(Echo {
         method: method.to_string(),
         path: uri.path().to_string(),
+        authority,
         query: uri.query().map(str::to_string),
         version: format!("{version:?}"),
         headers: map,
@@ -293,12 +308,37 @@ pub fn now_us() -> u128 {
         .as_micros()
 }
 
-async fn bytes(Path(len): Path<u64>) -> Response {
-    let stream = pattern::chunks(len, 64 * 1024).map(Ok::<_, Infallible>);
+async fn bytes(State(shared): State<Arc<Shared>>, Path(len): Path<u64>) -> Response {
+    let stream = pattern::chunks(len, 64 * 1024).map(move |chunk| {
+        shared
+            .bytes_produced
+            .fetch_add(chunk.len() as u64, Ordering::SeqCst);
+        Ok::<_, Infallible>(chunk)
+    });
     Response::builder()
         .header("content-type", "application/octet-stream")
         .header("content-length", len)
         .body(Body::from_stream(stream))
+        .unwrap()
+}
+
+pub const TRAILER_BODY: &str = "trailer body";
+
+async fn trailers(headers: HeaderMap) -> Response {
+    let te = headers
+        .get("te")
+        .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+        .unwrap_or_default();
+    let mut trailers = HeaderMap::new();
+    trailers.insert("grpc-status", "0".parse().unwrap());
+    trailers.insert("x-request-te", te.parse().unwrap());
+    let frames = futures_util::stream::iter([
+        Ok::<_, Infallible>(Frame::data(Bytes::from_static(TRAILER_BODY.as_bytes()))),
+        Ok(Frame::trailers(trailers)),
+    ]);
+    Response::builder()
+        .header("trailer", "grpc-status, x-request-te")
+        .body(Body::new(StreamBody::new(frames)))
         .unwrap()
 }
 

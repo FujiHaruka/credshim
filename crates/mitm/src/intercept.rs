@@ -5,14 +5,13 @@ use std::time::Duration;
 
 use http::header::{self, HeaderValue};
 use http::uri::{Authority, PathAndQuery};
-use http::{Request, Response, StatusCode, Uri};
+use http::{Request, Response, StatusCode, Uri, Version};
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
-use hyper::client::conn::http1::SendRequest;
 use hyper::service::service_fn;
 use hyper::upgrade::OnUpgrade;
-use hyper_util::rt::{TokioIo, TokioTimer};
-use tokio::sync::Mutex;
+use hyper_util::client::legacy::Client;
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio_rustls::LazyConfigAcceptor;
 
 use credshim_core::{Destination, InjectError, Injector, Verdict};
@@ -20,10 +19,9 @@ use credshim_core::{Destination, InjectError, Injector, Verdict};
 use crate::audit::{self, Outcome};
 use crate::ca::CertificateAuthority;
 use crate::proxy::{ProxyBody, status, strip_hop_by_hop};
-use crate::upstream::{ConnectError, Upstream};
+use crate::upstream::{ALPN_H2, ConnectError, TargetConnector, Upstream};
 
 const HTTPS_PORT: u16 = 443;
-const ALPN_HTTP1: &[u8] = b"http/1.1";
 
 #[derive(Clone)]
 pub struct Intercept {
@@ -78,11 +76,16 @@ impl VerifiedTarget {
         self.port
     }
 
-    fn host_header(&self) -> String {
-        if self.port == HTTPS_PORT {
-            self.host.clone()
+    fn authority(&self) -> String {
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host)
         } else {
-            format!("{}:{}", self.host, self.port)
+            self.host.clone()
+        };
+        if self.port == HTTPS_PORT {
+            host
+        } else {
+            format!("{host}:{}", self.port)
         }
     }
 
@@ -94,19 +97,22 @@ impl VerifiedTarget {
     }
 
     fn matches(&self, authority: &Authority) -> bool {
-        authority.host().eq_ignore_ascii_case(&self.host)
+        let host = authority.host();
+        let host = host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or(host);
+        host.eq_ignore_ascii_case(&self.host)
             && authority.port_u16().unwrap_or(HTTPS_PORT) == self.port
     }
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum SessionError {
-    #[error("timed out connecting to upstream")]
-    Timeout,
+enum UpgradeError {
     #[error(transparent)]
     Connect(#[from] ConnectError),
-    #[error("upstream HTTP handshake failed: {0}")]
-    Handshake(#[from] hyper::Error),
+    #[error("upstream HTTP/1.1 exchange failed: {0}")]
+    Http(#[from] hyper::Error),
 }
 
 fn inject(
@@ -119,10 +125,9 @@ fn inject(
 
 pub(crate) struct Session {
     target: VerifiedTarget,
-    upstream: Upstream,
     injector: Arc<Injector>,
-    connect_timeout: Duration,
-    sender: Mutex<SendRequest<ProxyBody>>,
+    connector: TargetConnector,
+    client: Client<TargetConnector, ProxyBody>,
 }
 
 impl Session {
@@ -132,14 +137,18 @@ impl Session {
         host: String,
         port: u16,
         connect_timeout: Duration,
-    ) -> Result<Self, SessionError> {
-        let sender = connect(&upstream, &host, port, connect_timeout).await?;
+        idle_timeout: Duration,
+    ) -> Result<Self, ConnectError> {
+        let connector = TargetConnector::open(upstream, &host, port, connect_timeout).await?;
+        let client = Client::builder(TokioExecutor::new())
+            .pool_timer(TokioTimer::new())
+            .pool_idle_timeout(idle_timeout)
+            .build(connector.clone());
         Ok(Self {
             target: VerifiedTarget { host, port },
-            upstream,
             injector,
-            connect_timeout,
-            sender: Mutex::new(sender),
+            connector,
+            client,
         })
     }
 
@@ -180,11 +189,18 @@ impl Session {
             .into_stream(config)
             .await
             .map_err(|e| format!("downstream TLS failed: {e}"))?;
-        tokio::spawn(self.serve_http1(TokioIo::new(tls)));
+        let h2 = tls.get_ref().1.alpn_protocol() == Some(ALPN_H2);
+        tracing::debug!(
+            host = %self.target.host,
+            port = self.target.port,
+            protocol = if h2 { "h2" } else { "http/1.1" },
+            "MITM session established"
+        );
+        tokio::spawn(self.serve_connection(TokioIo::new(tls), h2));
         Ok(())
     }
 
-    async fn serve_http1<S>(self, io: TokioIo<S>)
+    async fn serve_connection<S>(self, io: TokioIo<S>, h2: bool)
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
@@ -194,11 +210,19 @@ impl Session {
             let session = session.clone();
             async move { Ok::<_, Infallible>(session.handle(req).await) }
         });
-        if let Err(err) = hyper::server::conn::http1::Builder::new()
-            .timer(TokioTimer::new())
-            .serve_connection(io, service)
-            .await
-        {
+        let result = if h2 {
+            hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                .timer(TokioTimer::new())
+                .serve_connection(io, service)
+                .await
+        } else {
+            hyper::server::conn::http1::Builder::new()
+                .timer(TokioTimer::new())
+                .serve_connection(io, service)
+                .with_upgrades()
+                .await
+        };
+        if let Err(err) = result {
             tracing::debug!(%host, error = %err, "MITM connection ended with error");
         }
     }
@@ -225,7 +249,7 @@ impl Session {
         body: Incoming,
     ) -> (Outcome, Response<ProxyBody>) {
         let target = &self.target;
-        if !self.addressed_to_target(&parts.uri, &parts.headers) {
+        if !self.addressed_to_target(&parts) {
             tracing::warn!(
                 host = %target.host,
                 port = target.port,
@@ -264,73 +288,186 @@ impl Session {
                 );
             }
         };
-        strip_hop_by_hop(&mut parts.headers);
-        let Ok(host_header) = HeaderValue::from_str(&target.host_header()) else {
-            return (outcome, status(StatusCode::BAD_REQUEST));
+        let response = match websocket_upgrade(&parts) {
+            Some(protocol) => self.upgrade(parts, body, protocol).await,
+            None => self.forward(parts, body).await,
         };
-        parts.headers.insert(header::HOST, host_header);
-        parts.uri = origin_form(&parts.uri);
-        parts.version = http::Version::HTTP_11;
-        let req = Request::from_parts(parts, body.boxed());
+        (outcome, response)
+    }
 
-        let response = match self.send(req).await {
+    async fn forward(
+        &self,
+        mut parts: http::request::Parts,
+        body: Incoming,
+    ) -> Response<ProxyBody> {
+        let target = &self.target;
+        strip_hop_by_hop_keeping_trailers(&mut parts.headers);
+        parts.headers.remove(header::HOST);
+        if parts.version == Version::HTTP_2 {
+            join_cookies(&mut parts.headers);
+        }
+        let Ok(uri) = absolute_uri(target, &parts.uri) else {
+            return status(StatusCode::BAD_REQUEST);
+        };
+        parts.uri = uri;
+        parts.version = Version::HTTP_11;
+        match self
+            .client
+            .request(Request::from_parts(parts, body.boxed()))
+            .await
+        {
             Ok(res) => {
                 let (mut parts, body) = res.into_parts();
-                strip_hop_by_hop(&mut parts.headers);
+                strip_hop_by_hop_keeping_trailers(&mut parts.headers);
+                parts.version = Version::HTTP_11;
                 Response::from_parts(parts, body.boxed())
             }
             Err(err) => {
                 tracing::warn!(host = %target.host, port = target.port, error = %err, "intercepted request failed");
                 status(StatusCode::BAD_GATEWAY)
             }
-        };
-        (outcome, response)
-    }
-
-    fn addressed_to_target(&self, uri: &Uri, headers: &http::HeaderMap) -> bool {
-        let uri_ok = uri
-            .authority()
-            .is_none_or(|authority| self.target.matches(authority));
-        let host_ok = headers
-            .get(header::HOST)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<Authority>().ok())
-            .is_some_and(|authority| self.target.matches(&authority));
-        uri_ok && host_ok
-    }
-
-    async fn send(&self, req: Request<ProxyBody>) -> Result<Response<Incoming>, SessionError> {
-        let mut sender = self.sender.lock().await;
-        if sender.ready().await.is_err() {
-            *sender = connect(
-                &self.upstream,
-                &self.target.host,
-                self.target.port,
-                self.connect_timeout,
-            )
-            .await?;
         }
+    }
+
+    async fn upgrade(
+        &self,
+        mut parts: http::request::Parts,
+        body: Incoming,
+        protocol: HeaderValue,
+    ) -> Response<ProxyBody> {
+        let target = &self.target;
+        let downstream = parts.extensions.remove::<OnUpgrade>();
+        strip_hop_by_hop(&mut parts.headers);
+        parts
+            .headers
+            .insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
+        parts.headers.insert(header::UPGRADE, protocol);
+        let Ok(host) = HeaderValue::from_str(&target.authority()) else {
+            return status(StatusCode::BAD_REQUEST);
+        };
+        parts.headers.insert(header::HOST, host);
+        parts.uri = origin_form(&parts.uri);
+        let req = Request::from_parts(parts, body.boxed());
+        let mut res = match self.send_upgrade(req).await {
+            Ok(res) => res,
+            Err(err) => {
+                tracing::warn!(host = %target.host, port = target.port, error = %err, "upgrade request failed");
+                return status(StatusCode::BAD_GATEWAY);
+            }
+        };
+        if res.status() != StatusCode::SWITCHING_PROTOCOLS {
+            let (mut parts, body) = res.into_parts();
+            strip_hop_by_hop(&mut parts.headers);
+            return Response::from_parts(parts, body.boxed());
+        }
+        let Some(downstream) = downstream else {
+            return status(StatusCode::BAD_GATEWAY);
+        };
+        let upstream = hyper::upgrade::on(&mut res);
+        let host = target.host.clone();
+        tokio::spawn(async move {
+            match tokio::try_join!(downstream, upstream) {
+                Ok((downstream, upstream)) => {
+                    let mut downstream = TokioIo::new(downstream);
+                    let mut upstream = TokioIo::new(upstream);
+                    if let Err(err) =
+                        tokio::io::copy_bidirectional(&mut downstream, &mut upstream).await
+                    {
+                        tracing::debug!(%host, error = %err, "upgraded connection closed with error");
+                    }
+                }
+                Err(err) => tracing::debug!(%host, error = %err, "connection upgrade failed"),
+            }
+        });
+        let (parts, body) = res.into_parts();
+        Response::from_parts(parts, body.boxed())
+    }
+
+    async fn send_upgrade(
+        &self,
+        req: Request<ProxyBody>,
+    ) -> Result<Response<Incoming>, UpgradeError> {
+        let tls = self.connector.connect_http1().await?;
+        let (mut sender, connection) =
+            hyper::client::conn::http1::handshake(TokioIo::new(tls)).await?;
+        let host = self.target.host.clone();
+        tokio::spawn(async move {
+            if let Err(err) = connection.with_upgrades().await {
+                tracing::debug!(%host, error = %err, "upstream upgrade connection ended with error");
+            }
+        });
         Ok(sender.send_request(req).await?)
+    }
+
+    fn addressed_to_target(&self, parts: &http::request::Parts) -> bool {
+        let uri_authority = parts.uri.authority();
+        let uri_ok = uri_authority.is_none_or(|authority| self.target.matches(authority));
+        let host_ok = match parts.headers.get(header::HOST) {
+            Some(value) => value
+                .to_str()
+                .ok()
+                .and_then(|value| value.parse::<Authority>().ok())
+                .is_some_and(|authority| self.target.matches(&authority)),
+            None => parts.version == Version::HTTP_2 && uri_authority.is_some(),
+        };
+        uri_ok && host_ok
     }
 }
 
-async fn connect(
-    upstream: &Upstream,
-    host: &str,
-    port: u16,
-    timeout: Duration,
-) -> Result<SendRequest<ProxyBody>, SessionError> {
-    let tls = tokio::time::timeout(timeout, upstream.connect_tls(host, port, &[ALPN_HTTP1]))
-        .await
-        .map_err(|_| SessionError::Timeout)??;
-    let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tls)).await?;
-    let host = host.to_string();
-    tokio::spawn(async move {
-        if let Err(err) = connection.await {
-            tracing::debug!(%host, port, error = %err, "upstream connection ended with error");
-        }
-    });
-    Ok(sender)
+fn strip_hop_by_hop_keeping_trailers(headers: &mut http::HeaderMap) {
+    let wants_trailers = headers
+        .get(header::TE)
+        .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"trailers"));
+    let declared: Vec<HeaderValue> = headers.get_all(header::TRAILER).iter().cloned().collect();
+    strip_hop_by_hop(headers);
+    if wants_trailers {
+        headers.insert(header::TE, HeaderValue::from_static("trailers"));
+    }
+    for value in declared {
+        headers.append(header::TRAILER, value);
+    }
+}
+
+fn websocket_upgrade(parts: &http::request::Parts) -> Option<HeaderValue> {
+    if parts.version != Version::HTTP_11 {
+        return None;
+    }
+    let connection_upgrade = parts
+        .headers
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|token| token.trim().eq_ignore_ascii_case("upgrade"));
+    let protocol = parts.headers.get(header::UPGRADE)?;
+    connection_upgrade.then(|| protocol.clone())
+}
+
+fn join_cookies(headers: &mut http::HeaderMap) {
+    let cookies: Vec<&[u8]> = headers
+        .get_all(header::COOKIE)
+        .iter()
+        .map(HeaderValue::as_bytes)
+        .collect();
+    if cookies.len() < 2 {
+        return;
+    }
+    let joined = cookies.join(&b"; "[..]);
+    if let Ok(value) = HeaderValue::from_bytes(&joined) {
+        headers.insert(header::COOKIE, value);
+    }
+}
+
+fn absolute_uri(target: &VerifiedTarget, uri: &Uri) -> Result<Uri, http::Error> {
+    let path = uri
+        .path_and_query()
+        .cloned()
+        .unwrap_or_else(|| PathAndQuery::from_static("/"));
+    Uri::builder()
+        .scheme("https")
+        .authority(target.authority())
+        .path_and_query(path)
+        .build()
 }
 
 fn origin_form(uri: &Uri) -> Uri {

@@ -1,5 +1,13 @@
+use std::future::Future;
 use std::io;
-use std::sync::Arc;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+use std::time::Duration;
+
+use http::Uri;
+use hyper_util::client::legacy::connect::{Connected, Connection};
+use hyper_util::rt::TokioIo;
 
 use rustls::ClientConfig;
 use rustls_pki_types::ServerName;
@@ -41,6 +49,8 @@ pub enum ConnectError {
     },
     #[error("invalid upstream server name {0:?}")]
     InvalidName(String),
+    #[error("timed out connecting to upstream {host}:{port}")]
+    Timeout { host: String, port: u16 },
 }
 
 impl Upstream {
@@ -107,6 +117,21 @@ impl Upstream {
                 source,
             })
     }
+
+    pub(crate) async fn connect_tls_within(
+        &self,
+        host: &str,
+        port: u16,
+        alpn: &[&[u8]],
+        timeout: Duration,
+    ) -> Result<TlsStream<TcpStream>, ConnectError> {
+        tokio::time::timeout(timeout, self.connect_tls(host, port, alpn))
+            .await
+            .map_err(|_| ConnectError::Timeout {
+                host: host.to_string(),
+                port,
+            })?
+    }
 }
 
 fn crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
@@ -120,4 +145,137 @@ fn client_config(verifier: Verifier) -> ClientConfig {
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(verifier))
         .with_no_client_auth()
+}
+
+pub(crate) const ALPN_H2: &[u8] = b"h2";
+pub(crate) const ALPN_HTTP1: &[u8] = b"http/1.1";
+
+pub(crate) struct UpstreamIo(TokioIo<TlsStream<TcpStream>>);
+
+impl UpstreamIo {
+    pub(crate) fn new(tls: TlsStream<TcpStream>) -> Self {
+        Self(TokioIo::new(tls))
+    }
+}
+
+impl Connection for UpstreamIo {
+    fn connected(&self) -> Connected {
+        let connected = Connected::new();
+        if self.0.inner().get_ref().1.alpn_protocol() == Some(ALPN_H2) {
+            connected.negotiated_h2()
+        } else {
+            connected
+        }
+    }
+}
+
+impl hyper::rt::Read for UpstreamIo {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: hyper::rt::ReadBufCursor<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.0).poll_read(cx, buf)
+    }
+}
+
+impl hyper::rt::Write for UpstreamIo {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.0).poll_shutdown(cx)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.0.is_write_vectored()
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.0).poll_write_vectored(cx, bufs)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct TargetConnector {
+    upstream: Upstream,
+    host: String,
+    port: u16,
+    timeout: Duration,
+    verified: Arc<Mutex<Option<TlsStream<TcpStream>>>>,
+}
+
+impl TargetConnector {
+    pub(crate) async fn open(
+        upstream: Upstream,
+        host: &str,
+        port: u16,
+        timeout: Duration,
+    ) -> Result<Self, ConnectError> {
+        let tls = upstream
+            .connect_tls_within(host, port, &[ALPN_H2, ALPN_HTTP1], timeout)
+            .await?;
+        Ok(Self {
+            upstream,
+            host: host.to_string(),
+            port,
+            timeout,
+            verified: Arc::new(Mutex::new(Some(tls))),
+        })
+    }
+
+    pub(crate) async fn connect_http1(&self) -> Result<TlsStream<TcpStream>, ConnectError> {
+        self.upstream
+            .connect_tls_within(&self.host, self.port, &[ALPN_HTTP1], self.timeout)
+            .await
+    }
+}
+
+impl tower_service::Service<Uri> for TargetConnector {
+    type Response = UpstreamIo;
+    type Error = ConnectError;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _: Uri) -> Self::Future {
+        let verified = self
+            .verified
+            .lock()
+            .expect("connector lock poisoned")
+            .take();
+        let connector = self.clone();
+        Box::pin(async move {
+            let tls = match verified {
+                Some(tls) => tls,
+                None => {
+                    connector
+                        .upstream
+                        .connect_tls_within(
+                            &connector.host,
+                            connector.port,
+                            &[ALPN_H2, ALPN_HTTP1],
+                            connector.timeout,
+                        )
+                        .await?
+                }
+            };
+            Ok(UpstreamIo::new(tls))
+        })
+    }
 }

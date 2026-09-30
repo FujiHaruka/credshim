@@ -5,14 +5,19 @@ use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use common::{client_via, connect, exchange, raw_exchange, tls_over};
+use bytes::Bytes;
+use common::{
+    COMBOS, Downstream, client_for, connect, exchange, h2_over_proxy, raw_exchange, tls_over,
+    upstream_version,
+};
 use credshim_core::{InjectSpec, Injector, RuleSet, RuleSpec, Secrets};
 use credshim_mitm::{
     BindError, CertificateAuthority, Intercept, Proxy, ProxyConfig, TestingHooks, Upstream,
 };
 use credshim_testkit::{
-    Echo, MockUpstream, TestCa, capture_logs, fake_secret, install_crypto_provider,
+    Alpn, Echo, MockUpstream, TestCa, capture_logs, fake_secret, install_crypto_provider,
 };
+use http_body_util::{BodyExt, Full};
 use rustls::RootCertStore;
 use secrecy::SecretString;
 
@@ -32,6 +37,7 @@ struct Fixture {
     dev_ca: Arc<CertificateAuthority>,
     mock: MockUpstream,
     secrets: HashMap<&'static str, String>,
+    downstream: Downstream,
     _dir: tempfile::TempDir,
 }
 
@@ -56,9 +62,16 @@ fn header(name: &str) -> InjectSpec {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with(Downstream::Http1, Alpn::Both).await
+    }
+
+    async fn with(downstream: Downstream, alpn: Alpn) -> Self {
         install_crypto_provider();
         let upstream_ca = TestCa::new();
-        let mock = MockUpstream::https(upstream_ca.issue(&HOSTS)).start().await;
+        let mock = MockUpstream::https(upstream_ca.issue(&HOSTS))
+            .alpn(alpn)
+            .start()
+            .await;
         let dir = tempfile::tempdir().unwrap();
         let dev_ca = Arc::new(CertificateAuthority::init(dir.path()).unwrap());
         let upstream = Upstream::with_testing_hooks(TestingHooks {
@@ -114,14 +127,16 @@ impl Fixture {
             dev_ca,
             mock,
             secrets: secret_values,
+            downstream,
             _dir: dir,
         }
     }
 
     fn client(&self) -> reqwest::Client {
-        client_via(
+        client_for(
             self.proxy.local_addr(),
-            Some(self.dev_ca.cert_der().as_ref()),
+            self.dev_ca.cert_der().as_ref(),
+            self.downstream,
         )
     }
 
@@ -141,6 +156,19 @@ impl Fixture {
         let mut tls = tls_over(tcp, self.dev_roots(), host, true).await.unwrap();
         exchange(&mut tls, request).await
     }
+
+    async fn raw_h2(&self, request: http::Request<Full<Bytes>>) -> (http::StatusCode, Bytes) {
+        let mut sender = h2_over_proxy(
+            self.proxy.local_addr(),
+            &format!("{}:443", request.uri().host().unwrap()),
+            self.dev_roots(),
+        )
+        .await;
+        let response = sender.send_request(request).await.unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (status, body)
+    }
 }
 
 fn body_of(response: &str) -> &str {
@@ -149,42 +177,48 @@ fn body_of(response: &str) -> &str {
 
 #[tokio::test]
 async fn openai_bearer_dummy_reaches_the_upstream_as_the_real_secret() {
-    let fixture = Fixture::new().await;
+    for (downstream, alpn) in COMBOS {
+        let fixture = Fixture::with(downstream, alpn).await;
 
-    let echo: Echo = fixture
-        .client()
-        .post(format!("https://{OPENAI}/v1/responses"))
-        .bearer_auth(OPENAI_DUMMY)
-        .body("{}")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+        let response = fixture
+            .client()
+            .post(format!("https://{OPENAI}/v1/responses"))
+            .bearer_auth(OPENAI_DUMMY)
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.version(), downstream.version());
+        let echo: Echo = response.json().await.unwrap();
 
-    assert_eq!(
-        echo.header("authorization"),
-        Some(format!("Bearer {}", fixture.secret("openai")).as_str())
-    );
-    assert_eq!(echo.body, "{}");
+        assert_eq!(echo.version, upstream_version(alpn), "{downstream:?}");
+        assert_eq!(echo.authority.as_deref(), Some(OPENAI));
+        assert_eq!(
+            echo.header("authorization"),
+            Some(format!("Bearer {}", fixture.secret("openai")).as_str())
+        );
+        assert_eq!(echo.body, "{}");
+    }
 }
 
 #[tokio::test]
 async fn dummy_sent_to_another_intercepted_host_is_403_and_nothing_reaches_upstream() {
-    let fixture = Fixture::new().await;
+    for (downstream, alpn) in COMBOS {
+        let fixture = Fixture::with(downstream, alpn).await;
 
-    let response = fixture
-        .client()
-        .post(format!("https://{ANTHROPIC}/v1/messages"))
-        .header("x-api-key", OPENAI_DUMMY)
-        .body("{}")
-        .send()
-        .await
-        .unwrap();
+        let response = fixture
+            .client()
+            .post(format!("https://{ANTHROPIC}/v1/messages"))
+            .header("x-api-key", OPENAI_DUMMY)
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
 
-    assert_eq!(response.status(), 403);
-    assert_eq!(fixture.mock.request_count(), 0);
+        assert_eq!(response.version(), downstream.version());
+        assert_eq!(response.status(), 403);
+        assert_eq!(fixture.mock.request_count(), 0);
+    }
 }
 
 #[tokio::test]
@@ -208,7 +242,13 @@ async fn dummy_over_plain_http_is_403_and_nothing_reaches_upstream() {
 
 #[tokio::test]
 async fn basic_auth_and_query_parameters_are_injected() {
-    let fixture = Fixture::new().await;
+    for (downstream, alpn) in COMBOS {
+        let fixture = Fixture::with(downstream, alpn).await;
+        assert_basic_and_query_injected(&fixture).await;
+    }
+}
+
+async fn assert_basic_and_query_injected(fixture: &Fixture) {
     let client = fixture.client();
 
     let echo: Echo = client
@@ -247,24 +287,8 @@ async fn basic_auth_and_query_parameters_are_injected() {
     );
 }
 
-#[tokio::test]
-async fn request_without_dummies_is_forwarded_unchanged() {
-    let fixture = Fixture::new().await;
-
-    let response = fixture
-        .raw_tls(
-            OPENAI,
-            &format!(
-                "GET /v1/models?a=%41+b&&key=sk-other HTTP/1.1\r\nHost: {OPENAI}\r\nAuthorization: Bearer sk-someone-else\r\nX-Custom: a  b\r\nX-Custom: second\r\nConnection: close\r\n\r\n"
-            ),
-        )
-        .await;
-
-    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
-    let echo: Echo = serde_json::from_str(body_of(&response)).unwrap();
-    assert_eq!(echo.query.as_deref(), Some("a=%41+b&&key=sk-other"));
-    let expected: std::collections::BTreeMap<String, Vec<String>> = [
-        ("host", vec![OPENAI]),
+fn expected_unchanged_headers() -> std::collections::BTreeMap<String, Vec<String>> {
+    [
         ("authorization", vec!["Bearer sk-someone-else"]),
         ("x-custom", vec!["a  b", "second"]),
     ]
@@ -275,14 +299,61 @@ async fn request_without_dummies_is_forwarded_unchanged() {
             values.into_iter().map(String::from).collect(),
         )
     })
-    .collect();
-    assert_eq!(echo.headers, expected);
+    .collect()
+}
+
+fn assert_unchanged(echo: Echo, alpn: Alpn) {
+    let mut echo = echo;
+    assert_eq!(echo.version, upstream_version(alpn));
+    assert_eq!(echo.query.as_deref(), Some("a=%41+b&&key=sk-other"));
+    assert_eq!(echo.authority.as_deref(), Some(OPENAI));
+    let host = echo.headers.remove("host");
+    match alpn {
+        Alpn::H1Only => assert_eq!(host, Some(vec![OPENAI.to_string()])),
+        _ => assert_eq!(host, None),
+    }
+    assert_eq!(echo.headers, expected_unchanged_headers());
+}
+
+#[tokio::test]
+async fn request_without_dummies_is_forwarded_unchanged() {
+    for alpn in [Alpn::H1Only, Alpn::H2Only] {
+        let fixture = Fixture::with(Downstream::Http1, alpn).await;
+        let response = fixture
+            .raw_tls(
+                OPENAI,
+                &format!(
+                    "GET /v1/models?a=%41+b&&key=sk-other HTTP/1.1\r\nHost: {OPENAI}\r\nAuthorization: Bearer sk-someone-else\r\nX-Custom: a  b\r\nX-Custom: second\r\nConnection: close\r\n\r\n"
+                ),
+            )
+            .await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert_unchanged(serde_json::from_str(body_of(&response)).unwrap(), alpn);
+
+        let fixture = Fixture::with(Downstream::Http2, alpn).await;
+        let request =
+            http::Request::get(format!("https://{OPENAI}/v1/models?a=%41+b&&key=sk-other"))
+                .header("authorization", "Bearer sk-someone-else")
+                .header("x-custom", "a  b")
+                .header("x-custom", "second")
+                .body(Full::new(Bytes::new()))
+                .unwrap();
+        let (status, body) = fixture.raw_h2(request).await;
+        assert_eq!(status, 200);
+        assert_unchanged(serde_json::from_slice(&body).unwrap(), alpn);
+    }
 }
 
 #[tokio::test]
 async fn secrets_and_dummies_never_reach_the_logs_and_requests_are_audited() {
+    for (downstream, alpn) in COMBOS {
+        assert_logs_clean_and_audited(downstream, alpn).await;
+    }
+}
+
+async fn assert_logs_clean_and_audited(downstream: Downstream, alpn: Alpn) {
     let logs = capture_logs();
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::with(downstream, alpn).await;
     let client = fixture.client();
 
     client
