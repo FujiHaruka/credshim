@@ -130,6 +130,21 @@ session-bind の無い要求、任意データへの署名要求は拒否する�
 - [ ] 本物のアクセスキー ID、シークレットがログ、エラー、クライアントへの応答に現れない。
 - [ ] 人間が本物のキーを登録し、実 AWS で `aws sts get-caller-identity` と `aws s3 cp` を確認する（手動マイルストーン）。
 
+**実装メモ（Phase 9）**
+
+- 置き場所は新しいクレート `credshim-aws`（`crates/aws`）。`auth.rs` が Authorization と `X-Amz-Date` の解析、`operation.rs` が操作名の候補と認証情報を発行する操作の照合、`policy.rs` が I/O の無い判定、`resign.rs` が再署名（`expose_secret` の許可先に追加）。mitm は `Session::relay` の中で core の差し替えと OAuth の交換のあとにこれを呼ぶ。
+- 束縛：`[[aws_key]]` のホストは常に `amazonaws.com` 配下で、`Intercept` に接尾辞での MITM 指定（`with_domains`）を足した。`services`・`regions` は資格スコープで照合する。ダミーが `amazonaws.com` 配下以外（平文 HTTP を含む）に現れれば403、Authorization の `Credential=` 以外（署名付き URL のクエリなど）に現れても403。ダミーはルールの dummy と互いに含まない（設定読み込み時に検査）。
+- 再署名：クライアントの `SignedHeaders` と同じ集合（`host`・`x-amz-date` は aws-sigv4 が入れる。`authorization`・`x-amz-security-token` は捨てる）を、受け取った値のまま、クライアントの `X-Amz-Date` の時刻で署名する。`excluded_headers` は空にして、クライアントが署名したヘッダーを落とさない。URI は検証済みの接続先から作る。S3 は `PercentEncodingMode::Single` と `UriPathNormalizationMode::Disabled`、他は既定。
+- ボディ：S3（スコープのサービスが `s3`）は `x-amz-content-sha256` の値（実ハッシュ、`UNSIGNED-PAYLOAD`、`STREAMING-UNSIGNED-PAYLOAD-TRAILER`）で署名しボディはストリームのまま。`STREAMING-` で始まる他の値は400、ヘッダーが無いか不正なら400。S3 以外は上限付きで読み（既定 16MiB、`[aws] max_body_bytes`）、超えたら413。DynamoDB の `BatchWriteItem`（16MB）まで通る値にした。Lambda の zip の直接アップロードなど、それより大きい要求は上限を上げるか S3 経由にする。
+- 認証情報を発行する操作：`scripts/aws/credential-operations.py` が botocore のモデル（aws-cli 2.37.7 同梱）から37操作を抜き出し、`credential_operations.rs` を生成する。操作名の候補はクエリ文字列とボディのフォームの `Action`（大文字小文字を区別しない。片方に無害な名前を書いてもう片方で発行させる迂回を塞ぐ）、`X-Amz-Target` の最後の `.` 以降、rpc-v2-cbor のパスの操作名。REST の操作はメソッドとパスのテンプレート（`{x}` は1セグメント、S3 の先頭の `{Bucket}` は仮想ホスト形式のため省略可、クエリは必須キー）で照合する。サービスはスコープの署名名（`s3express` は `s3` として扱う）か、ホストのラベルがエンドポイント接頭辞と一致するかで決める。
+- 署名の要らない発行 API：SSO OIDC（`oidc`・`oidc-fips`）、SSO ポータル（`portal.sso`・`portal.sso-fips`）は `amazonaws.com`・`amazonaws.com.cn`・`api.aws`・`api.amazonwebservices.com.cn` 配下で、signin は `signin.aws.amazon.com`・`signin.aws`・`signin.amazonaws.cn` 配下で、CONNECT と平文 HTTP の段階で AWS の設定が無くても403にする。v0.1 だけの利用者がプロキシ経由で `aws sso login` を実行しても通らなくなる（計画どおり）。STS の `AssumeRoleWithWebIdentity`・`AssumeRoleWithSAML` と Cognito Identity の `GetCredentialsForIdentity` は、AWS のルールがあって `amazonaws.com` 配下を MITM しているときに、ダミーの有無と無関係に操作名で拒否する（STS と Cognito Identity のホストでは、ダミーが無くてもボディを上限付きで読む）。デュアルスタック（`*.api.aws`）の STS は MITM しないので操作名では拒否できない（デュアルスタックは範囲外）。
+- 認証情報以外の、サーバーが使える値を返す操作（`ecr:GetAuthorizationToken`、`codeartifact:GetAuthorizationToken` など）は Phase 9 では拒否せず、正当な「利用」として通す。絞り込みは Phase 11 のサービスと操作の許可リストで行う。
+- 本物のアクセスキー ID はダミーに、シークレットは固定の文字列にスクラブする（`Injector::also_scrub`）。aws-sigv4 は trace レベルのログに署名パラメータ（アクセスキー ID を含む）を出すので、署名の呼び出しの間だけ `NoSubscriber` に切り替える。本物は起動時に読み、アクセスキー ID とシークレットが空か可視 ASCII 以外なら起動しない。
+- 監査ログ：AWS の要求には `service`、`region`（どちらも資格スコープから。解析時に小文字・数字・`-` だけに制限）、`operation`（候補のうち英数字と `_`・`-`・`.` だけのもの）、拒否の理由 `reason`（`not_bound`、`unsupported_location`、`bad_authorization`、`service_not_allowed`、`region_not_allowed`、`credential_operation`、`unsigned_credential_operation`、`signed_chunks`、`bad_payload_hash`、`body_too_large`、`sso_oidc`、`sso_portal`、`signin`）を加えた。再署名の判定は `resign` で、ステータスソケットのカウンタでは `injected` に数える。ルールに当たらない拒否はカウンタに入れない。`credshim tail` は ` aws:<service>/<region>:<operation> (<reason>)` を付けて出す。
+- 設定：`[[aws_key]]`（`name`、`dummy_access_key_id`、`access_key_id` と `secret_access_key` は秘密ストアの名前、`services`、`regions`）と `[aws] max_body_bytes`。`credshim preset aws` は `CREDSHIMAWS` で始まるダミーのルールを出す。`AWS_CA_BUNDLE` などを `credshim env` に出すのは Phase 11。
+- テスト：testkit の `MockAws` は受け取った `SignedHeaders` と本物の鍵で署名を計算し直して照合し、資格スコープのサービスとリージョンがホストと食い違えば拒否する（AWS の前提を模したもの）。aws-chunked はボディのフレームを解いて長さとトレーラーを確かめる。E2E は mise の aws-cli 2.37.7 を `HOME` と `AWS_*` を一時ディレクトリに向けて実行し、`s3 cp` の 3MiB のアップロードが aws-chunked・CRC64NVME のトレーラー・`Expect: 100-continue` で届くことを確かめる。
+- 既知の制約：S3 のオブジェクトが `Content-Encoding: gzip` などで保存されていると、スクラブが有効なときダウンロードが502になる（v0.1 と同じくエンコードされた応答はスクラブできないため）。ワークスペースの `rust-version` は aws-sigv4 に合わせて 1.94.1 に上げた。
+
 ## Phase 10: AWS SSO
 
 このフェーズの終わりで、人間が `credshim` のコマンドで SSO にログインすれば、`~/.aws` にダミーしか無い状態で、SSO のロールの権限で `aws` コマンドが動く。

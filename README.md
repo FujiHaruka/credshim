@@ -126,6 +126,40 @@ host_keys = ["SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU"]
 
 ProxyJump で踏み台にも同じ鍵で入るなら、踏み台のホスト鍵の指紋も `host_keys` に入れる。既存の `~/.ssh` の鍵は取り込まず、新しい鍵に入れ替えて古い鍵は無効化する。
 
+## AWS（静的アクセスキー）
+
+`~/.aws/credentials` にはダミーのアクセスキーだけを置く。`aws` コマンドはダミーで SigV4 署名した要求をプロキシへ送り、CredShim はアクセスキー ID でルールを引いて本物の認証情報で署名し直す。ダミーのシークレットは送信されないので、何を書いてもよい。
+
+```sh
+credshim preset aws >> ~/.config/credshim/config.toml   # ダミーのアクセスキー ID は毎回ランダム
+credshim secret set aws-access-key-id                   # 本物のアクセスキー ID
+credshim secret set aws-secret-access-key               # 本物のシークレット
+credshim run
+
+# ~/.aws/credentials
+# [default]
+# aws_access_key_id = <preset が出した dummy_access_key_id>
+# aws_secret_access_key = dummy
+export HTTPS_PROXY=http://127.0.0.1:8787
+export AWS_CA_BUNDLE=~/.config/credshim/ca/bundle.pem   # 開発CA＋システムのルート（置き換えなので CA 単体は不可）
+aws sts get-caller-identity
+```
+
+```toml
+[aws]
+max_body_bytes = 16777216   # S3 以外で署名のために読むボディの上限（既定 16MiB）
+
+[[aws_key]]
+name = "aws"
+dummy_access_key_id = "CREDSHIMAWS..."
+access_key_id = "aws-access-key-id"          # 秘密ストアの名前
+secret_access_key = "aws-secret-access-key"  # 秘密ストアの名前
+services = ["sts", "s3", "dynamodb"]         # 省略すると全サービス。資格スコープのサービス名で照合
+regions = ["ap-northeast-1"]                 # 省略すると全リージョン
+```
+
+認証情報を発行する操作（`sts:AssumeRole`・`GetSessionToken`、`iam:CreateAccessKey`、`s3:CreateSession` など37操作）は拒否する。SSO OIDC、SSO ポータル、`aws login` の signin のホストへの CONNECT は、AWS の設定が無くても常に拒否する。`aws sso login`、AssumeRole するプロファイル、`aws s3 presign` などクライアント側で署名するもの、S3 Express One Zone は動かない。
+
 ## 監査ログと状態
 
 ```toml
@@ -173,8 +207,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 scripts/check-secret-exposure.sh
 
-# 実SDK（Python、Node）と doctor（Python、Node、Go）の E2E
+# 実SDK（Python、Node）、aws CLI v2 と doctor（Python、Node、Go）の E2E
 (cd crates/e2e/sdk/node && npm ci)
-cargo test -p credshim-e2e -- --ignored
+mise exec -- cargo test -p credshim-e2e -- --ignored
 cargo test -p credshim --test dev_tools -- --ignored
 ```
