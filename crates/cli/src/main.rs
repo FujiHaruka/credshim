@@ -2,6 +2,7 @@ mod config;
 mod doctor;
 mod env;
 mod harden;
+mod leftovers;
 mod preset;
 mod service;
 mod tail;
