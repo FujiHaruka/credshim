@@ -18,9 +18,10 @@
 - `crates/secrets` 秘密ストアのバックエンド
 - `crates/oauth` トークン保管庫、トークンエンドポイント処理
 - `crates/testkit` テスト用CA、モック上流（echo・SSE・大容量・WebSocket、h1/h2）、ログキャプチャ
-- `crates/cli` `credshim` バイナリ
+- `crates/cli` `credshim` バイナリ（設定ファイル、`secret set/list`、`preset`、監査ログ）
+- `crates/e2e` 実SDK（Python、Node）のE2E。`#[ignore]` なので `cargo test -p credshim-e2e -- --ignored`（Node は先に `crates/e2e/sdk/node` で `npm ci`）
 
 ## 環境メモ
 
 - Rust は rustup で `~/.cargo` に入っている。非対話シェルでは `. ~/.cargo/env` が要る。
-- Node は mise 管理（`mise.toml`）。`mise exec -- node` で使う。Python の SDK E2E は `uv run --python 3.13` を使う（システムの python3 は 3.9）。
+- Node は mise 管理（`mise.toml`）。`mise exec -- node` で使い、SDK E2E は `mise exec -- cargo test -p credshim-e2e -- --ignored` で PATH に node を載せる。Python の SDK E2E は `uv run --python 3.13` を使う（システムの python3 は 3.9）。

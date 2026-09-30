@@ -213,6 +213,20 @@ credshim/
 - [ ] 公式の openai SDK（Python と Node）が、モック上流相手にストリーミング込みで動くE2Eテストが通る。
 - [ ] 人間が本物のキーを登録し、実APIでストリーミング応答を確認する（手動マイルストーン）。
 
+**実装メモ（Phase 3）**
+
+- ルールエンジンは `credshim_core::RuleSet::decide`（純粋関数）。全ルールのダミーを、全ヘッダー値、Authorization の Basic をデコードした値、パス、クエリ（生の値とパーセントデコード後の両方）から探す。束縛先（host、port、任意の path prefix）と一致しないルールのダミーが1つでもあれば、他に差し替えがあっても拒否する。束縛先に一致したダミーが設定外の場所にあるだけなら何も変えずに通す。
+- path prefix は区切り単位で一致を見る（`/v1` は `/v10` に一致しない）。上流が正規化しうるドットセグメント、`%2e`・`%2f`・`%5c`、`\` を含むパスは一致しないものとして扱い、ダミーがあれば403にする。
+- ダミーは 24〜256 文字の unreserved 文字（`A-Za-z0-9-._~`）に限る。生の値とパーセントデコード後が同じになり、Basic の `user:pass` とも混ざらない。どのダミーも他のダミーを部分文字列として含んではならない。
+- 差し替えは `crates/core/src/inject.rs` の `Injector::apply` だけが行う。呼び出し元は mitm の `Session::relay` 1か所で、`&VerifiedTarget` を取る `inject()` 経由でしか呼ばない。平文HTTPの転送路は差し替えず、ダミーがあれば403にする（明示許可の仕組みは作っていない）。
+- 秘密値は起動時にすべて読み込み、ヘッダーに入れるルールでは制御文字や前後の空白を含む値を拒否する。差し替えたヘッダー値は sensitive にする。
+- 403 を観測できるのは MITM しているホスト（＝いずれかのルールのホスト）と平文HTTPだけ。ルールに無いホストへの HTTPS は原則7どおり素のトンネルなので中身を見ない（届くのはダミーだけで実害はない）。
+- 設定ファイルは `--config`（既定は `$XDG_CONFIG_HOME/credshim/config.toml`、無ければルール無しで起動）。インターセプト対象はルールのホストから作り、ルールのホストがインターセプト対象に無ければ起動時に `BindError::RuleHostNotIntercepted` で止める。`--intercept` フラグは廃止。未知のキーはエラーにする（`allow_paths` などは後のフェーズで足す）。
+- 秘密ストアは `credshim-secrets` の `SecretStore`（get、set、名前と更新日時だけの list）。age ファイルは X25519 の鍵ファイル（既定は `<path>.key`、初回の `set` で 0600 で作る）で JSON を暗号化し、一時ファイル経由で置き換える。キーチェーンは keyring 3.6（macOS は Keychain、Linux は keyutils）で、列挙できないため名前と更新日時の索引を別項目に持つ。外部コマンドは `{name}` を置換して実行し、標準出力の末尾改行1つを除いた値を使う（set と list は非対応）。
+- 監査ログは tracing のターゲット `credshim::audit`（scheme、host、port、method、クエリ抜きの path、rules、decision、status）。`[audit] path` を設定すると JSON Lines で 0600 のファイルにも書く。
+- SDK E2E は `crates/e2e`（`#[ignore]`、CIでは別ジョブ `sdk-e2e`）。プロキシはプロセス内で起動し、実SDKを子プロセスで動かす。Python（openai 3.x）は `HTTPS_PROXY` と `SSL_CERT_FILE`（結合バンドル）だけで動く。Node 24 の fetch は `NODE_USE_ENV_PROXY=1` が無いとプロキシを使わず直接つながるので、`NODE_EXTRA_CA_CERTS` と合わせて必要。
+- キーチェーンのバックエンドは CI で実物を触らない（テストは偽の `Keychain` 実装で行う）。実キーチェーンでの確認は手動。
+
 ## Phase 4: HTTP/2・ストリーミング・WebSocket
 
 プロトコル面の透過性を仕上げる。差し替えロジックには手を入れず、Phase 3のテストがプロトコルの組み合わせ全部で通ることを目標にする。
@@ -395,5 +409,5 @@ max_token_body_bytes = 65536
 
 - [ ] Webhook の署名検証用シークレット（Stripe など）。受信側の秘密はこの仕組みでは守れない。プロキシが受信時に検証して結果をヘッダーで渡す逆方向の機能を作るか決める。
 - [ ] OAuth のアクセストークンがJWTで、アプリがクレームを読む場合の扱い。ダミーを「同じペイロードで署名だけ無効なJWT」にするか。
-- [ ] 秘密ストアの既定バックエンド（キーチェーンか age ファイルか）。
-- [ ] SDK がキーの形式を検証するサービスの洗い出しと、プリセットのダミー形式の決定。
+- [x] 秘密ストアの既定バックエンド（キーチェーンか age ファイルか）。→ macOS はキーチェーン、それ以外は `$XDG_CONFIG_HOME/credshim/secrets.age` の age ファイル（Linux の keyutils は再起動で消えるため）。
+- [ ] SDK がキーの形式を検証するサービスの洗い出しと、プリセットのダミー形式の決定。→ プリセットは `sk-credshim-openai-`、`sk-ant-credshim-`、`credshim-gemini-` に英数字40文字。openai SDK（Python、Node）は形式を検証しないことをE2Eで確認済み。他サービスの洗い出しは未了。

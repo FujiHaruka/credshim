@@ -32,8 +32,8 @@
 
 | 脅威 | テスト |
 | --- | --- |
-| リポジトリ、環境変数、アプリのメモリ、ログを読む | （Phase 3 以降） |
-| ダミーキー付きリクエストを攻撃者のホストへ送る | （Phase 3） |
+| リポジトリ、環境変数、アプリのメモリ、ログを読む | `crates/mitm/tests/inject.rs` の `secrets_and_dummies_never_reach_the_logs_and_requests_are_audited`、`crates/cli/tests/config.rs` の `secret_list_prints_names_and_times_but_never_values`・`audit_log_records_decisions_as_json_without_values`、`crates/core/tests/rules.rs` の `debug_output_never_contains_secret_values` |
+| ダミーキー付きリクエストを攻撃者のホストへ送る | `crates/mitm/tests/inject.rs` の `dummy_sent_to_another_intercepted_host_is_403_and_nothing_reaches_upstream`・`dummy_over_plain_http_is_403_and_nothing_reaches_upstream`、`crates/core/tests/rules.rs` の `dummy_sent_to_an_unbound_destination_is_denied_and_left_untouched`・`dummy_hidden_anywhere_in_the_request_is_found`・`path_prefix_binds_the_dummy_to_that_subtree` |
 | CONNECT先と内側のHostヘッダーを食い違わせる | （Phase 2） |
 | APIのエラー応答などに本物の値をエコーさせる | （Phase 6） |
 | 設定を書き換えて秘密を別ホストに束縛し直す | （Phase 6） |
