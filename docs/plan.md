@@ -250,6 +250,17 @@ credshim/
 - [ ] SSE途中でクライアントを切ると、モック上流が切断を観測する。
 - [ ] openai SDK のE2EがHTTP/2を有効にしたクライアントでも通る。
 
+**実装メモ（Phase 4）**
+
+- 下流は ALPN で `h2` と `http/1.1` を提示し、交渉結果で hyper の h2 サーバーか h1 サーバー（`with_upgrades`）を選ぶ。交渉結果は debug ログ `MITM session established protocol=...` に出す（値は出さない）。
+- 上流はトンネルごとに hyper-util の legacy `Client` を1つ持つ。コネクタは URI を無視して常に `VerifiedTarget` の host:port へ `h2`・`http/1.1` を提示して TLS 接続し、ALPN が h2 なら h2 で話す。CONNECT に 200 を返す前に検証した最初の接続をコネクタが持っておき、最初のリクエストで使う（検証前に何も送らない性質は Phase 2 のまま）。以降の新規接続も毎回 `connect_tls` で検証する。上流 h1 では同時リクエストの数だけ接続が増える（共有ロックで直列化しない）。
+- 正規化：内側リクエストは Host を外し、URI を `https://<CONNECT先>/<path>` にして HTTP/1.1 として Client に渡す。Client が上流 h1 なら URI から Host を付け（443 は省略）、h2 なら :authority にする。接続固有ヘッダーは除去するが、`te: trailers` と `Trailer` は残す（gRPC 用）。下流 h2 で分割された Cookie は `; ` で連結する。レスポンスも接続固有ヘッダーを除去し、バージョンを HTTP/1.1 に揃える。
+- 宛先検査：URI の authority があれば一致必須、Host があれば一致必須、どちらも無ければ拒否。h1 は Host 必須のまま、h2 は :authority だけでよい。不一致は RST_STREAM ではなくそのストリームにだけ 421 を返す（クライアントが別接続で再試行できる意味のある応答で、h1 とも揃う）。
+- トレーラー：下流 h2 へは常に中継する。下流 h1 へは hyper の制約で、クライアントが `TE: trailers` を送り、かつ上流が `Trailer` ヘッダーで名前を宣言したときだけ届く（宣言の無い h2 上流のトレーラーを h1 クライアントへは渡せない）。
+- WebSocket：下流 h1 で `Connection: upgrade` と `Upgrade` があるリクエストは、差し替え（同じ `inject()`）のあと、プールを使わず ALPN `http/1.1` だけで上流へ新しく接続して送る。101 なら両側の Upgraded を `copy_bidirectional` でつなぐ。h1 を話せない上流（h2 のみ）は 502。
+- バックプレッシャーとクライアント切断は hyper のボディ転送（h1 のソケット、h2 のフロー制御）に任せ、テストで確認している（遅い読み手で上流からの読み込みが止まり、SSE 途中の切断で上流のストリームが閉じる）。
+- SDK E2E の HTTP/2 は Python（httpx の `http2=True`）で確認する。Node の fetch で h2 を使うには `undici` パッケージの追加が要るため、Node は HTTP/1.1 のまま。
+
 ## Phase 5: OAuthトークン保管庫
 
 プロキシはトークンエンドポイントの往復を横取りし、本物のトークンを保管庫にしまってアプリにはダミーを返す。以後のAPI呼び出しは、保管庫の「ダミー→本物」対応を動的なルールとして Phase 3 のエンジンに渡すだけで済む。

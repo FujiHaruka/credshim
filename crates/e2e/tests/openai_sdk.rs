@@ -6,7 +6,7 @@ use std::sync::Arc;
 use credshim_core::{InjectSpec, Injector, RuleSet, RuleSpec, Secrets};
 use credshim_mitm::{CertificateAuthority, Intercept, Proxy, ProxyConfig, TestingHooks, Upstream};
 use credshim_testkit::{
-    MOCK_COMPLETION, MockUpstream, TestCa, fake_secret, install_crypto_provider,
+    MOCK_COMPLETION, MockUpstream, TestCa, capture_logs, fake_secret, install_crypto_provider,
 };
 use secrecy::SecretString;
 use tokio::process::Command;
@@ -127,20 +127,45 @@ fn sdk_dir(runtime: &str) -> PathBuf {
         .join(runtime)
 }
 
+async fn run_python(fixture: &Fixture, extra: &[&str]) -> Output {
+    fixture
+        .sdk_command("uv")
+        .args(["run", "--quiet", "--python", "3.13", "chat.py"])
+        .args(extra)
+        .current_dir(sdk_dir("python"))
+        .output()
+        .await
+        .expect("uv is not installed")
+}
+
 #[tokio::test]
 #[ignore = "needs uv; run with `cargo test -p credshim-e2e -- --ignored`"]
 async fn python_openai_sdk_streams_through_the_proxy() {
     let fixture = Fixture::new().await;
 
-    let output = fixture
-        .sdk_command("uv")
-        .args(["run", "--quiet", "--python", "3.13", "chat.py"])
-        .current_dir(sdk_dir("python"))
-        .output()
-        .await
-        .expect("uv is not installed");
+    let output = run_python(&fixture, &[]).await;
 
     fixture.assert_sdk_ran_with_the_real_secret(&output);
+}
+
+#[tokio::test]
+#[ignore = "needs uv; run with `cargo test -p credshim-e2e -- --ignored`"]
+async fn python_openai_sdk_streams_through_the_proxy_over_http2() {
+    let logs = capture_logs();
+    let fixture = Fixture::new().await;
+
+    let output = run_python(&fixture, &["--http2"]).await;
+
+    fixture.assert_sdk_ran_with_the_real_secret(&output);
+    let contents = logs.contents();
+    assert!(
+        contents
+            .lines()
+            .any(|line| line.contains("MITM session established")
+                && line.contains(r#"protocol="h2""#)),
+        "the SDK did not negotiate h2 with the proxy"
+    );
+    logs.assert_absent(&[&fixture.secret, DUMMY]);
 }
 
 #[tokio::test]
