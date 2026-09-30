@@ -84,12 +84,19 @@ pub trait TokenResolver: Send + Sync + fmt::Debug {
     }
 }
 
+pub trait ScrubSource: Send + Sync + fmt::Debug {
+    fn generation(&self) -> u64;
+
+    fn pairs(&self) -> Vec<(SecretString, String)>;
+}
+
 #[derive(Debug, Default)]
 pub struct Injector {
     rules: RuleSet,
     secrets: Secrets,
     tokens: Option<Arc<dyn TokenResolver>>,
     also_scrub: Vec<(SecretString, String)>,
+    scrub_source: Option<Arc<dyn ScrubSource>>,
     scrubber: Mutex<Option<(u64, Arc<Scrubber>)>>,
     limiter: Limiter,
 }
@@ -113,6 +120,7 @@ impl Injector {
             secrets,
             tokens: None,
             also_scrub: Vec::new(),
+            scrub_source: None,
             scrubber: Mutex::default(),
             limiter: Limiter::default(),
         })
@@ -125,6 +133,11 @@ impl Injector {
 
     pub fn also_scrub(mut self, pairs: Vec<(SecretString, String)>) -> Self {
         self.also_scrub = pairs;
+        self
+    }
+
+    pub fn with_scrub_source(mut self, source: Arc<dyn ScrubSource>) -> Self {
+        self.scrub_source = Some(source);
         self
     }
 
@@ -162,7 +175,15 @@ impl Injector {
     }
 
     pub fn scrubber(&self) -> Arc<Scrubber> {
-        let generation = self.tokens.as_ref().map_or(0, |tokens| tokens.generation());
+        let generation = self
+            .tokens
+            .as_ref()
+            .map_or(0, |tokens| tokens.generation())
+            .wrapping_add(
+                self.scrub_source
+                    .as_ref()
+                    .map_or(0, |source| source.generation()),
+            );
         let mut cached = self
             .scrubber
             .lock()
@@ -184,9 +205,15 @@ impl Injector {
             };
             Some((secret, rule.dummy()))
         });
+        let sourced = self
+            .scrub_source
+            .as_ref()
+            .map(|source| source.pairs())
+            .unwrap_or_default();
         let extra = self
             .also_scrub
             .iter()
+            .chain(&sourced)
             .map(|(real, replacement)| (real, replacement.as_str()));
         let scrubber =
             Arc::new(Scrubber::new(statics.chain(extra).chain(

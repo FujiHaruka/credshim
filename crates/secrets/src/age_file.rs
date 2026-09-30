@@ -89,6 +89,20 @@ impl AgeFileStore {
         Ok(())
     }
 
+    fn lock(&self) -> Result<fs::File, StoreError> {
+        let path = self.path.with_extension("lock");
+        ensure_private_dir(parent(&path))?;
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|source| io(&path, source))?;
+        file.lock().map_err(|source| io(&path, source))?;
+        Ok(file)
+    }
+
     fn read_identity(&self) -> Result<age::x25519::Identity, StoreError> {
         let text = Zeroizing::new(
             fs::read_to_string(&self.identity).map_err(|source| io(&self.identity, source))?,
@@ -139,6 +153,7 @@ impl SecretStore for AgeFileStore {
 
     fn set(&self, name: &str, value: SecretString) -> Result<(), StoreError> {
         check_name(name)?;
+        let _lock = self.lock()?;
         let identity = self.identity_or_create()?;
         let mut vault = self.load()?;
         vault.secrets.insert(
@@ -149,6 +164,17 @@ impl SecretStore for AgeFileStore {
             },
         );
         self.save(&vault, &identity)
+    }
+
+    fn remove(&self, name: &str) -> Result<bool, StoreError> {
+        check_name(name)?;
+        let _lock = self.lock()?;
+        let mut vault = self.load()?;
+        if vault.secrets.remove(name).is_none() {
+            return Ok(false);
+        }
+        self.save(&vault, &self.read_identity()?)?;
+        Ok(true)
     }
 
     fn list(&self) -> Result<Vec<SecretInfo>, StoreError> {

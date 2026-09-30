@@ -106,6 +106,10 @@ impl SecretStore for CommandStore {
         Err(StoreError::ReadOnly("command"))
     }
 
+    fn remove(&self, _name: &str) -> Result<bool, StoreError> {
+        Err(StoreError::ReadOnly("command"))
+    }
+
     fn list(&self) -> Result<Vec<SecretInfo>, StoreError> {
         Err(StoreError::ListUnsupported("command"))
     }

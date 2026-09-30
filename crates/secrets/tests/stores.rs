@@ -51,6 +51,19 @@ fn assert_round_trip(store: &dyn SecretStore) {
     assert!(!rendered.contains(&openai) && !rendered.contains(&anthropic));
 }
 
+fn assert_remove(store: &dyn SecretStore) {
+    store.set("kept", SecretString::from("kept")).unwrap();
+    store.set("gone", SecretString::from("gone")).unwrap();
+
+    assert!(store.remove("gone").unwrap());
+    assert!(!store.remove("gone").unwrap());
+    assert_eq!(value(store, "gone"), None);
+    assert_eq!(value(store, "kept").as_deref(), Some("kept"));
+    let names: Vec<String> = store.list().unwrap().into_iter().map(|info| info.name).collect();
+    assert_eq!(names, ["kept"]);
+    assert!(matches!(store.remove("a/b"), Err(StoreError::InvalidName(_))));
+}
+
 fn assert_rejects_bad_names(store: &dyn SecretStore) {
     for name in ["", "a/b", "../x", "with space"] {
         assert!(
@@ -141,6 +154,40 @@ fn age_file_with_the_wrong_identity_is_corrupt() {
 }
 
 #[test]
+fn age_file_removes_one_secret_and_keeps_the_rest() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_remove(&AgeFileStore::new(dir.path().join("s.age"), None));
+}
+
+#[test]
+fn age_file_writers_in_parallel_do_not_lose_each_others_secrets() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s.age");
+    AgeFileStore::new(path.clone(), None)
+        .set("seed", SecretString::from("seed"))
+        .unwrap();
+    let writers: Vec<_> = (0..8)
+        .map(|i| {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let store = AgeFileStore::new(path, None);
+                for round in 0..4 {
+                    store
+                        .set(&format!("w{i}-{round}"), SecretString::from("v"))
+                        .unwrap();
+                }
+            })
+        })
+        .collect();
+    for writer in writers {
+        writer.join().unwrap();
+    }
+
+    let store = AgeFileStore::new(path, None);
+    assert_eq!(store.list().unwrap().len(), 1 + 8 * 4);
+}
+
+#[test]
 fn age_file_rejects_bad_names() {
     let dir = tempfile::tempdir().unwrap();
     assert_rejects_bad_names(&AgeFileStore::new(dir.path().join("s.age"), None));
@@ -167,6 +214,20 @@ impl Keychain for &FakeKeychain {
             .insert(account.to_string(), value.to_string());
         Ok(())
     }
+
+    fn delete(&self, account: &str) -> Result<bool, StoreError> {
+        Ok(self.0.lock().unwrap().remove(account).is_some())
+    }
+}
+
+#[test]
+fn keychain_store_removes_the_entry_and_its_index_row() {
+    let keychain = FakeKeychain::default();
+    assert_remove(&KeychainStore::new(&keychain));
+
+    let accounts = keychain.0.lock().unwrap();
+    assert!(!accounts.contains_key("secret:gone"));
+    assert!(!accounts["index"].contains("gone"));
 }
 
 #[test]
@@ -253,6 +314,7 @@ fn command_store_is_read_only() {
         store.set("a", SecretString::from("v")),
         Err(StoreError::ReadOnly(_))
     ));
+    assert!(matches!(store.remove("a"), Err(StoreError::ReadOnly(_))));
     assert!(matches!(store.list(), Err(StoreError::ListUnsupported(_))));
     assert!(CommandStore::new(vec![], Duration::from_secs(1)).is_err());
 }

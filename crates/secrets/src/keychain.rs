@@ -12,6 +12,7 @@ const SECRET_ACCOUNT_PREFIX: &str = "secret:";
 pub trait Keychain: Send + Sync {
     fn get(&self, account: &str) -> Result<Option<Zeroizing<String>>, StoreError>;
     fn set(&self, account: &str, value: &str) -> Result<(), StoreError>;
+    fn delete(&self, account: &str) -> Result<bool, StoreError>;
 }
 
 pub struct KeychainStore<K> {
@@ -29,6 +30,12 @@ impl<K: Keychain> KeychainStore<K> {
                 .map_err(|err| StoreError::Keychain(format!("index entry is corrupt: {err}"))),
             None => Ok(BTreeMap::new()),
         }
+    }
+
+    fn save_index(&self, index: &BTreeMap<String, u64>) -> Result<(), StoreError> {
+        let json =
+            serde_json::to_string(index).map_err(|err| StoreError::Keychain(err.to_string()))?;
+        self.keychain.set(INDEX_ACCOUNT, &json)
     }
 }
 
@@ -49,9 +56,19 @@ impl<K: Keychain> SecretStore for KeychainStore<K> {
             value.expose_secret(),
         )?;
         index.insert(name.to_string(), unix_seconds(SystemTime::now()));
-        let json =
-            serde_json::to_string(&index).map_err(|err| StoreError::Keychain(err.to_string()))?;
-        self.keychain.set(INDEX_ACCOUNT, &json)
+        self.save_index(&index)
+    }
+
+    fn remove(&self, name: &str) -> Result<bool, StoreError> {
+        check_name(name)?;
+        let mut index = self.index()?;
+        let removed = self
+            .keychain
+            .delete(&format!("{SECRET_ACCOUNT_PREFIX}{name}"))?;
+        if index.remove(name).is_some() {
+            self.save_index(&index)?;
+        }
+        Ok(removed)
     }
 
     fn list(&self) -> Result<Vec<SecretInfo>, StoreError> {
@@ -99,6 +116,15 @@ impl Keychain for OsKeychain {
             .and_then(|entry| entry.set_password(value))
             .map_err(keychain_error)
     }
+
+    fn delete(&self, account: &str) -> Result<bool, StoreError> {
+        let entry = keyring::Entry::new(&self.service, account).map_err(keychain_error)?;
+        match entry.delete_credential() {
+            Ok(()) => Ok(true),
+            Err(keyring::Error::NoEntry) => Ok(false),
+            Err(err) => Err(keychain_error(err)),
+        }
+    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -108,6 +134,10 @@ impl Keychain for OsKeychain {
     }
 
     fn set(&self, _account: &str, _value: &str) -> Result<(), StoreError> {
+        Err(StoreError::KeychainUnsupported)
+    }
+
+    fn delete(&self, _account: &str) -> Result<bool, StoreError> {
         Err(StoreError::KeychainUnsupported)
     }
 }
