@@ -263,7 +263,10 @@ async fn failed_refreshes_are_not_replayed_to_retries() {
         "a.example.test",
         "/token",
         &body,
-        json(StatusCode::SERVICE_UNAVAILABLE, "{\"error\":\"unavailable\"}"),
+        json(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{\"error\":\"unavailable\"}",
+        ),
     )
     .await;
     assert_eq!(first.unwrap().status(), StatusCode::SERVICE_UNAVAILABLE);

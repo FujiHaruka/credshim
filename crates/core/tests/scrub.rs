@@ -179,6 +179,9 @@ fn base64url_echoes_are_scrubbed_too() {
         let encoded = URL_SAFE_NO_PAD.encode(format!("{prefix}{secret}\"}}"));
         let scrubbed = s.scrub(encoded.as_bytes()).expect("base64url scrubbed");
         let decoded = URL_SAFE_NO_PAD.decode(&scrubbed).unwrap_or_default();
-        assert!(!String::from_utf8_lossy(&decoded).contains(secret), "{prefix}");
+        assert!(
+            !String::from_utf8_lossy(&decoded).contains(secret),
+            "{prefix}"
+        );
     }
 }
