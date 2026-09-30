@@ -1,4 +1,5 @@
 mod config;
+mod harden;
 mod preset;
 
 use std::collections::BTreeSet;
@@ -12,7 +13,9 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use credshim_core::{Injector, Rule, RuleSet, Secrets};
-use credshim_mitm::{AUDIT_TARGET, CertificateAuthority, Intercept, Proxy, ProxyConfig, Upstream};
+use credshim_mitm::{
+    AUDIT_TARGET, CertificateAuthority, Intercept, Proxy, ProxyConfig, Stats, Upstream,
+};
 use credshim_oauth::{DEFAULT_MAX_BODY, OAuth, Provider, Vault};
 use credshim_secrets::SecretStore;
 use secrecy::SecretString;
@@ -49,6 +52,10 @@ enum Command {
     Secret {
         #[command(subcommand)]
         command: SecretCommand,
+    },
+    Status {
+        #[arg(long, value_name = "FILE")]
+        config: Option<PathBuf>,
     },
     Preset {
         #[arg(value_parser = clap::builder::PossibleValuesParser::new(
@@ -87,6 +94,7 @@ enum SecretCommand {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    harden::disable_core_dumps()?;
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .map_err(|_| anyhow::anyhow!("a rustls crypto provider is already installed"))?;
@@ -116,6 +124,7 @@ async fn main() -> anyhow::Result<()> {
             init_logging(None)?;
             secret_list(config.as_deref())
         }
+        Command::Status { config } => status(config.as_deref()).await,
         Command::Preset { name } => {
             let preset = preset::find(&name).context("unknown preset")?;
             write!(std::io::stdout(), "{}", preset.render())?;
@@ -146,7 +155,11 @@ fn init_logging(audit: Option<File>) -> anyhow::Result<()> {
 
 async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::Result<()> {
     let loaded = config::load(config_path)?;
+    if let Some(path) = &loaded.source {
+        harden::check_private(path, "config file")?;
+    }
     let config = loaded.config;
+    check_state_paths(&config)?;
     let audit = config
         .audit
         .path
@@ -171,6 +184,7 @@ async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::
         .map(Rule::from_spec)
         .collect::<Result<Vec<_>, _>>()?;
     let mut proxy_config = ProxyConfig::new(listen.unwrap_or_else(|| config.listen()));
+    proxy_config.allow_non_loopback = config.listen.allow_non_loopback;
     proxy_config.scrub = config.scrub.enabled.unwrap_or(true);
     if !proxy_config.scrub {
         tracing::warn!("response scrubbing is disabled");
@@ -202,11 +216,61 @@ async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::
         proxy_config.injector = Arc::new(injector);
         proxy_config.oauth = oauth;
     }
+    proxy_config.stats = Arc::new(Stats::new(
+        proxy_config
+            .injector
+            .rules()
+            .rules()
+            .iter()
+            .map(|rule| rule.name().to_string()),
+    ));
+    let _status = config
+        .status
+        .socket
+        .as_deref()
+        .map(|path| {
+            harden::check_private(path, "status socket")?;
+            credshim_mitm::serve_status(path, proxy_config.stats.clone())
+                .with_context(|| format!("could not open status socket {}", path.display()))
+        })
+        .transpose()?;
     let proxy = Proxy::bind(proxy_config, Upstream::new()?).await?;
     tokio::select! {
         _ = proxy.wait() => {}
         _ = tokio::signal::ctrl_c() => tracing::info!("shutting down"),
     }
+    Ok(())
+}
+
+fn check_state_paths(config: &config::Config) -> anyhow::Result<()> {
+    let ca_key = config.ca_dir()?.join(credshim_mitm::ca::KEY_FILE);
+    harden::check_private(&ca_key, "CA private key")?;
+    if let credshim_secrets::BackendConfig::AgeFile { path, identity } = &config.secrets()? {
+        harden::check_private(path, "secret store")?;
+        let store = credshim_secrets::AgeFileStore::new(path.clone(), identity.clone());
+        harden::check_private(store.identity_path(), "secret store key")?;
+    }
+    if !config.oauth.is_empty() {
+        harden::check_private(&config.vault_path()?, "OAuth token vault")?;
+    }
+    if let Some(path) = &config.audit.path {
+        harden::check_private(path, "audit log")?;
+    }
+    Ok(())
+}
+
+async fn status(config_path: Option<&Path>) -> anyhow::Result<()> {
+    let config = config::load(config_path)?.config;
+    let socket = config
+        .status
+        .socket
+        .context("no [status] socket is configured")?;
+    let mut stream = tokio::net::UnixStream::connect(&socket)
+        .await
+        .with_context(|| format!("could not connect to {}", socket.display()))?;
+    let mut body = String::new();
+    tokio::io::AsyncReadExt::read_to_string(&mut stream, &mut body).await?;
+    write!(std::io::stdout(), "{body}")?;
     Ok(())
 }
 

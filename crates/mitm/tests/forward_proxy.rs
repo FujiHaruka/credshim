@@ -241,7 +241,7 @@ async fn unreachable_upstream_is_502() {
 #[tokio::test]
 async fn refuses_non_loopback_listen_address() {
     install_crypto_provider();
-    let addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
+    let addr: SocketAddr = "192.0.2.1:8787".parse().unwrap();
 
     let err = Proxy::bind(ProxyConfig::new(addr), Upstream::new().unwrap())
         .await
@@ -249,6 +249,36 @@ async fn refuses_non_loopback_listen_address() {
         .unwrap();
 
     assert!(matches!(err, BindError::NotLoopback(_)), "{err}");
+}
+
+#[tokio::test]
+async fn refuses_the_unspecified_address_even_when_non_loopback_is_allowed() {
+    install_crypto_provider();
+    for addr in ["0.0.0.0:0", "[::]:0"] {
+        let mut config = ProxyConfig::new(addr.parse().unwrap());
+        config.allow_non_loopback = true;
+
+        let err = Proxy::bind(config, Upstream::new().unwrap())
+            .await
+            .err()
+            .unwrap();
+
+        assert!(matches!(err, BindError::Unspecified(_)), "{err}");
+    }
+}
+
+#[tokio::test]
+async fn non_loopback_listen_is_attempted_only_when_allowed() {
+    install_crypto_provider();
+    let mut config = ProxyConfig::new("192.0.2.1:8787".parse().unwrap());
+    config.allow_non_loopback = true;
+
+    let err = Proxy::bind(config, Upstream::new().unwrap())
+        .await
+        .err()
+        .unwrap();
+
+    assert!(matches!(err, BindError::Io { .. }), "{err}");
 }
 
 #[tokio::test]

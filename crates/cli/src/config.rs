@@ -29,6 +29,14 @@ pub struct Config {
     pub limits: LimitsConfig,
     #[serde(default)]
     pub scrub: ScrubConfig,
+    #[serde(default)]
+    pub status: StatusConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusConfig {
+    pub socket: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -53,6 +61,8 @@ pub struct LimitsConfig {
 #[serde(deny_unknown_fields)]
 pub struct ListenConfig {
     pub addr: Option<SocketAddr>,
+    #[serde(default)]
+    pub allow_non_loopback: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]

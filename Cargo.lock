@@ -556,6 +556,7 @@ dependencies = [
  "credshim-secrets",
  "credshim-testkit",
  "rpassword",
+ "rustix",
  "rustls",
  "secrecy",
  "serde",

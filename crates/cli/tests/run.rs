@@ -31,7 +31,7 @@ async fn run_serves_a_forward_proxy() {
 #[tokio::test]
 async fn run_refuses_a_public_listen_address() {
     let home = tempfile::tempdir().unwrap();
-    let output = output(home.path(), &["run", "--listen", "0.0.0.0:0"]).await;
+    let output = output(home.path(), &["run", "--listen", "192.0.2.1:8787"]).await;
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("non-loopback"));

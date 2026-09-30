@@ -17,7 +17,7 @@ use tokio_rustls::LazyConfigAcceptor;
 use credshim_core::{Destination, InjectError, Injector, Permit, Verdict};
 use credshim_oauth::{Exchange, OAuth};
 
-use crate::audit::{self, Outcome};
+use crate::audit::{self, Outcome, Stats};
 use crate::ca::CertificateAuthority;
 use crate::proxy::{ProxyBody, status, strip_hop_by_hop};
 use crate::scrub::{self, ScrubBody};
@@ -142,6 +142,7 @@ pub(crate) struct Services {
     pub(crate) injector: Arc<Injector>,
     pub(crate) oauth: Option<Arc<OAuth>>,
     pub(crate) scrub: bool,
+    pub(crate) stats: Arc<Stats>,
 }
 
 pub(crate) struct Session {
@@ -149,6 +150,7 @@ pub(crate) struct Session {
     injector: Arc<Injector>,
     oauth: Option<Arc<OAuth>>,
     scrub: bool,
+    stats: Arc<Stats>,
     connector: TargetConnector,
     client: Client<TargetConnector, ProxyBody>,
 }
@@ -172,6 +174,7 @@ impl Session {
             injector: services.injector,
             oauth: services.oauth,
             scrub: services.scrub,
+            stats: services.stats,
             connector,
             client,
         })
@@ -264,7 +267,7 @@ impl Session {
             method: &method,
             path: &path,
         };
-        audit::record(&entry, &outcome, response.status());
+        audit::record(&entry, &outcome, response.status(), &self.stats);
         response
     }
 

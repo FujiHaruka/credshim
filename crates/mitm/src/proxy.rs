@@ -22,7 +22,7 @@ use tokio::task::JoinHandle;
 use credshim_core::Injector;
 use credshim_oauth::OAuth;
 
-use crate::audit::{self, Outcome};
+use crate::audit::{self, Outcome, Stats};
 use crate::intercept::{Intercept, Services, Session};
 use crate::upstream::{ConnectError, Upstream};
 
@@ -31,6 +31,7 @@ pub type ProxyBody = BoxBody<Bytes, hyper::Error>;
 #[derive(Clone, Debug)]
 pub struct ProxyConfig {
     pub listen: SocketAddr,
+    pub allow_non_loopback: bool,
     pub connect_timeout: Duration,
     pub idle_timeout: Duration,
     pub header_read_timeout: Duration,
@@ -38,6 +39,7 @@ pub struct ProxyConfig {
     pub injector: Arc<Injector>,
     pub oauth: Option<Arc<OAuth>>,
     pub scrub: bool,
+    pub stats: Arc<Stats>,
     pub purge_interval: Duration,
 }
 
@@ -45,6 +47,7 @@ impl ProxyConfig {
     pub fn new(listen: SocketAddr) -> Self {
         Self {
             listen,
+            allow_non_loopback: false,
             connect_timeout: Duration::from_secs(10),
             idle_timeout: Duration::from_secs(90),
             header_read_timeout: Duration::from_secs(30),
@@ -52,6 +55,7 @@ impl ProxyConfig {
             injector: Arc::new(Injector::default()),
             oauth: None,
             scrub: true,
+            stats: Arc::default(),
             purge_interval: Duration::from_secs(60),
         }
     }
@@ -61,6 +65,8 @@ impl ProxyConfig {
 pub enum BindError {
     #[error("refusing to listen on non-loopback address {0}")]
     NotLoopback(SocketAddr),
+    #[error("refusing to listen on the unspecified address {0}; name the one interface to bind")]
+    Unspecified(SocketAddr),
     #[error("rule host {0} is not in the intercept list, so its rule could never apply")]
     RuleHostNotIntercepted(String),
     #[error("OAuth host {0} is not in the intercept list, so its tokens could never be swapped")]
@@ -77,7 +83,10 @@ pub struct Proxy {
 
 impl Proxy {
     pub async fn bind(config: ProxyConfig, upstream: Upstream) -> Result<Self, BindError> {
-        if !config.listen.ip().is_loopback() {
+        if config.listen.ip().is_unspecified() {
+            return Err(BindError::Unspecified(config.listen));
+        }
+        if !config.listen.ip().is_loopback() && !config.allow_non_loopback {
             return Err(BindError::NotLoopback(config.listen));
         }
         if let Some(host) = config
@@ -211,6 +220,7 @@ impl Handler {
                 injector: config.injector.clone(),
                 oauth: config.oauth.clone(),
                 scrub: config.scrub,
+                stats: config.stats.clone(),
             },
         }
     }
@@ -317,7 +327,12 @@ impl Handler {
                 %authority,
                 "dummy credential sent over plain HTTP; refusing to forward"
             );
-            audit::record(&entry, &Outcome::Denied(rule), StatusCode::FORBIDDEN);
+            audit::record(
+                &entry,
+                &Outcome::Denied(rule),
+                StatusCode::FORBIDDEN,
+                &self.services.stats,
+            );
             return status(StatusCode::FORBIDDEN);
         }
         strip_hop_by_hop(&mut parts.headers);
@@ -340,7 +355,12 @@ impl Handler {
                 status(StatusCode::BAD_GATEWAY)
             }
         };
-        audit::record(&entry, &Outcome::Pass, response.status());
+        audit::record(
+            &entry,
+            &Outcome::Pass,
+            response.status(),
+            &self.services.stats,
+        );
         response
     }
 }
