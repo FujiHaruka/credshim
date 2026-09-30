@@ -39,6 +39,7 @@ secrecy.workspace = true
 tempfile.workspace = true
 credshim-mitm = { path = ".", features = ["testing"] }
 credshim-testkit.workspace = true
+credshim-secrets.workspace = true
 futures-util.workspace = true
 reqwest = { workspace = true, features = ["form", "query"] }
 sha2 = "0.10"
