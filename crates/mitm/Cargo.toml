@@ -23,8 +23,14 @@ rustls-platform-verifier.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
 tracing.workspace = true
+rcgen = { workspace = true, features = ["x509-parser"] }
+moka.workspace = true
+rustls-native-certs.workspace = true
+pem.workspace = true
+time.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 credshim-mitm = { path = ".", features = ["testing"] }
 credshim-testkit.workspace = true
 futures-util.workspace = true

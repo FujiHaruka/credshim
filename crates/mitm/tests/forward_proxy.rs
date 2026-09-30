@@ -1,34 +1,24 @@
+mod common;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use credshim_mitm::{BindError, Proxy, ProxyConfig, Upstream};
-use credshim_testkit::upstream::now_us;
-use credshim_testkit::{
-    Echo, MockUpstream, SseTick, TestCa, UploadSummary, capture_logs, fake_secret,
-    install_crypto_provider, pattern,
+use common::{
+    assert_large_bodies_intact, assert_sse_unbuffered, client_via, raw_exchange, read_head,
 };
-use futures_util::StreamExt;
-use sha2::{Digest, Sha256};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+
+use credshim_mitm::{BindError, Proxy, ProxyConfig, Upstream};
+use credshim_testkit::{
+    Echo, MockUpstream, TestCa, capture_logs, fake_secret, install_crypto_provider,
+};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
-
-const LARGE: u64 = 24 * 1024 * 1024;
 
 async fn start_proxy() -> Proxy {
     install_crypto_provider();
     let config = ProxyConfig::new("127.0.0.1:0".parse().unwrap());
     Proxy::bind(config, Upstream::new().unwrap()).await.unwrap()
-}
-
-fn client_via(proxy: &Proxy, ca: Option<&TestCa>) -> reqwest::Client {
-    let mut builder = reqwest::Client::builder()
-        .proxy(reqwest::Proxy::all(format!("http://{}", proxy.local_addr())).unwrap());
-    if let Some(ca) = ca {
-        let root = reqwest::Certificate::from_der(ca.cert_der().as_ref()).unwrap();
-        builder = builder.tls_certs_only([root]);
-    }
-    builder.build().unwrap()
 }
 
 async fn https_mock() -> (TestCa, MockUpstream) {
@@ -38,28 +28,11 @@ async fn https_mock() -> (TestCa, MockUpstream) {
     (ca, mock)
 }
 
-async fn raw_exchange(proxy: &Proxy, request: &str) -> String {
-    let mut tcp = TcpStream::connect(proxy.local_addr()).await.unwrap();
-    tcp.write_all(request.as_bytes()).await.unwrap();
-    let mut response = String::new();
-    tcp.read_to_string(&mut response).await.unwrap();
-    response
-}
-
-async fn read_head<S: AsyncRead + Unpin>(stream: &mut S) -> String {
-    let mut head = Vec::new();
-    while !head.ends_with(b"\r\n\r\n") {
-        let byte = stream.read_u8().await.unwrap();
-        head.push(byte);
-    }
-    String::from_utf8(head).unwrap()
-}
-
 #[tokio::test]
 async fn forwards_plain_http_get_and_post() {
     let proxy = start_proxy().await;
     let mock = MockUpstream::http().start().await;
-    let client = client_via(&proxy, None);
+    let client = client_via(proxy.local_addr(), None);
 
     let get: Echo = client
         .get(mock.url("127.0.0.1", "/v1/models?limit=2"))
@@ -117,7 +90,7 @@ async fn strips_hop_by_hop_headers() {
     let authority = format!("127.0.0.1:{}", mock.port());
 
     let response = raw_exchange(
-        &proxy,
+        proxy.local_addr(),
         &format!(
             "GET http://{authority}/hop HTTP/1.1\r\n\
              Host: {authority}\r\n\
@@ -159,7 +132,7 @@ async fn host_header_follows_the_request_target() {
     let authority = format!("127.0.0.1:{}", mock.port());
 
     let response = raw_exchange(
-        &proxy,
+        proxy.local_addr(),
         &format!(
             "GET http://{authority}/h HTTP/1.1\r\nHost: evil.example\r\nConnection: close\r\n\r\n"
         ),
@@ -176,12 +149,12 @@ async fn rejects_origin_form_and_non_http_targets() {
     let proxy = start_proxy().await;
 
     let origin_form = raw_exchange(
-        &proxy,
+        proxy.local_addr(),
         "GET /x HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
     )
     .await;
     let https_target = raw_exchange(
-        &proxy,
+        proxy.local_addr(),
         "GET https://127.0.0.1/x HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
     )
     .await;
@@ -228,7 +201,7 @@ async fn connect_tunnel_shows_the_upstreams_own_certificate() {
 async fn reqwest_reaches_https_mock_through_connect() {
     let proxy = start_proxy().await;
     let (ca, mock) = https_mock().await;
-    let client = client_via(&proxy, Some(&ca));
+    let client = client_via(proxy.local_addr(), Some(ca.cert_der().as_ref()));
 
     let echo: Echo = client
         .get(mock.url("localhost", "/via-connect"))
@@ -251,7 +224,7 @@ async fn unreachable_upstream_is_502() {
     };
 
     let forwarded = raw_exchange(
-        &proxy,
+        proxy.local_addr(),
         &format!("GET http://{closed}/x HTTP/1.1\r\nHost: {closed}\r\nConnection: close\r\n\r\n"),
     )
     .await;
@@ -278,41 +251,16 @@ async fn refuses_non_loopback_listen_address() {
     assert!(matches!(err, BindError::NotLoopback(_)), "{err}");
 }
 
-async fn assert_sse_unbuffered(client: &reqwest::Client, url: String) {
-    let interval_ms = 300;
-    let res = client
-        .get(format!("{url}?count=5&interval_ms={interval_ms}"))
-        .send()
-        .await
-        .unwrap();
-    let mut stream = res.bytes_stream();
-    let mut pending = String::new();
-    let mut seen = 0;
-    while let Some(chunk) = stream.next().await {
-        let arrived = now_us();
-        pending.push_str(std::str::from_utf8(&chunk.unwrap()).unwrap());
-        while let Some(end) = pending.find("\n\n") {
-            let event: String = pending.drain(..end + 2).collect();
-            let data = event.trim().strip_prefix("data: ").unwrap();
-            let tick: SseTick = serde_json::from_str(data).unwrap();
-            let latency_ms = (arrived - tick.sent_at_us) / 1000;
-            assert!(
-                latency_ms < interval_ms / 2,
-                "event {} took {latency_ms}ms to arrive",
-                tick.seq
-            );
-            seen += 1;
-        }
-    }
-    assert_eq!(seen, 5);
-}
-
 #[tokio::test]
 async fn sse_events_are_not_buffered_over_http() {
     let proxy = start_proxy().await;
     let mock = MockUpstream::http().start().await;
 
-    assert_sse_unbuffered(&client_via(&proxy, None), mock.url("127.0.0.1", "/sse")).await;
+    assert_sse_unbuffered(
+        &client_via(proxy.local_addr(), None),
+        mock.url("127.0.0.1", "/sse"),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -321,42 +269,10 @@ async fn sse_events_are_not_buffered_over_connect() {
     let (ca, mock) = https_mock().await;
 
     assert_sse_unbuffered(
-        &client_via(&proxy, Some(&ca)),
+        &client_via(proxy.local_addr(), Some(ca.cert_der().as_ref())),
         mock.url("localhost", "/sse"),
     )
     .await;
-}
-
-async fn assert_large_bodies_intact(client: &reqwest::Client, mock: &MockUpstream, host: &str) {
-    let res = client
-        .get(mock.url(host, &format!("/bytes/{LARGE}")))
-        .send()
-        .await
-        .unwrap();
-    let mut hasher = Sha256::new();
-    let mut len = 0u64;
-    let mut stream = res.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.unwrap();
-        len += chunk.len() as u64;
-        hasher.update(&chunk);
-    }
-    assert_eq!(len, LARGE);
-    assert_eq!(hex::encode(hasher.finalize()), pattern::sha256_hex(LARGE));
-
-    let body =
-        reqwest::Body::wrap_stream(pattern::chunks(LARGE, 64 * 1024).map(Ok::<_, std::io::Error>));
-    let summary: UploadSummary = client
-        .post(mock.url(host, "/upload"))
-        .body(body)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(summary.len, LARGE);
-    assert_eq!(summary.sha256, pattern::sha256_hex(LARGE));
 }
 
 #[tokio::test]
@@ -364,7 +280,7 @@ async fn large_bodies_are_byte_identical_over_http() {
     let proxy = start_proxy().await;
     let mock = MockUpstream::http().start().await;
 
-    assert_large_bodies_intact(&client_via(&proxy, None), &mock, "127.0.0.1").await;
+    assert_large_bodies_intact(&client_via(proxy.local_addr(), None), &mock, "127.0.0.1").await;
 }
 
 #[tokio::test]
@@ -372,7 +288,12 @@ async fn large_bodies_are_byte_identical_over_connect() {
     let proxy = start_proxy().await;
     let (ca, mock) = https_mock().await;
 
-    assert_large_bodies_intact(&client_via(&proxy, Some(&ca)), &mock, "localhost").await;
+    assert_large_bodies_intact(
+        &client_via(proxy.local_addr(), Some(ca.cert_der().as_ref())),
+        &mock,
+        "localhost",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -382,7 +303,7 @@ async fn request_values_never_reach_the_logs() {
     let mock = MockUpstream::http().start().await;
     let header_secret = fake_secret("header");
     let query_secret = fake_secret("query");
-    let client = client_via(&proxy, None);
+    let client = client_via(proxy.local_addr(), None);
 
     client
         .get(mock.url("127.0.0.1", &format!("/v1/x?key={query_secret}")))

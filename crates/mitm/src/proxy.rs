@@ -19,6 +19,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
+use crate::intercept::{Intercept, Session};
 use crate::upstream::{ConnectError, Upstream};
 
 pub type ProxyBody = BoxBody<Bytes, hyper::Error>;
@@ -29,6 +30,7 @@ pub struct ProxyConfig {
     pub connect_timeout: Duration,
     pub idle_timeout: Duration,
     pub header_read_timeout: Duration,
+    pub intercept: Option<Intercept>,
 }
 
 impl ProxyConfig {
@@ -38,6 +40,7 @@ impl ProxyConfig {
             connect_timeout: Duration::from_secs(10),
             idle_timeout: Duration::from_secs(90),
             header_read_timeout: Duration::from_secs(30),
+            intercept: None,
         }
     }
 }
@@ -124,6 +127,8 @@ struct Handler {
     upstream: Upstream,
     client: Client<Connector, ProxyBody>,
     connect_timeout: Duration,
+    handshake_timeout: Duration,
+    intercept: Option<Intercept>,
 }
 
 impl Handler {
@@ -140,6 +145,8 @@ impl Handler {
             upstream,
             client,
             connect_timeout: config.connect_timeout,
+            handshake_timeout: config.header_read_timeout,
+            intercept: config.intercept.clone(),
         }
     }
 
@@ -157,6 +164,9 @@ impl Handler {
             return status(StatusCode::BAD_REQUEST);
         };
         tracing::debug!(%host, port, "CONNECT");
+        if let Some(intercept) = self.intercept.as_ref().filter(|i| i.covers(&host)) {
+            return self.intercept(req, intercept, host, port).await;
+        }
         let upstream = match self.connect_with_timeout(&host, port).await {
             Ok(tcp) => tcp,
             Err(err) => {
@@ -179,6 +189,35 @@ impl Handler {
                 Err(err) => tracing::debug!(%host, port, error = %err, "CONNECT upgrade failed"),
             }
         });
+        Response::new(empty())
+    }
+
+    async fn intercept(
+        &self,
+        mut req: Request<Incoming>,
+        intercept: &Intercept,
+        host: String,
+        port: u16,
+    ) -> Response<ProxyBody> {
+        let session = match Session::open(
+            self.upstream.clone(),
+            host.clone(),
+            port,
+            self.connect_timeout,
+        )
+        .await
+        {
+            Ok(session) => session,
+            Err(err) => {
+                tracing::warn!(%host, port, error = %err, "intercepted upstream failed");
+                return status(StatusCode::BAD_GATEWAY);
+            }
+        };
+        session.serve(
+            hyper::upgrade::on(&mut req),
+            intercept.ca(),
+            self.handshake_timeout,
+        );
         Response::new(empty())
     }
 
@@ -255,7 +294,7 @@ const HOP_BY_HOP: [HeaderName; 8] = [
     header::UPGRADE,
 ];
 
-pub fn strip_hop_by_hop(headers: &mut HeaderMap) {
+pub(crate) fn strip_hop_by_hop(headers: &mut HeaderMap) {
     let listed: Vec<HeaderName> = headers
         .get_all(header::CONNECTION)
         .iter()
@@ -274,7 +313,7 @@ fn empty() -> ProxyBody {
         .boxed()
 }
 
-fn status(code: StatusCode) -> Response<ProxyBody> {
+pub(crate) fn status(code: StatusCode) -> Response<ProxyBody> {
     let mut res = Response::new(empty());
     *res.status_mut() = code;
     res

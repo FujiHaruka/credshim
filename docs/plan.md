@@ -174,6 +174,15 @@ credshim/
 - [ ] SNIやHostがCONNECT先と食い違うリクエストが拒否される。
 - [ ] Phase 1のSSEと大容量ボディのテストがMITM経由でも通る。
 
+**実装メモ（Phase 2）**
+
+- CAは `credshim_mitm::CertificateAuthority`。`init` はディレクトリを 0700、`ca-key.pem` を 0600 で新規作成し、鍵が既にあれば置き換えを拒否する（信頼済みCAを黙って作り直さない）。既定の置き場所は `$XDG_CONFIG_HOME/credshim/ca`（未設定なら `~/.config/credshim/ca`）で、テストは必ず `--dir` にtempdirを渡す。
+- リーフはSANがCONNECT先ホスト名だけ、有効期限24時間、moka で12時間キャッシュ（ホスト名は小文字化してキー）。
+- MITM経路は `Handler::intercept`。200を返す前に `Upstream::connect_tls` で上流TLSを確立・検証し、失敗なら502。成功したときだけ `VerifiedTarget`（host、port、コンストラクタ非公開）を作り、以後の内側リクエスト処理はこれを持つ `Session` 経由で行う。Phase 3の差し替えは `&VerifiedTarget` を引数に取る。
+- 下流TLSは `LazyConfigAcceptor` で ClientHello を先に読み、SNIが無いかCONNECT先と違えば証明書を出さずに切る。内側の Host（と絶対形式URIのauthority）はポート省略時443として (host, port) で比較し、不一致は421。
+- 上流は1トンネルにつき1本の h1 接続を使い回し、閉じていたら `connect_tls` で再検証して張り直す。インターセプト対象は `credshim run --intercept <host>`（複数可）。設定ファイルは Phase 3。
+- `credshim ca bundle` は rustls-native-certs のOSルートをDER順に並べ重複を除き、末尾に開発CAを足す（出力を決定的にするため）。
+
 ## Phase 3: シークレットストアと静的キー注入（MVP）
 
 このフェーズの終わりで、OpenAI SDK がダミーキーのまま実APIを叩ける最初の実用版になる。HTTP/2はまだ無いが、SDKはHTTP/1.1で普通に動く。
