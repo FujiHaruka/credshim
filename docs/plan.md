@@ -342,6 +342,26 @@ credshim/
 - [ ] 段階Bの構築スクリプトがあり、開発ユーザーから設定・秘密・CA鍵を読めず書けないことを検証するスクリプトが通る。
 - [ ] Basic認証のデコード、トークン応答の解析、ヘッダー書き換えを cargo-fuzz にかけ、クラッシュしない。
 
+**実装メモ（Phase 6）**
+
+- スクラブは `credshim_core::Scrubber`（`crates/core/src/scrub.rs`、`expose_secret` の許可先に追加）。静的ルールの秘密と保管庫の本物トークンを Aho-Corasick（leftmost-longest）にかけ、それぞれのダミーに置き換える。8バイト未満の秘密は本文を壊すので対象にしない。同じ値は1つにまとめる。オートマトンの内部に持つパターンのコピーはゼロ化されない（プロセスメモリの保護は段階B/Cの分離が担う）。
+- ストリーム処理の `ScrubStream` は、バッファ末尾のうち「どれかの秘密の真の接頭辞」になっている最長部分だけを保留する。完全な一致でも、より長い秘密の接頭辞でありうるものは保留し、終端でまとめて置換する（チャンクの切り方で結果が変わらないことを単体テストと fuzz で確認）。
+- 保管庫は変更ごとに世代番号を進め、`Injector::scrubber()` は世代が変わったときだけオートマトンを作り直す（`TokenResolver::generation`／`issued`）。
+- MITM のレスポンスはすべてスクラブを通す（`[scrub] enabled`、既定 true）。ヘッダーとトレーラーは値ごと、ボディは `ScrubBody` でストリームのまま。置換で長さが変わるので Content-Length は外す（h1 は chunked になる）。HEAD、1xx、204、304 はボディを包まない。上流へは `Accept-Encoding: identity` を付け直し、それでも Content-Encoding 付きのボディが返れば502にする（fail closed）。これが Phase 3 の「ダミーを含まないリクエストは変えない」の唯一の例外。
+- トークン・失効エンドポイントの応答は全体を読んだあとにスクラブし、Content-Length を付け直す（2xx 以外のエラー応答が client_secret をエコーする場合も対象）。
+- WebSocket は 101 のヘッダーだけスクラブし、以降のフレームは素通し（長さ付きフレームを書き換えられないため）。平文HTTPの転送路は本物を注入しないのでスクラブしない。
+- テストのモック上流はエコーの値を16進で返し（`Echo` が透過的に戻す）、スクラブと干渉させない。スクラブの検査には生のボディを指定のチャンク幅で返す `/reflect` を使う。
+- 許可リストと上限は `[[rule]]` の `allow_methods`、`allow_paths`（区切り単位の接頭辞一致。ドットセグメントや `%2f` などを含むパスは一致しない）、`limits = { per_minute, per_day, concurrent }`。ダミーを差し替えるときだけ適用し、ダミーを含まない要求は対象外（本物を使わないため）。許可リスト外は403（audit の decision `not_allowed`）、上限超過は429（`limited`）で、どちらも上流に何も送らない。
+- 上限は `credshim_core::Limiter`。毎分は直近60秒の窓、日次は UTC の暦日で数え、プロセス再起動で0に戻る（段階B以降は開発ユーザーが再起動できない）。同時実行数はレスポンスのボディを最後まで返すか切断されるまで数える（WebSocket は 101 を返した時点で解放）。複数ルールにまたがる要求は全ルールの枠を確認してからまとめて消費する。Retry-After は付けない。
+- OAuth の発行済みトークンには許可リストと上限を付けていない（アクセストークンのルールは失効エンドポイントにも束縛されるので、パス許可リストを単純に掛けると失効が止まる）。
+- プリセットは推論系のパスだけの `allow_paths` を出力する。
+- 全サブコマンドの開始時に RLIMIT_CORE を 0 にし、Linux では PR_SET_DUMPABLE を 0 にする（rustix。同一ユーザーからの ptrace と `/proc/<pid>/mem`・`environ` が閉じる）。macOS はコアダンプの無効化だけで、同一ユーザーからのデバッガ接続は段階Bの別ユーザー化で防ぐ。
+- `credshim run` は設定ファイル、CA秘密鍵、age の秘密ストアとその鍵、OAuth保管庫、監査ログ、状態ソケットについて、ファイルとその親ディレクトリが自分か root の所有で group/others に書き込み権が無いことを確かめ、違えば起動しない。
+- 状態確認は `[status] socket` の Unix ソケット（0600）。接続するとルール名ごとのカウンタ（injected、exchanged、denied、not_allowed、limited、failed）を JSON で1回返して閉じる。入力は読まない。`credshim status` がこれを表示する。
+- listen は既定でループバックのみ。段階C向けに `[listen] allow_non_loopback = true` で特定のインターフェース（docker ブリッジなど）に bind できる。`0.0.0.0` や `::` は常に拒否する。
+- 段階Bは `scripts/stage-b/setup-linux.sh`（systemd、ユーザー `credshim`）と `setup-macos.sh`（launchd、ユーザー `_credshim`）。状態は `/var/lib/credshim`（0700）、秘密ストアは age ファイル、公開用の CA 証明書と結合バンドルは `/etc/credshim` に置く。`scripts/stage-b/verify.sh` は開発ユーザーとして、sudo できないこと、状態ディレクトリと各ファイルを読めず書けないこと、プロキシが専用ユーザーで動き signal も `/proc` の読み出しも通らないこと、公開証明書を読めてプロキシに接続できることを確かめる。CI の `stage-b` ジョブが Linux で構築から検証まで通し、sudo できるユーザーでは検証が失敗することも確認する。macOS のスクリプトは CI で動かしていない。
+- fuzz は `fuzz/`（独立した workspace、nightly と cargo-fuzz）。`inject_request`（ヘッダー・Basic・クエリの差し替え。差し替え以外で要求が変わらないこと、束縛外の宛先に本物が出ないこと）、`token_response`（トークン応答の解析と書き換え）、`scrub_stream`（チャンクの切り方に依らない出力と秘密の残存なし）。CI の `fuzz` ジョブで各60秒回す。
+
 ## Phase 7: 開発体験（env出力、doctor、base URLモード）
 
 MITMプロキシで一番つまずくのは「そのランタイムがプロキシとCAを本当に使っているか」。これを1コマンドで確かめられるようにして仕上げる。

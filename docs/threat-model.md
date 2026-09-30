@@ -28,14 +28,14 @@
 
 ## 回帰テスト対応表
 
-脅威モデルの各行に対応する回帰テスト。フェーズが進むごとに埋める。
+脅威モデルの各行に対応する回帰テスト。
 
 | 脅威 | テスト |
 | --- | --- |
-| リポジトリ、環境変数、アプリのメモリ、ログを読む | `crates/mitm/tests/inject.rs` の `secrets_and_dummies_never_reach_the_logs_and_requests_are_audited`、`crates/cli/tests/config.rs` の `secret_list_prints_names_and_times_but_never_values`・`audit_log_records_decisions_as_json_without_values`、`crates/core/tests/rules.rs` の `debug_output_never_contains_secret_values` |
-| ダミーキー付きリクエストを攻撃者のホストへ送る | `crates/mitm/tests/inject.rs` の `dummy_sent_to_another_intercepted_host_is_403_and_nothing_reaches_upstream`・`dummy_over_plain_http_is_403_and_nothing_reaches_upstream`、`crates/core/tests/rules.rs` の `dummy_sent_to_an_unbound_destination_is_denied_and_left_untouched`・`dummy_hidden_anywhere_in_the_request_is_found`・`path_prefix_binds_the_dummy_to_that_subtree` |
-| CONNECT先と内側のHostヘッダーを食い違わせる | （Phase 2） |
-| APIのエラー応答などに本物の値をエコーさせる | （Phase 6） |
-| 設定を書き換えて秘密を別ホストに束縛し直す | （Phase 6） |
-| プロキシのメモリ、秘密ストア、CA秘密鍵を読む | （Phase 6） |
-| プロキシ経由で本物の権限を乱用する | （Phase 6） |
+| リポジトリ、環境変数、アプリのメモリ、ログを読む | `crates/mitm/tests/inject.rs` の `secrets_and_dummies_never_reach_the_logs_and_requests_are_audited`、`crates/cli/tests/config.rs` の `secret_list_prints_names_and_times_but_never_values`・`audit_log_records_decisions_as_json_without_values`、`crates/core/tests/rules.rs` の `debug_output_never_contains_secret_values`、`crates/core/tests/scrub.rs` の `debug_output_never_contains_secret_values`、`crates/mitm/tests/oauth.rs` の `code_exchange_hands_the_app_dummies_and_the_api_real_tokens` |
+| ダミーキー付きリクエストを攻撃者のホストへ送る | `crates/mitm/tests/inject.rs` の `dummy_sent_to_another_intercepted_host_is_403_and_nothing_reaches_upstream`・`dummy_over_plain_http_is_403_and_nothing_reaches_upstream`、`crates/core/tests/rules.rs` の `dummy_sent_to_an_unbound_destination_is_denied_and_left_untouched`・`dummy_hidden_anywhere_in_the_request_is_found`・`path_prefix_binds_the_dummy_to_that_subtree`、`crates/mitm/tests/oauth.rs` の `client_secret_dummy_is_refused_away_from_the_token_endpoint`、fuzz の `inject_request`（束縛外の宛先に本物が現れないこと） |
+| CONNECT先と内側のHostヘッダーを食い違わせる | `crates/mitm/tests/mitm_h1.rs` の `sni_for_another_host_is_rejected`・`missing_sni_is_rejected`・`inner_requests_naming_another_authority_are_rejected`、`crates/mitm/tests/protocols.rs` の `h2_streams_run_concurrently_and_only_the_misdirected_one_is_rejected` |
+| APIのエラー応答などに本物の値をエコーさせる | `crates/mitm/tests/scrub.rs` の `echoed_secret_never_reaches_the_client_even_across_chunk_boundaries`・`encoded_responses_are_refused_rather_than_passed_unscrubbed`、`crates/mitm/tests/oauth.rs` の `real_tokens_echoed_by_an_api_are_scrubbed_to_their_dummies`・`token_endpoint_errors_echoing_the_client_secret_are_scrubbed`、`crates/core/tests/scrub.rs` の `every_chunking_yields_the_same_scrubbed_output`、fuzz の `scrub_stream` |
+| 設定を書き換えて秘密を別ホストに束縛し直す | `crates/cli/tests/hardening.rs` の `run_refuses_a_config_others_could_rewrite`・`run_refuses_a_config_directory_others_could_write`、段階Bの `scripts/stage-b/verify.sh`（CI の `stage-b` ジョブで、sudo できない開発ユーザーが設定を読めず書けないことを検証） |
+| プロキシのメモリ、秘密ストア、CA秘密鍵を読む | `crates/cli/tests/hardening.rs` の `run_refuses_secret_store_and_ca_key_others_could_write`・`proxy_memory_and_environment_are_closed_to_the_same_user`（Linux）、`crates/cli/src/harden.rs` の `core_dumps_are_disabled`、`crates/cli/tests/ca.rs` の `ca_init_writes_a_private_key_only_the_owner_can_read`、段階Bの `scripts/stage-b/verify.sh` |
+| プロキシ経由で本物の権限を乱用する | `crates/mitm/tests/policy.rs` の `paths_and_methods_outside_the_allow_list_are_403_and_never_reach_upstream`・`requests_over_the_rate_limit_are_429_and_never_reach_upstream`・`daily_limit_caps_total_requests`・`concurrency_limit_holds_for_the_whole_streamed_response`、`crates/core/tests/policy.rs`、`crates/cli/tests/hardening.rs` の `status_socket_reports_rule_names_and_counters_only`、監査ログの `audit_log_records_decisions_as_json_without_values` |
