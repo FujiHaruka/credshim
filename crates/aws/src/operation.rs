@@ -97,7 +97,11 @@ pub fn names(parts: &Parts, body: Option<&[u8]>) -> Vec<String> {
             .get_all(X_AMZ_TARGET)
             .iter()
             .filter_map(|value| value.to_str().ok())
-            .map(|target| target.rsplit('.').next().unwrap_or(target).to_string()),
+            .flat_map(|value| value.split(','))
+            .map(|target| {
+                let target = target.trim();
+                target.rsplit('.').next().unwrap_or(target).to_string()
+            }),
     );
     let segments = segments(parts.uri.path());
     if let [service, _, operation, op] = segments.as_slice()
@@ -149,10 +153,18 @@ pub fn unsigned_operation_hosts() -> impl Iterator<Item = &'static str> {
 }
 
 fn segments(path: &str) -> Vec<String> {
-    path.split('/')
-        .filter(|segment| !segment.is_empty())
-        .map(|segment| percent_decode_str(segment).decode_utf8_lossy().into_owned())
-        .collect()
+    let mut resolved: Vec<String> = Vec::new();
+    for segment in path.split('/') {
+        let segment = percent_decode_str(segment).decode_utf8_lossy().into_owned();
+        match segment.as_str() {
+            "" | "." => {}
+            ".." => {
+                resolved.pop();
+            }
+            _ => resolved.push(segment),
+        }
+    }
+    resolved
 }
 
 fn path_matches(template: &str, segments: &[String]) -> bool {
@@ -165,7 +177,7 @@ fn path_matches(template: &str, segments: &[String]) -> bool {
             return false;
         };
         let is_label = part.starts_with('{') && part.ends_with('}');
-        if !is_label && segment != part {
+        if !is_label && !segment.eq_ignore_ascii_case(part) {
             return false;
         }
         rest = tail;

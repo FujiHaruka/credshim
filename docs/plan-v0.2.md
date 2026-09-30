@@ -143,6 +143,12 @@ session-bind の無い要求、任意データへの署名要求は拒否する�
 - 監査ログ：AWS の要求には `service`、`region`（どちらも資格スコープから。解析時に小文字・数字・`-` だけに制限）、`operation`（候補のうち英数字と `_`・`-`・`.` だけのもの）、拒否の理由 `reason`（`not_bound`、`unsupported_location`、`bad_authorization`、`service_not_allowed`、`region_not_allowed`、`credential_operation`、`unsigned_credential_operation`、`signed_chunks`、`bad_payload_hash`、`body_too_large`、`sso_oidc`、`sso_portal`、`signin`）を加えた。再署名の判定は `resign` で、ステータスソケットのカウンタでは `injected` に数える。ルールに当たらない拒否はカウンタに入れない。`credshim tail` は ` aws:<service>/<region>:<operation> (<reason>)` を付けて出す。
 - 設定：`[[aws_key]]`（`name`、`dummy_access_key_id`、`access_key_id` と `secret_access_key` は秘密ストアの名前、`services`、`regions`）と `[aws] max_body_bytes`。`credshim preset aws` は `CREDSHIMAWS` で始まるダミーのルールを出す。`AWS_CA_BUNDLE` などを `credshim env` に出すのは Phase 11。
 - テスト：testkit の `MockAws` は受け取った `SignedHeaders` と本物の鍵で署名を計算し直して照合し、資格スコープのサービスとリージョンがホストと食い違えば拒否する（AWS の前提を模したもの）。aws-chunked はボディのフレームを解いて長さとトレーラーを確かめる。E2E は mise の aws-cli 2.37.7 を `HOME` と `AWS_*` を一時ディレクトリに向けて実行し、`s3 cp` の 3MiB のアップロードが aws-chunked・CRC64NVME のトレーラー・`Expect: 100-continue` で届くことを確かめる。
+- レビューで足したもの：
+  - 再署名は、ホストが資格スコープのサービスのエンドポイントであるときだけ行う（`endpoint_mismatch`）。署名名とエンドポイント接頭辞の対応は同じスクリプトが botocore から `service_endpoints.rs` に生成する。接頭辞（`-fips` 付きも可）の左には仮想ホスト形式のバケットやアカウントのラベルがあってよく、右はリージョン1つ（スコープのリージョンと一致すること）か何も無いこと。S3 は `s3-<region>` と `s3-external-1` の旧形式と `s3-accesspoint` も認める。アプローチ節の「スコープとエンドポイントの食い違いは AWS が拒否する前提」は、これでプロキシ側でも確かめる。IoT のデータ（`<id>-ats.iot`）のようにアカウント固有の形のエンドポイントは再署名しない。
+  - 利用者が作る API の前段（`execute-api`、API Gateway の呼び出し）は、署名した要求が API の持ち主のバックエンドに届くので、`services` に明示したときだけ再署名する。
+  - `X-Amz-Date` が現在時刻から15分より離れていれば400（先の時刻の署名を作らせない）。
+  - 署名の要らない発行 API の判定と、ダミーが無いときのボディ読み込みは `sts-fips`・`cognito-identity-fips` のホストにも効く。REST のテンプレート照合はパスのドットセグメントを解決し、リテラルを大文字小文字を区別せずに比べる。`X-Amz-Target` はカンマで区切った各値を見る。読み込んだボディに `identity` 以外の `Content-Encoding` があれば拒否する（`encoded_body`）。
+  - 読み込み中のボディの合計は `max_body_bytes` の4倍までにし、空きを30秒待っても取れなければ503（`buffer_busy`）。
 - 既知の制約：S3 のオブジェクトが `Content-Encoding: gzip` などで保存されていると、スクラブが有効なときダウンロードが502になる（v0.1 と同じくエンコードされた応答はスクラブできないため）。ワークスペースの `rust-version` は aws-sigv4 に合わせて 1.94.1 に上げた。
 
 ## Phase 10: AWS SSO
@@ -198,6 +204,7 @@ v0.1 の段階B・Cと開発体験の仕組みに SSH と AWS を載せる。
 - デュアルスタックのエンドポイント（`*.api.aws`、`use_dualstack_endpoint`）。束縛は `amazonaws.com` 配下だけ。
 - `aws` CLI 以外の AWS SDK での動作保証。同じ仕組みで動く見込みだが、v0.2 の完了条件には入れない。
 - AWS 以外の SSO（Okta などの SAML から AWS へ入る構成）。
+- 中国リージョン（`amazonaws.com.cn`）と GovCloud 以外の独立パーティション。束縛と MITM は `amazonaws.com` 配下だけ。
 
 ## 事前検証の結果
 

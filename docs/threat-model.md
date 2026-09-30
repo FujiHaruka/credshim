@@ -42,12 +42,12 @@ CredShim は ssh-agent として、鍵をプロキシの中だけに置いて署
 
 ## AWS 認証情報（v0.2）
 
-`~/.aws` にはダミーのアクセスキーだけを置く。CredShim は `amazonaws.com` 配下を MITM し、Authorization の資格スコープにダミーのアクセスキー ID が入った SigV4 要求だけを、本物の認証情報で署名し直して上流へ送る。署名し直すヘッダーはクライアントが署名したものと同じ集合で、時刻とスコープもクライアントの値を使う。S3 は `x-amz-content-sha256` の値をそのまま署名に使いボディはストリームで流し、それ以外のサービスは上限付きでボディを読んでハッシュを計算する。サービスとリージョンの絞り込みはスコープで行い、スコープとエンドポイントの食い違いは AWS が拒否する前提に立つ（Phase 9 の手動マイルストーンで確かめる）。
+`~/.aws` にはダミーのアクセスキーだけを置く。CredShim は `amazonaws.com` 配下を MITM し、Authorization の資格スコープにダミーのアクセスキー ID が入った SigV4 要求だけを、本物の認証情報で署名し直して上流へ送る。署名し直すヘッダーはクライアントが署名したものと同じ集合で、時刻とスコープもクライアントの値を使う。S3 は `x-amz-content-sha256` の値をそのまま署名に使いボディはストリームで流し、それ以外のサービスは上限付きでボディを読んでハッシュを計算する。サービスとリージョンの絞り込みはスコープで行い、ホストがスコープのサービスとリージョンのエンドポイントでなければ再署名しない（対応表は botocore から生成）。利用者が作る API の前段（`execute-api`）は、署名した要求が持ち主のバックエンドに届くので、ルールに明示したときだけ再署名する。`X-Amz-Date` が現在時刻から15分より離れた要求も再署名しない。
 
 | エージェントが取りうる行動 | 対策 |
 | --- | --- |
 | `~/.aws` の credentials を読む | ダミーのアクセスキーしか無い。本物は秘密ストアとプロキシのメモリだけ |
-| ダミーのアクセスキーで署名した要求を AWS 以外のホストへ送る | `amazonaws.com` 配下以外でダミーが見つかれば403（平文 HTTP も同じ）。本物での署名は束縛先の AWS エンドポイント宛てにしか行わない |
+| ダミーのアクセスキーで署名した要求を AWS 以外のホストへ送る | `amazonaws.com` 配下以外でダミーが見つかれば403（平文 HTTP も同じ）。本物での署名は、スコープのサービスのエンドポイント宛てにしか行わない。API Gateway など利用者のバックエンドに届くエンドポイントは明示したときだけ |
 | 束縛先の API で新しい認証情報を発行させ、応答から本物の値を得る | botocore のモデルから抜き出した、応答に `SecretAccessKey` か `SessionToken` を含む37操作を拒否。Query の `Action` はクエリ文字列とボディの両方、JSON は `X-Amz-Target`、rpc-v2-cbor はパス、REST はメソッドとパスのテンプレートで判定する |
 | 署名の要らない API（SSO OIDC のデバイス認可、SSO ポータル、`AssumeRoleWithWebIdentity`・`AssumeRoleWithSAML`、`GetCredentialsForIdentity`、`aws login`）で自分で認証情報を得る、人間に承認させる | ルールと無関係に拒否。SSO OIDC、SSO ポータル、signin はホストごと CONNECT の段階で（AWS の設定が無くても）、STS と Cognito Identity の操作は MITM したうえで操作名で |
 | AWS の応答に本物のキーをエコーさせる | 本物のアクセスキー ID とシークレットをスクラブ対象に加える |
@@ -72,8 +72,8 @@ CredShim は ssh-agent として、鍵をプロキシの中だけに置いて署
 | 任意のデータ（コミット署名、別プロトコルの challenge）に署名させる | `crates/ssh/tests/openssh.rs` の `ssh_keygen_signatures_are_refused`、`crates/ssh/tests/policy.rs` の `data_that_is_not_exactly_a_user_authentication_request_is_refused`・`a_request_naming_another_key_or_algorithm_is_refused`・`unknown_keys_and_signature_flags_are_refused` |
 | agent フォワードを経由して別ホストから使う | `crates/ssh/tests/openssh.rs` の `requests_through_a_forwarded_agent_are_refused`、`crates/ssh/tests/policy.rs` の `forwarded_connections_are_refused_even_after_a_later_authentication_bind` |
 | `~/.aws` の credentials を読む | `crates/e2e/tests/aws_cli.rs` の `aws_cli_query_and_json_services_work_with_only_a_dummy_profile`・`aws_cli_s3_upload_list_and_download_stream_through_the_proxy`（ダミーのプロファイルだけで動き、本物が CLI の出力とログに現れない）、`crates/cli/tests/aws.rs` の `the_aws_preset_runs_once_both_secrets_exist_and_keeps_the_dummy_off_plain_http` |
-| ダミーのアクセスキーで署名した要求を AWS 以外のホストへ送る | `crates/mitm/tests/aws.rs` の `dummy_sent_outside_aws_is_refused_before_leaving_the_proxy`、`crates/aws/tests/policy.rs` の `dummy_outside_aws_or_outside_the_authorization_credential_is_denied` |
-| 束縛先の API で新しい認証情報を発行させ、応答から本物の値を得る | `crates/mitm/tests/aws.rs` の `credential_issuing_operations_are_refused`、`crates/aws/tests/policy.rs` の `credential_issuing_operations_are_denied_whichever_way_they_are_named`、`crates/e2e/tests/aws_cli.rs` の `aws_cli_cannot_mint_new_credentials` |
-| 署名の要らない API で自分で認証情報を得る、人間に承認させる | `crates/mitm/tests/aws.rs` の `unsigned_credential_apis_are_refused_without_any_rule_matching`、`crates/cli/tests/aws.rs` の `sso_and_signin_endpoints_are_refused_even_without_aws_config`、`crates/aws/tests/policy.rs` の `unsigned_credential_apis_are_denied_without_any_rule` |
+| ダミーのアクセスキーで署名した要求を AWS 以外のホストへ送る | `crates/mitm/tests/aws.rs` の `dummy_sent_outside_aws_is_refused_before_leaving_the_proxy`・`a_scope_that_names_another_service_or_region_is_never_resigned`、`crates/aws/tests/policy.rs` の `the_host_must_be_an_endpoint_of_the_scope_service_and_region`、`crates/aws/tests/policy.rs` の `dummy_outside_aws_or_outside_the_authorization_credential_is_denied` |
+| 束縛先の API で新しい認証情報を発行させ、応答から本物の値を得る | `crates/mitm/tests/aws.rs` の `credential_issuing_operations_are_refused`、`crates/aws/tests/policy.rs` の `credential_issuing_operations_are_denied_whichever_way_they_are_named`・`dot_segments_and_case_do_not_hide_rest_credential_operations`・`comma_joined_targets_and_encoded_bodies_do_not_hide_operations`、`crates/e2e/tests/aws_cli.rs` の `aws_cli_cannot_mint_new_credentials` |
+| 署名の要らない API で自分で認証情報を得る、人間に承認させる | `crates/mitm/tests/aws.rs` の `unsigned_credential_apis_are_refused_without_any_rule_matching`、`crates/cli/tests/aws.rs` の `sso_and_signin_endpoints_are_refused_even_without_aws_config`、`crates/aws/tests/policy.rs` の `unsigned_credential_apis_are_denied_without_any_rule`・`unsigned_credential_apis_are_denied_on_fips_endpoints` |
 | AWS の応答に本物のキーをエコーさせる | `crates/mitm/tests/aws.rs` の `query_protocol_request_signed_with_the_dummy_is_resigned_and_echoes_are_scrubbed` |
 | 署名付きチャンクでプロキシの知らない署名を続けさせる | `crates/mitm/tests/aws.rs` の `signed_chunk_uploads_and_oversized_non_s3_bodies_never_reach_aws` |

@@ -5,6 +5,7 @@ use credshim_core::rule::{MAX_DUMMY_LEN, MIN_DUMMY_LEN, is_identifier, is_valid_
 use serde::Deserialize;
 
 use crate::auth::Scope;
+use crate::hosts::CUSTOMER_HOSTED_SERVICES;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -131,11 +132,12 @@ impl AwsRule {
     }
 
     pub fn refuses(&self, scope: &Scope) -> Option<ScopeRefusal> {
-        if self
+        let listed = self
             .services
             .as_ref()
-            .is_some_and(|allowed| !allowed.contains(&scope.service))
-        {
+            .map(|allowed| allowed.contains(&scope.service));
+        let customer_hosted = CUSTOMER_HOSTED_SERVICES.contains(&scope.service.as_str());
+        if listed == Some(false) || (customer_hosted && listed.is_none()) {
             return Some(ScopeRefusal::Service);
         }
         if self

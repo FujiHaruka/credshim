@@ -48,6 +48,14 @@ fn signed(method: &str, uri: &str, service: &str, extra: &[(&str, &str)]) -> Par
     request(method, uri, &headers)
 }
 
+fn at(stamp: &str) -> std::time::SystemTime {
+    let format = time::macros::format_description!("[year][month][day]T[hour][minute][second]Z");
+    time::PrimitiveDateTime::parse(stamp, format)
+        .unwrap()
+        .assume_utc()
+        .into()
+}
+
 fn reason(decision: Decision<'_>) -> Reason {
     match decision {
         Decision::Deny(denial) => denial.reason,
@@ -69,7 +77,18 @@ fn parses_the_sigv4_authorization_header() {
         }
     );
     assert_eq!(auth.signed_headers, ["host", "x-amz-date"]);
-    assert!(auth.signing_time(&parts.headers).is_ok());
+    assert!(
+        auth.signing_time(&parts.headers, at("20261001T011000Z"))
+            .is_ok()
+    );
+    assert_eq!(
+        auth.signing_time(&parts.headers, at("20261001T012000Z")),
+        Err(AuthError::ClockSkew)
+    );
+    assert_eq!(
+        auth.signing_time(&parts.headers, at("20261001T004500Z")),
+        Err(AuthError::ClockSkew)
+    );
 }
 
 #[test]
@@ -116,11 +135,14 @@ fn signing_time_must_match_the_scope_date() {
     );
     let parsed = SigV4Auth::from_headers(&parts.headers).unwrap().unwrap();
     assert_eq!(
-        parsed.signing_time(&parts.headers),
+        parsed.signing_time(&parts.headers, at("20261002T000000Z")),
         Err(AuthError::DateMismatch)
     );
     let parts = request("GET", "/", &[("authorization", &auth)]);
-    assert_eq!(parsed.signing_time(&parts.headers), Err(AuthError::BadDate));
+    assert_eq!(
+        parsed.signing_time(&parts.headers, at("20261001T000000Z")),
+        Err(AuthError::BadDate)
+    );
 }
 
 #[test]
@@ -560,5 +582,205 @@ fn unsigned_credential_apis_are_denied_without_any_rule() {
         &[],
         "dynamodb.ap-northeast-1.amazonaws.com",
         &plain
+    ));
+}
+
+#[test]
+fn unsigned_credential_apis_are_denied_on_fips_endpoints() {
+    let form = [("content-type", "application/x-www-form-urlencoded")];
+    let sts = "sts-fips.us-east-1.amazonaws.com";
+    let get = request(
+        "GET",
+        "/?Action=AssumeRoleWithWebIdentity&WebIdentityToken=x",
+        &[],
+    );
+    assert!(credshim_aws::policy::needs_body(&[], sts, &get));
+    assert_eq!(
+        reason(credshim_aws::policy::decide(&[], sts, &get, Some(b""))),
+        Reason::UnsignedCredentialOperation
+    );
+    let post = request("POST", "/", &form);
+    assert_eq!(
+        reason(credshim_aws::policy::decide(
+            &[],
+            sts,
+            &post,
+            Some(b"Action=AssumeRoleWithSAML")
+        )),
+        Reason::UnsignedCredentialOperation
+    );
+    let cognito = request(
+        "POST",
+        "/",
+        &[(
+            "x-amz-target",
+            "AWSCognitoIdentityService.GetCredentialsForIdentity",
+        )],
+    );
+    assert_eq!(
+        reason(credshim_aws::policy::decide(
+            &[],
+            "cognito-identity-fips.us-east-1.amazonaws.com",
+            &cognito,
+            Some(b"{}")
+        )),
+        Reason::UnsignedCredentialOperation
+    );
+}
+
+#[test]
+fn dot_segments_and_case_do_not_hide_rest_credential_operations() {
+    let rules = rules();
+    let host = "deadline.ap-northeast-1.amazonaws.com";
+    for path in [
+        "/2023-10-12/farms/f/fleets/g/./read-roles",
+        "/2023-10-12/farms/f/fleets/g/x/../read-roles",
+        "/2023-10-12/farms/f/fleets/g/%2E/READ-ROLES",
+    ] {
+        let parts = signed("GET", path, "deadline", &[]);
+        assert_eq!(
+            reason(credshim_aws::policy::decide(
+                &rules,
+                host,
+                &parts,
+                Some(b"")
+            )),
+            Reason::CredentialOperation,
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn comma_joined_targets_and_encoded_bodies_do_not_hide_operations() {
+    let rules = rules();
+    let parts = signed(
+        "POST",
+        "/",
+        "sts",
+        &[(
+            "x-amz-target",
+            "AWSSecurityTokenServiceV20110615.AssumeRole, X.GetCallerIdentity",
+        )],
+    );
+    assert_eq!(
+        reason(credshim_aws::policy::decide(
+            &rules,
+            "sts.ap-northeast-1.amazonaws.com",
+            &parts,
+            Some(b"{}")
+        )),
+        Reason::CredentialOperation
+    );
+    let gzip = signed("POST", "/", "sts", &[("content-encoding", "gzip")]);
+    assert_eq!(
+        reason(credshim_aws::policy::decide(
+            &rules,
+            "sts.ap-northeast-1.amazonaws.com",
+            &gzip,
+            Some(b"\x1f\x8b")
+        )),
+        Reason::EncodedBody
+    );
+}
+
+#[test]
+fn the_host_must_be_an_endpoint_of_the_scope_service_and_region() {
+    let rules = rules();
+    let form = [("content-type", "application/x-www-form-urlencoded")];
+    let resigned = |host: &str, service: &str, region: &str| {
+        let auth = authorization(DUMMY, region, service);
+        let mut headers = vec![
+            ("authorization", auth.as_str()),
+            ("x-amz-date", "20261001T010203Z"),
+            ("x-amz-content-sha256", "UNSIGNED-PAYLOAD"),
+        ];
+        headers.extend_from_slice(&form);
+        let parts = request("POST", "/", &headers);
+        match credshim_aws::policy::decide(&rules, host, &parts, Some(b"Action=GetCallerIdentity"))
+        {
+            Decision::Resign(_) => Ok(()),
+            Decision::Deny(denial) => Err(denial.reason),
+            other => panic!("unexpected {other:?}"),
+        }
+    };
+    for (host, service, region) in [
+        ("sts.ap-northeast-1.amazonaws.com", "sts", "ap-northeast-1"),
+        ("sts-fips.us-east-1.amazonaws.com", "sts", "us-east-1"),
+        ("iam.amazonaws.com", "iam", "us-east-1"),
+        (
+            "bucket.s3.ap-northeast-1.amazonaws.com",
+            "s3",
+            "ap-northeast-1",
+        ),
+        ("s3.amazonaws.com", "s3", "us-east-1"),
+        ("bucket.s3-us-west-2.amazonaws.com", "s3", "us-west-2"),
+        (
+            "123456789012.s3-control.us-east-1.amazonaws.com",
+            "s3",
+            "us-east-1",
+        ),
+        (
+            "bedrock-runtime.us-east-1.amazonaws.com",
+            "bedrock",
+            "us-east-1",
+        ),
+        (
+            "monitoring.us-east-1.amazonaws.com",
+            "monitoring",
+            "us-east-1",
+        ),
+        ("email.us-east-1.amazonaws.com", "ses", "us-east-1"),
+    ] {
+        assert_eq!(resigned(host, service, region), Ok(()), "{host}");
+    }
+    for (host, service, region) in [
+        (
+            "sts.ap-northeast-1.amazonaws.com",
+            "dynamodb",
+            "ap-northeast-1",
+        ),
+        ("sts.ap-northeast-1.amazonaws.com", "sts", "us-east-1"),
+        (
+            "abc123.execute-api.us-east-1.amazonaws.com",
+            "s3",
+            "us-east-1",
+        ),
+        ("sts.s3.us-east-1.amazonaws.com", "sts", "us-east-1"),
+        ("ec2-1-2-3-4.compute-1.amazonaws.com", "ec2", "us-east-1"),
+    ] {
+        assert_eq!(
+            resigned(host, service, region),
+            Err(Reason::EndpointMismatch),
+            "{host}"
+        );
+    }
+    assert_eq!(
+        resigned(
+            "abc123.execute-api.us-east-1.amazonaws.com",
+            "execute-api",
+            "us-east-1"
+        ),
+        Err(Reason::ServiceNotAllowed)
+    );
+    let listed = AwsRule::from_specs(&[AwsKeySpec {
+        services: Some(vec!["execute-api".into()]),
+        ..spec("dev", DUMMY)
+    }])
+    .unwrap();
+    let auth = authorization(DUMMY, "us-east-1", "execute-api");
+    let parts = request(
+        "GET",
+        "/prod/items",
+        &[("authorization", &auth), ("x-amz-date", "20261001T010203Z")],
+    );
+    assert!(matches!(
+        credshim_aws::policy::decide(
+            &listed,
+            "abc123.execute-api.us-east-1.amazonaws.com",
+            &parts,
+            Some(b"")
+        ),
+        Decision::Resign(_)
     ));
 }

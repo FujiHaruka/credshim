@@ -5,6 +5,7 @@ pub mod operation;
 pub mod policy;
 pub mod resign;
 pub mod rule;
+mod service_endpoints;
 
 use http::request::Parts;
 

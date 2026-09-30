@@ -154,7 +154,7 @@ name = "aws"
 dummy_access_key_id = "CREDSHIMAWS..."
 access_key_id = "aws-access-key-id"          # 秘密ストアの名前
 secret_access_key = "aws-secret-access-key"  # 秘密ストアの名前
-services = ["sts", "s3", "dynamodb"]         # 省略すると全サービス。資格スコープのサービス名で照合
+services = ["sts", "s3", "dynamodb"]         # 省略すると全サービス（execute-api は明示したときだけ）。資格スコープのサービス名で照合
 regions = ["ap-northeast-1"]                 # 省略すると全リージョン
 ```
 

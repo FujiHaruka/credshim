@@ -12,10 +12,11 @@ use hyper::service::service_fn;
 use hyper::upgrade::OnUpgrade;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_rustls::LazyConfigAcceptor;
 
 use credshim_aws::{Aws, Decision, Reason};
-use credshim_core::{Destination, InjectError, Injector, Permit, Verdict};
+use credshim_core::{Destination, InjectError, Injector, Verdict};
 use credshim_oauth::{Exchange, OAuth};
 
 use crate::audit::{self, AwsLabels, Outcome, Stats};
@@ -25,6 +26,13 @@ use crate::scrub::{self, ScrubBody};
 use crate::upstream::{ALPN_H2, ConnectError, TargetConnector, Upstream};
 
 const HTTPS_PORT: u16 = 443;
+const BUFFER_WAIT: Duration = Duration::from_secs(30);
+const BUFFER_BUDGET_BODIES: usize = 4;
+
+pub(crate) fn aws_buffer_budget(aws: Option<&Aws>) -> Arc<Semaphore> {
+    let kib = aws.map_or(0, |aws| BUFFER_BUDGET_BODIES * (aws.max_body() / 1024 + 1));
+    Arc::new(Semaphore::new(kib.min(Semaphore::MAX_PERMITS)))
+}
 
 #[derive(Clone)]
 pub struct Intercept {
@@ -163,6 +171,7 @@ pub(crate) struct Services {
     pub(crate) injector: Arc<Injector>,
     pub(crate) oauth: Option<Arc<OAuth>>,
     pub(crate) aws: Option<Arc<Aws>>,
+    pub(crate) aws_buffers: Arc<Semaphore>,
     pub(crate) scrub: bool,
     pub(crate) stats: Arc<Stats>,
 }
@@ -172,6 +181,7 @@ pub(crate) struct Session {
     injector: Arc<Injector>,
     oauth: Option<Arc<OAuth>>,
     aws: Option<Arc<Aws>>,
+    aws_buffers: Arc<Semaphore>,
     scrub: bool,
     stats: Arc<Stats>,
     ingress: Ingress,
@@ -214,6 +224,7 @@ impl Session {
             injector: services.injector,
             oauth: services.oauth,
             aws: services.aws,
+            aws_buffers: services.aws_buffers,
             scrub: services.scrub,
             stats: services.stats,
             ingress,
@@ -458,13 +469,34 @@ impl Session {
             Some(permit) => response.map(|body| {
                 Holding {
                     body,
-                    _permit: permit,
+                    _guard: permit,
                 }
                 .boxed()
             }),
             None => response,
         };
         Relayed::new(outcome, response, aws)
+    }
+
+    async fn reserve_buffer(
+        &self,
+        aws: &Aws,
+        parts: &http::request::Parts,
+    ) -> Option<OwnedSemaphorePermit> {
+        let declared = parts
+            .headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(usize::MAX);
+        let kib = u32::try_from(declared.min(aws.max_body()) / 1024 + 1).ok()?;
+        tokio::time::timeout(
+            BUFFER_WAIT,
+            self.aws_buffers.clone().acquire_many_owned(kib),
+        )
+        .await
+        .ok()?
+        .ok()
     }
 
     async fn through_aws(
@@ -477,10 +509,21 @@ impl Session {
         let target = &self.target;
         let rule_in = |parts: &http::request::Parts| aws.first_dummy_in(parts).map(str::to_string);
         let (buffered, body) = if aws.needs_body(&target.host, parts) {
+            let Some(budget) = self.reserve_buffer(aws, parts).await else {
+                return Err(Box::new(Relayed::new(
+                    Outcome::Rejected,
+                    status(StatusCode::SERVICE_UNAVAILABLE),
+                    Some(AwsLabels::reason(Reason::BufferBusy)),
+                )));
+            };
             match Limited::new(body, aws.max_body()).collect().await {
                 Ok(collected) => {
                     let bytes = collected.to_bytes();
-                    (Some(bytes.clone()), full(bytes))
+                    let body = Holding {
+                        body: full(bytes.clone()),
+                        _guard: budget,
+                    };
+                    (Some(bytes), body.boxed())
                 }
                 Err(err) if err.downcast_ref::<LengthLimitError>().is_some() => {
                     tracing::warn!(host = %target.host, limit = aws.max_body(), "AWS request body exceeds the limit");
@@ -801,12 +844,12 @@ impl Relayed {
     }
 }
 
-struct Holding {
+struct Holding<G> {
     body: ProxyBody,
-    _permit: Permit,
+    _guard: G,
 }
 
-impl http_body::Body for Holding {
+impl<G: Unpin> http_body::Body for Holding<G> {
     type Data = bytes::Bytes;
     type Error = hyper::Error;
 
@@ -896,6 +939,14 @@ fn origin_form(uri: &Uri) -> Uri {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aws_buffer_budget_holds_a_few_full_bodies() {
+        let aws = Aws::new(Vec::new(), credshim_aws::Signer::default()).with_max_body(64 * 1024);
+        let budget = aws_buffer_budget(Some(&aws));
+        assert_eq!(budget.available_permits(), BUFFER_BUDGET_BODIES * 65);
+        assert_eq!(aws_buffer_budget(None).available_permits(), 0);
+    }
 
     #[test]
     fn joined_cookie_stays_sensitive_when_any_crumb_was() {

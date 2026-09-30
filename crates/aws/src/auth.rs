@@ -1,4 +1,4 @@
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use http::HeaderMap;
 use http::header::AUTHORIZATION;
@@ -7,6 +7,7 @@ use time::macros::format_description;
 
 pub const ALGORITHM: &str = "AWS4-HMAC-SHA256";
 pub const X_AMZ_DATE: &str = "x-amz-date";
+pub const MAX_CLOCK_SKEW: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Scope {
@@ -34,6 +35,8 @@ pub enum AuthError {
     BadDate,
     #[error("X-Amz-Date does not fall on the credential scope's date")]
     DateMismatch,
+    #[error("X-Amz-Date is more than {} minutes away from the current time", MAX_CLOCK_SKEW.as_secs() / 60)]
+    ClockSkew,
 }
 
 impl SigV4Auth {
@@ -119,7 +122,11 @@ impl SigV4Auth {
         })
     }
 
-    pub fn signing_time(&self, headers: &HeaderMap) -> Result<SystemTime, AuthError> {
+    pub fn signing_time(
+        &self,
+        headers: &HeaderMap,
+        now: SystemTime,
+    ) -> Result<SystemTime, AuthError> {
         let mut values = headers.get_all(X_AMZ_DATE).iter();
         let (Some(value), None) = (values.next(), values.next()) else {
             return Err(AuthError::BadDate);
@@ -133,7 +140,15 @@ impl SigV4Auth {
         if !value.starts_with(&self.scope.date) {
             return Err(AuthError::DateMismatch);
         }
-        Ok(parsed.assume_utc().into())
+        let time: SystemTime = parsed.assume_utc().into();
+        let skew = match time.duration_since(now) {
+            Ok(ahead) => ahead,
+            Err(behind) => behind.duration(),
+        };
+        if skew > MAX_CLOCK_SKEW {
+            return Err(AuthError::ClockSkew);
+        }
+        Ok(time)
     }
 }
 

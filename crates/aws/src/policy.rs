@@ -32,6 +32,9 @@ pub enum Reason {
     SignedChunks,
     BadPayloadHash,
     BodyTooLarge,
+    EncodedBody,
+    EndpointMismatch,
+    BufferBusy,
 }
 
 impl Reason {
@@ -48,6 +51,9 @@ impl Reason {
             Reason::SignedChunks => "signed_chunks",
             Reason::BadPayloadHash => "bad_payload_hash",
             Reason::BodyTooLarge => "body_too_large",
+            Reason::EncodedBody => "encoded_body",
+            Reason::EndpointMismatch => "endpoint_mismatch",
+            Reason::BufferBusy => "buffer_busy",
         }
     }
 }
@@ -122,6 +128,14 @@ pub fn decide<'r>(
         };
     }
     let auth = SigV4Auth::from_headers(&parts.headers);
+    let encoded = parts
+        .headers
+        .get_all(http::header::CONTENT_ENCODING)
+        .iter()
+        .any(|value| !value.as_bytes().eq_ignore_ascii_case(b"identity"));
+    if body.is_some() && encoded {
+        return deny(rule, Reason::EncodedBody, Labels::default());
+    }
     let names = operation::names(parts, body);
     let labels = Labels {
         scope: auth
@@ -156,6 +170,9 @@ pub fn decide<'r>(
         Some(ScopeRefusal::Service) => return deny(Some(rule), Reason::ServiceNotAllowed, labels),
         Some(ScopeRefusal::Region) => return deny(Some(rule), Reason::RegionNotAllowed, labels),
         None => {}
+    }
+    if !hosts::is_endpoint_of(host, &auth.scope.service, &auth.scope.region) {
+        return deny(Some(rule), Reason::EndpointMismatch, labels);
     }
     let payload = if auth.scope.service == S3 {
         match s3_payload(parts) {

@@ -626,20 +626,13 @@ async fn services_outside_the_rule_are_refused() {
 }
 
 #[tokio::test]
-async fn a_scope_that_names_another_service_is_rejected_by_aws_after_resigning() {
+async fn a_scope_that_names_another_service_or_region_is_never_resigned() {
+    let logs = capture_logs();
     let f = Fixture::new().await;
-    let (status, body) = f.query(STS, "dynamodb", "Action=GetCallerIdentity").await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{}", text(&body));
-    let requests = f.mock.requests();
-    assert_eq!(requests.len(), 1);
-    assert!(
-        requests[0]
-            .verdict
-            .as_ref()
-            .is_err_and(|err| err.contains("scoped to dynamodb")),
-        "{:?}",
-        requests[0].verdict
-    );
+    let (status, _) = f.query(STS, "dynamodb", "Action=GetCallerIdentity").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(f.mock.requests().is_empty());
+    assert!(logs.contents().contains("reason=\"endpoint_mismatch\""));
 }
 
 #[tokio::test]

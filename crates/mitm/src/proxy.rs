@@ -277,6 +277,7 @@ impl Handler {
                 injector: config.injector.clone(),
                 oauth: config.oauth.clone(),
                 aws: config.aws.clone(),
+                aws_buffers: crate::intercept::aws_buffer_budget(config.aws.as_deref()),
                 scrub: config.scrub,
                 stats: config.stats.clone(),
             },

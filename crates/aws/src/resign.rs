@@ -115,7 +115,9 @@ impl Signer {
             .keys
             .get(plan.rule.name())
             .ok_or_else(|| ResignError::MissingCredentials(plan.rule.name().to_string()))?;
-        let time = plan.auth.signing_time(&parts.headers)?;
+        let time = plan
+            .auth
+            .signing_time(&parts.headers, std::time::SystemTime::now())?;
         let signed: Vec<(String, String)> = plan
             .auth
             .signed_headers
