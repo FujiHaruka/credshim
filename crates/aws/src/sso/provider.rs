@@ -17,6 +17,7 @@ use crate::rule::SsoRole;
 const SCRUBBED_TOKEN: &str = "credshim-scrubbed-aws-sso-token";
 const KEPT_GENERATIONS: usize = 2;
 const REFRESH_BACKOFF: Duration = Duration::from_secs(30);
+const ROLE_RETRY_AFTER: Duration = Duration::from_secs(5);
 
 type ScrubPairs = Vec<(SecretString, String)>;
 
@@ -35,7 +36,7 @@ impl Default for SsoOptions {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum CredentialError {
     #[error("AWS SSO session {0:?} needs a login; run `credshim aws sso login {0}`")]
     LoginRequired(String),
@@ -83,7 +84,18 @@ impl LoginState {
 struct RoleSlot {
     role: SsoRole,
     dummy: String,
-    cached: tokio::sync::Mutex<Option<CachedRole>>,
+    state: tokio::sync::Mutex<RoleState>,
+}
+
+#[derive(Default)]
+struct RoleState {
+    cached: Option<CachedRole>,
+    failed: Option<(Instant, CredentialError)>,
+}
+
+enum Kept {
+    Removed,
+    Newer(Box<StoredLogin>),
 }
 
 struct CachedRole {
@@ -139,7 +151,7 @@ impl SsoProvider {
                         RoleSlot {
                             role,
                             dummy,
-                            cached: tokio::sync::Mutex::default(),
+                            state: tokio::sync::Mutex::default(),
                         },
                     )
                 })
@@ -178,32 +190,53 @@ impl SsoProvider {
             .ok_or_else(|| CredentialError::NotLoaded(rule.to_string()))?;
         let session = slot.role.session.as_str();
         let (token, serial) = self.access_token(session).await?;
-        let mut cached = slot.cached.lock().await;
-        if let Some(cached) = cached.as_ref()
-            && cached.expiration > SystemTime::now() + self.options.refresh_before
+        let mut role = slot.state.lock().await;
+        let now = SystemTime::now();
+        let usable = role
+            .cached
+            .as_ref()
+            .filter(|cached| cached.expiration > now)
+            .map(|cached| (cached.credentials.clone(), cached.expiration));
+        if let Some((credentials, expiration)) = &usable
+            && *expiration > now + self.options.refresh_before
         {
-            return Ok(cached.credentials.clone());
+            return Ok(credentials.clone());
         }
-        let fetched = match self.fetch(session, &token, &slot.role).await {
-            Err(CredentialError::LoginRequired(_)) => {
-                self.invalidate(session, serial).await;
-                let (token, retried) = self.access_token(session).await?;
-                if retried == serial {
-                    return Err(CredentialError::LoginRequired(session.to_string()));
-                }
-                self.fetch(session, &token, &slot.role).await
+        let recent_failure = role
+            .failed
+            .as_ref()
+            .filter(|(at, _)| at.elapsed() < ROLE_RETRY_AFTER)
+            .map(|(_, err)| err.clone());
+        let fetched = match recent_failure {
+            Some(err) => Err(err),
+            None => {
+                let fetched = match self.fetch(session, &token, &slot.role).await {
+                    Err(CredentialError::LoginRequired(_)) => {
+                        self.invalidate(session, serial).await;
+                        let (token, retried) = self.access_token(session).await?;
+                        if retried == serial {
+                            return Err(CredentialError::LoginRequired(session.to_string()));
+                        }
+                        self.fetch(session, &token, &slot.role).await
+                    }
+                    other => other,
+                };
+                role.failed = fetched
+                    .as_ref()
+                    .err()
+                    .map(|err| (Instant::now(), err.clone()));
+                fetched
             }
-            other => other,
         };
         let fresh = match fetched {
             Ok(fresh) => fresh,
             Err(err @ CredentialError::Unavailable { .. }) => {
-                return match cached.as_ref() {
-                    Some(cached) if cached.expiration > SystemTime::now() => {
+                return match usable {
+                    Some((credentials, _)) => {
                         tracing::warn!(%rule, error = %err, "keeping AWS role credentials that are about to expire");
-                        Ok(cached.credentials.clone())
+                        Ok(credentials)
                     }
-                    _ => Err(err),
+                    None => Err(err),
                 };
             }
             Err(err) => return Err(err),
@@ -225,7 +258,7 @@ impl SsoProvider {
             )
             .map_err(|_| CredentialError::Unusable)?,
         );
-        *cached = Some(CachedRole {
+        role.cached = Some(CachedRole {
             credentials: credentials.clone(),
             expiration,
         });
@@ -288,7 +321,7 @@ impl SsoProvider {
             let backing_off = login
                 .refresh_after
                 .is_some_and(|after| Instant::now() < after);
-            if !(backing_off && current.token.expires_at > now) {
+            if !backing_off {
                 match self.refresh(state, current).await {
                     Some(refreshed) => {
                         self.persist(state, &mut login, refreshed).await;
@@ -350,38 +383,67 @@ impl SsoProvider {
 
     async fn persist(&self, state: &SessionState, login: &mut LoginState, refreshed: StoredLogin) {
         self.record_login(&state.session, &refreshed);
-        let name = state.session.secret_name();
-        let stored = self.blocking_get(&name).await;
-        if let Ok(Some(secret)) = &stored
-            && let Ok(other) = StoredLogin::from_secret(secret, &state.session)
-            && other.login_id != refreshed.login_id
-        {
-            self.record_login(&state.session, &other);
-            login.replace(other);
-            return;
-        }
         let secret = refreshed.to_secret(&state.session);
+        let session = state.session.clone();
+        let login_id = refreshed.login_id.clone();
+        let expires_at = refreshed.token.expires_at;
         let store = self.store.clone();
-        let written = tokio::task::spawn_blocking(move || store.set(&name, secret)).await;
-        match written.map_err(|err| err.to_string()) {
-            Ok(Ok(())) => {}
-            Err(panicked) => {
-                tracing::error!(session = state.session.name(), error = %panicked, "saving the refreshed AWS SSO token failed")
+        let written = tokio::task::spawn_blocking(move || {
+            let mut kept = Kept::Removed;
+            let written = store.update(&session.secret_name(), &mut |stored| {
+                let stored =
+                    stored.and_then(|stored| StoredLogin::from_secret(stored, &session).ok());
+                match stored {
+                    None => {
+                        kept = Kept::Removed;
+                        None
+                    }
+                    Some(stored)
+                        if stored.login_id != login_id || stored.token.expires_at > expires_at =>
+                    {
+                        kept = Kept::Newer(Box::new(stored));
+                        None
+                    }
+                    Some(_) => Some(secret.clone()),
+                }
+            });
+            (written, kept)
+        })
+        .await;
+        let name = state.session.name();
+        match written {
+            Ok((Ok(true), _)) => login.replace(refreshed),
+            Ok((Ok(false), Kept::Newer(stored))) => {
+                self.record_login(&state.session, &stored);
+                login.replace(*stored);
             }
-            Ok(Err(StoreError::ReadOnly(_))) if login.warned_read_only => {}
-            Ok(Err(StoreError::ReadOnly(backend))) => {
-                login.warned_read_only = true;
-                tracing::warn!(
-                    session = state.session.name(),
-                    backend,
-                    "the secret store is read-only, so the refreshed AWS SSO token lives only in memory"
+            Ok((Ok(false), Kept::Removed)) => {
+                tracing::info!(
+                    session = name,
+                    "the AWS SSO login was removed from the secret store, so credshim stops using it"
                 );
+                login.current = None;
             }
-            Ok(Err(err)) => {
-                tracing::warn!(session = state.session.name(), error = %err, "could not save the refreshed AWS SSO token")
+            Ok((Err(StoreError::ReadOnly(backend)), _)) => {
+                if !login.warned_read_only {
+                    login.warned_read_only = true;
+                    tracing::warn!(
+                        session = name,
+                        backend,
+                        "the secret store is read-only, so the refreshed AWS SSO token lives only in memory"
+                    );
+                }
+                login.replace(refreshed);
+            }
+            Ok((Err(err), _)) => {
+                tracing::warn!(session = name, error = %err, "could not save the refreshed AWS SSO token");
+                login.replace(refreshed);
+            }
+            Err(panicked) => {
+                tracing::error!(session = name, error = %panicked, "saving the refreshed AWS SSO token failed");
+                login.replace(refreshed);
             }
         }
-        login.replace(refreshed);
     }
 
     async fn reload(&self, state: &SessionState, login: &mut LoginState) -> bool {
@@ -418,10 +480,10 @@ impl SsoProvider {
         };
         match stored {
             Some(stored)
-                if login
-                    .current
-                    .as_ref()
-                    .is_none_or(|current| current.login_id != stored.login_id) =>
+                if login.current.as_ref().is_none_or(|current| {
+                    current.login_id != stored.login_id
+                        || current.token.expires_at < stored.token.expires_at
+                }) =>
             {
                 self.record_login(&state.session, &stored);
                 login.replace(stored);

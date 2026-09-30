@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use credshim_secrets::{SecretStore, StoreError};
 
@@ -101,13 +101,25 @@ pub async fn logout(
         return Ok(LogoutOutcome::NotLoggedIn);
     };
     let revoked = match StoredLogin::from_secret(&secret, session) {
-        Ok(stored) => Api { transport, session }
-            .logout(&stored.token.access_token)
-            .await
-            .or_else(|err| match err.status() {
-                Some(http::StatusCode::UNAUTHORIZED) => Ok(()),
-                _ => Err(err.to_string()),
-            }),
+        Ok(stored) => {
+            let api = Api { transport, session };
+            let access_token = match &stored.token.refresh_token {
+                Some(refresh_token)
+                    if stored.token.expires_at <= SystemTime::now()
+                        && stored.client.expires_at > SystemTime::now() =>
+                {
+                    api.refresh(&stored.client, refresh_token)
+                        .await
+                        .map_or(stored.token.access_token.clone(), |token| {
+                            token.access_token
+                        })
+                }
+                _ => stored.token.access_token.clone(),
+            };
+            api.logout(&access_token)
+                .await
+                .map_err(|err| err.to_string())
+        }
         Err(err) => Err(err.to_string()),
     };
     store.remove(&name)?;

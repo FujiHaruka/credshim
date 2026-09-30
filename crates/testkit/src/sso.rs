@@ -50,6 +50,8 @@ pub struct SsoCounts {
     pub device_tokens: usize,
     pub refreshes: usize,
     pub role_credentials: usize,
+    pub role_requests: usize,
+    pub refresh_attempts: usize,
     pub logouts: usize,
 }
 
@@ -73,6 +75,7 @@ struct SsoState {
     start_urls: Vec<String>,
     secrets: Vec<String>,
     counts: SsoCounts,
+    role_failure: Option<StatusCode>,
 }
 
 struct Shared {
@@ -147,6 +150,10 @@ impl MockSso {
         for token in self.shared.state.lock().unwrap().access_tokens.values_mut() {
             token.expires_at = SystemTime::UNIX_EPOCH;
         }
+    }
+
+    pub fn fail_role_credentials(&self, status: Option<StatusCode>) {
+        self.shared.state.lock().unwrap().role_failure = status;
     }
 
     pub fn revoke_refresh_tokens(&self) {
@@ -337,6 +344,7 @@ fn token(shared: &Shared, input: &Value) -> Response {
             }
         }
         Some(REFRESH_TOKEN_GRANT) => {
+            state.counts.refresh_attempts += 1;
             let presented = input["refreshToken"].as_str().unwrap_or_default();
             let owner = input["clientId"].as_str().unwrap_or_default();
             if state.refresh_tokens.get(presented).map(String::as_str) != Some(owner) {
@@ -384,6 +392,10 @@ fn bearer_ok(state: &SsoState, bearer: &str) -> bool {
 fn role_credentials(shared: &Shared, bearer: &str, query: &str) -> Response {
     let lifetime = shared.config.lock().unwrap().role_lifetime;
     let mut state = shared.state.lock().unwrap();
+    state.counts.role_requests += 1;
+    if let Some(status) = state.role_failure {
+        return (status, Bytes::new()).into_response();
+    }
     if !bearer_ok(&state, bearer) {
         return unauthorized();
     }

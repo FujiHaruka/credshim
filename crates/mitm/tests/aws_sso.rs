@@ -439,6 +439,7 @@ async fn clients_still_cannot_reach_the_sso_endpoints_the_proxy_itself_uses() {
             .unwrap_err();
         assert!(err.is_connect(), "{host}: {err}");
     }
+    assert_eq!(f.sso.counts(), before);
 
     let direct = f
         .transport
@@ -451,5 +452,84 @@ async fn clients_still_cannot_reach_the_sso_endpoints_the_proxy_itself_uses() {
         .await
         .unwrap();
     assert_eq!(direct.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(f.sso.counts(), before);
+    assert_eq!(f.sso.counts().role_requests, before.role_requests + 1);
+}
+
+#[tokio::test]
+async fn a_login_removed_from_the_store_is_never_written_back_by_a_refresh() {
+    let f = Fixture::new(
+        MockSsoConfig {
+            access_token_lifetime: Duration::from_secs(3),
+            ..MockSsoConfig::default()
+        },
+        quick(Duration::from_secs(2)),
+    )
+    .await;
+    f.login().await;
+    let (status, _) = f.caller_identity().await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert!(f.store.remove(&f.session.secret_name()).unwrap());
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let reached = f.aws.requests().len();
+    let (status, body) = f.caller_identity().await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(f.aws.requests().len(), reached);
+    assert_eq!(f.stored(), None);
+}
+
+#[tokio::test]
+async fn logout_after_the_access_token_expired_refreshes_it_to_end_the_session() {
+    let f = Fixture::new(
+        MockSsoConfig {
+            access_token_lifetime: Duration::from_secs(1),
+            ..MockSsoConfig::default()
+        },
+        SsoOptions::default(),
+    )
+    .await;
+    f.login().await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    let outcome = credshim_aws::sso::logout(&f.session, f.transport.as_ref(), f.store.as_ref())
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, LogoutOutcome::Revoked);
+    assert_eq!(f.sso.counts().refreshes, 1);
+    assert_eq!(f.sso.counts().logouts, 1);
+    assert_eq!(f.stored(), None);
+}
+
+#[tokio::test]
+async fn failing_identity_center_calls_are_not_repeated_for_every_request() {
+    let f = Fixture::new(
+        MockSsoConfig {
+            access_token_lifetime: Duration::from_secs(2),
+            ..MockSsoConfig::default()
+        },
+        quick(Duration::from_secs(1)),
+    )
+    .await;
+    f.login().await;
+    f.sso
+        .fail_role_credentials(Some(StatusCode::INTERNAL_SERVER_ERROR));
+    for _ in 0..3 {
+        let (status, body) = f.caller_identity().await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        assert!(body.contains("CredShimSsoUnavailable"), "{body}");
+    }
+    assert_eq!(f.sso.counts().role_requests, 1);
+
+    f.sso.fail_role_credentials(None);
+    f.sso.revoke_refresh_tokens();
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+    let attempts = f.sso.counts().refresh_attempts;
+    for _ in 0..3 {
+        let (status, _) = f.caller_identity().await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+    assert_eq!(f.sso.counts().refresh_attempts, attempts + 1);
+    assert!(f.aws.requests().is_empty());
 }

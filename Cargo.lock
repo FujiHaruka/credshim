@@ -741,7 +741,9 @@ version = "0.1.0"
 dependencies = [
  "aws-credential-types",
  "aws-sigv4",
+ "bytes",
  "credshim-core",
+ "credshim-secrets",
  "credshim-testkit",
  "form_urlencoded",
  "hex",
@@ -749,11 +751,14 @@ dependencies = [
  "percent-encoding",
  "secrecy",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.21",
  "time",
+ "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -780,6 +785,7 @@ dependencies = [
  "credshim-aws",
  "credshim-core",
  "credshim-mitm",
+ "credshim-secrets",
  "credshim-testkit",
  "secrecy",
  "tempfile",
@@ -797,6 +803,7 @@ dependencies = [
  "credshim-core",
  "credshim-mitm",
  "credshim-oauth",
+ "credshim-secrets",
  "credshim-testkit",
  "form_urlencoded",
  "futures-util",

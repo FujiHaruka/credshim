@@ -168,6 +168,41 @@ fn age_file_removes_one_secret_and_keeps_the_rest() {
 }
 
 #[test]
+fn age_file_update_writes_only_what_the_change_returns() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = AgeFileStore::new(dir.path().join("s.age"), None);
+    store.set("login", SecretString::from("first")).unwrap();
+
+    let kept = store
+        .update("login", &mut |current| {
+            assert_eq!(
+                current
+                    .map(|value| value.expose_secret().to_string())
+                    .as_deref(),
+                Some("first")
+            );
+            None
+        })
+        .unwrap();
+    assert!(!kept);
+    assert_eq!(value(&store, "login").as_deref(), Some("first"));
+
+    let written = store
+        .update("login", &mut |_| Some(SecretString::from("second")))
+        .unwrap();
+    assert!(written);
+    assert_eq!(value(&store, "login").as_deref(), Some("second"));
+    assert!(
+        !store
+            .update("absent", &mut |current| {
+                assert!(current.is_none());
+                None
+            })
+            .unwrap()
+    );
+}
+
+#[test]
 fn age_file_writers_in_parallel_do_not_lose_each_others_secrets() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.age");

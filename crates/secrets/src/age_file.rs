@@ -166,6 +166,30 @@ impl SecretStore for AgeFileStore {
         self.save(&vault, &identity)
     }
 
+    fn update(
+        &self,
+        name: &str,
+        change: &mut dyn FnMut(Option<&SecretString>) -> Option<SecretString>,
+    ) -> Result<bool, StoreError> {
+        check_name(name)?;
+        let _lock = self.lock()?;
+        let current = self.get(name)?;
+        let Some(value) = change(current.as_ref()) else {
+            return Ok(false);
+        };
+        let identity = self.identity_or_create()?;
+        let mut vault = self.load()?;
+        vault.secrets.insert(
+            name.to_string(),
+            Entry {
+                value: value.expose_secret().to_string(),
+                updated_at: unix_seconds(SystemTime::now()),
+            },
+        );
+        self.save(&vault, &identity)?;
+        Ok(true)
+    }
+
     fn remove(&self, name: &str) -> Result<bool, StoreError> {
         check_name(name)?;
         let _lock = self.lock()?;
