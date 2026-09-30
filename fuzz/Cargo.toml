@@ -1,0 +1,42 @@
+[package]
+name = "credshim-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bytes = "1"
+http = "1"
+http-body-util = "0.1"
+secrecy = "0.10"
+tokio = { version = "1", features = ["rt"] }
+credshim-core = { path = "../crates/core" }
+credshim-oauth = { path = "../crates/oauth" }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "inject_request"
+path = "fuzz_targets/inject_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "token_response"
+path = "fuzz_targets/token_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "scrub_stream"
+path = "fuzz_targets/scrub_stream.rs"
+test = false
+doc = false
+bench = false

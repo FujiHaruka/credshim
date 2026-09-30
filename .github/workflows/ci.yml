@@ -63,3 +63,19 @@ jobs:
       - name: service logs
         if: failure()
         run: sudo journalctl -u credshim --no-pager
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - run: |
+          for target in inject_request token_response scrub_stream; do
+            cargo fuzz run "$target" -- -max_total_time=60
+          done
