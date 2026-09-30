@@ -1,17 +1,15 @@
-use std::os::unix::fs::PermissionsExt;
-use std::process::{Output, Stdio};
-use std::time::Duration;
+mod common;
 
+use std::os::unix::fs::PermissionsExt;
+use std::process::Output;
+
+use common::{openai_rule, output, spawn_run, store_secret, write_config};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
-use tokio::process::Command;
 
 async fn credshim(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_credshim"))
-        .args(args)
-        .output()
-        .await
-        .unwrap()
+    let home = tempfile::tempdir().unwrap();
+    output(home.path(), args).await
 }
 
 fn path_arg(dir: &tempfile::TempDir) -> String {
@@ -96,18 +94,15 @@ async fn ca_bundle_appends_the_dev_ca_to_the_os_roots_without_the_key() {
 }
 
 #[tokio::test]
-async fn run_with_intercept_needs_an_existing_ca() {
-    let dir = tempfile::tempdir().unwrap();
+async fn run_with_rules_needs_an_existing_ca() {
+    let home = tempfile::tempdir().unwrap();
+    store_secret(home.path(), "openai", "real");
+    let config = write_config(home.path(), &openai_rule("api.example.test", 443));
 
-    let output = credshim(&[
-        "run",
-        "--listen",
-        "127.0.0.1:0",
-        "--ca-dir",
-        &path_arg(&dir),
-        "--intercept",
-        "api.example.test",
-    ])
+    let output = output(
+        home.path(),
+        &["run", "--listen", "127.0.0.1:0", "--config", &config],
+    )
     .await;
 
     assert!(!output.status.success());
@@ -115,47 +110,29 @@ async fn run_with_intercept_needs_an_existing_ca() {
 }
 
 #[tokio::test]
-async fn run_with_intercept_refuses_an_unverifiable_upstream_with_502() {
-    let dir = tempfile::tempdir().unwrap();
-    let ca_dir = path_arg(&dir);
+async fn rule_host_with_an_unverifiable_upstream_is_502() {
+    let home = tempfile::tempdir().unwrap();
+    let ca_dir = home.path().join("ca").display().to_string();
     assert!(
         credshim(&["ca", "init", "--dir", &ca_dir])
             .await
             .status
             .success()
     );
-    let mut child = Command::new(env!("CARGO_BIN_EXE_credshim"))
-        .args([
-            "run",
-            "--listen",
-            "127.0.0.1:0",
-            "--ca-dir",
-            &ca_dir,
-            "--intercept",
-            "localhost",
-        ])
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-    let mut stderr = BufReader::new(child.stderr.take().unwrap()).lines();
-    let proxy_addr = tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            let line = stderr.next_line().await.unwrap().expect("proxy exited");
-            if let Some(rest) = line.split("addr=").nth(1) {
-                break rest.split_whitespace().next().unwrap().to_string();
-            }
-        }
-    })
-    .await
-    .expect("proxy never reported its listen address");
     let mock = credshim_testkit::MockUpstream::https(
         credshim_testkit::TestCa::new().issue(&["localhost"]),
     )
     .start()
     .await;
+    store_secret(home.path(), "openai", "real");
+    let config = write_config(home.path(), &openai_rule("localhost", mock.port()));
+    let proxy = spawn_run(
+        home.path(),
+        &["--listen", "127.0.0.1:0", "--config", &config],
+    )
+    .await;
 
-    let mut tcp = TcpStream::connect(&proxy_addr).await.unwrap();
+    let mut tcp = TcpStream::connect(&proxy.addr).await.unwrap();
     let target = format!("localhost:{}", mock.port());
     tcp.write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes())
         .await
