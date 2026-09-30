@@ -1,0 +1,51 @@
+[package]
+name = "credshim-mitm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+testing = []
+
+[dependencies]
+anyhow.workspace = true
+credshim-core.workspace = true
+credshim-oauth.workspace = true
+bytes.workspace = true
+http.workspace = true
+http-body.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+tower-service = "0.3"
+thiserror.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+rustls-platform-verifier.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tracing.workspace = true
+rcgen = { workspace = true, features = ["x509-parser"] }
+moka.workspace = true
+rustls-native-certs.workspace = true
+pem.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+secrecy.workspace = true
+tempfile.workspace = true
+credshim-mitm = { path = ".", features = ["testing"] }
+credshim-testkit.workspace = true
+futures-util.workspace = true
+reqwest = { workspace = true, features = ["form", "query"] }
+sha2 = "0.10"
+hex = "0.4"
+serde_json.workspace = true
+tokio.workspace = true
+tokio-tungstenite = "0.30"
+form_urlencoded = "1"
+
+[lints]
+workspace = true

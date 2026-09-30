@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(~/.config/credshim/**)",
+      "Edit(~/.config/credshim/**)",
+      "Read(~/Library/Application Support/credshim/**)",
+      "Edit(~/Library/Application Support/credshim/**)",
+      "Read(/var/lib/credshim/**)",
+      "Edit(/var/lib/credshim/**)",
+      "Bash(credshim secret set:*)"
+    ]
+  }
+}

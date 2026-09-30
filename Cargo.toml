@@ -1,0 +1,59 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/FujiHaruka/credshim"
+
+[workspace.dependencies]
+credshim-core = { path = "crates/core" }
+credshim-mitm = { path = "crates/mitm" }
+credshim-secrets = { path = "crates/secrets" }
+credshim-oauth = { path = "crates/oauth" }
+credshim-testkit = { path = "crates/testkit" }
+
+aho-corasick = "1"
+anyhow = "1"
+thiserror = "2"
+bytes = "1"
+futures-util = "0.3"
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "http2", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "client-legacy", "http1", "http2"] }
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = "0.26"
+rustls = "0.23"
+rustls-pki-types = "1"
+rustls-platform-verifier = "0.7"
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }
+moka = { version = "0.12", features = ["sync"] }
+rustls-native-certs = "0.8"
+rustix = { version = "1", features = ["process"] }
+pem = "3"
+time = "0.3"
+tempfile = "3"
+secrecy = { version = "0.10", features = ["serde"] }
+zeroize = "1"
+base64 = "0.22"
+percent-encoding = "2"
+getrandom = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+axum = { version = "0.8", features = ["http2", "ws"] }
+reqwest = { version = "0.13", features = ["stream", "json"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+print_stdout = "warn"

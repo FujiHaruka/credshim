@@ -1,0 +1,475 @@
+# CredShim：開発用クレデンシャル注入プロキシ（Rust）アーキテクチャと開発ステップ
+
+Sep 29, 2026 · @Haruka Fuji
+
+## 目的とスコープ
+
+アプリケーションサーバーとコーディングエージェントが本物のAPIキー・OAuthトークンを一度も見ずに、実際の外部APIで開発できる状態を作る。アプリはダミー値だけを持ち、プロキシが送信直前に本物へ差し替える。LiteLLM Proxyに近いが、base URLを変える方式ではなく、HTTPS\_PROXYで挟まる透過MITMプロキシを主とする。
+
+| ケース | アプリが持つもの | プロキシだけが持つもの | 差し替える場所 |
+| --- | --- | --- | --- |
+| 静的APIキー（OpenAI、Anthropic、Geminiなど） | ダミーキー | 本物のキー | 登録済みホスト宛のヘッダー／クエリ |
+| OAuth（認可コード、client credentials） | client\_id、ダミーのclient\_secret、ダミーのアクセス／リフレッシュトークン | client\_secret、本物のアクセス／リフレッシュトークン | トークンエンドポイントの往復、リソースAPIのBearer |
+
+**守るもの**は秘密の「値」そのもの。.env、アプリのメモリ、ログ、テストfixture、エージェントのコンテキストに本物が現れないこと。
+
+**守らないもの**は秘密の「利用」。エージェントは値を知らなくても、プロキシ経由で本物の権限を使ってAPIを叩ける。これは仕組み上避けられない前提で、Phase 6の許可リスト・上限・監査ログで緩和する。
+
+**透過性の目標**は、OpenAI SDKなどがHTTPS\_PROXYとCA証明書の指定だけで無改造に動くこと。HTTP/1.1、HTTP/2、SSEストリーミング、WebSocketを対象にする。
+
+## 脅威モデルと設計原則
+
+一番危ないのは「本物のキーが別ホストへ注入されること」と「プロキシの設定や秘密ストアを書き換え・読み出しされること」。以下の原則はほぼこの2点を塞ぐためにある。
+
+| エージェントが取りうる行動 | 対策（原則） |
+| --- | --- |
+| リポジトリ、環境変数、アプリのメモリ、ログを読む | 本物がそこに存在しない（1） |
+| ダミーキー付きリクエストを攻撃者のホストへ送る | ホスト束縛、束縛外は403（2, 4） |
+| CONNECT先と内側のHostヘッダーを食い違わせる | 接続先で照合、不一致は拒否（3） |
+| APIのエラー応答などに本物の値をエコーさせる | レスポンスのスクラブ（5） |
+| 設定を書き換えて秘密を別ホストに束縛し直す | 設定をエージェントが書けない場所へ（6） |
+| プロキシのメモリ、秘密ストア、CA秘密鍵を読む | OSユーザー／コンテナ分離（6, 9） |
+| プロキシ経由で本物の権限を乱用する | 残存リスク。許可リスト、上限、監査ログで緩和 |
+
+1. **秘密はプロキシプロセスの中だけ。** 登録は人間がTTYから行い、argvや環境変数を経由しない。値を取り出すコマンドは作らない。
+2. **ホスト束縛。** 各秘密は宛先（scheme、host、port、任意でpath prefix）に束縛する。差し替えるのは、実際に接続する上流が束縛先と一致し、かつ上流のTLS証明書をシステムの信頼ストアで検証できたときだけ。
+3. **照合はクライアントが操れる値でなく接続先で。** CONNECTのauthorityを正とし、内側のHostや:authorityが一致しなければ拒否する。
+4. **束縛外に現れたダミーは差し替えず403と警告ログ。** 平文HTTPの上流への注入は明示許可がない限り禁止。リダイレクトはプロキシが追わずクライアントへ返す。
+5. **ボディは既定でバッファしない。** 書き換えはトークンエンドポイントのような小さいボディに限り、サイズ上限を設ける。レスポンス中の秘密値スクラブは安全網として別に持つ。
+6. **設定・秘密ストア・CA秘密鍵はエージェントが触れない場所に。** 最終形ではプロキシを別OSユーザー、またはエージェントが動くコンテナの外で動かす。ルール設定も秘密と同じくらい重要な資産として扱う。
+7. **登録済みホストだけMITMし、他は素のTCPトンネル。** 証明書ピン留めや無関係な通信を壊さない。
+8. **ログやエラーに秘密を出さない仕組みを型で強制。** 秘密は専用型で持ち、Debug/Display出力をマスクする。
+9. **ルートCAはOSの信頼ストアに入れない。** アプリにだけ環境変数で渡し、CA鍵が漏れた場合の被害をこの開発用途に閉じ込める。
+
+## 全体アーキテクチャ
+
+アプリはダミー付きのリクエストをCredShimへ送り、本物のキーは検証済みの上流接続にだけ注入される。何をどこへ差し替えるかの判断は、中央のルールエンジン1か所に集める。
+
+&#91;embedded content: CredShim の構成 · 開発環境と分離されたプロキシ\]
+
+応答は同じ経路を逆向きに通る。トークンエンドポイントの応答はOAuth保管庫でダミーに置き換えられ、それ以外の応答は秘密値のスクラブを経て返る。監査ログは各段から書かれる（図では省略）。
+
+## 技術スタック
+
+hyper 1.x の上に自前でMITMを組む。差し替えの可否を「上流TLSの検証結果」と「実際の接続先」に厳密に結びつけたいので、制御点を手元に持っておきたい。既存のRust製MITMライブラリ（hudsuckerなど）はスパイクや実装の参考に使う程度にする。
+
+| 領域 | クレート | 用途 |
+| --- | --- | --- |
+| ランタイム | tokio | 非同期I/O全般 |
+| HTTP | hyper 1.x、hyper-util、http、http-body-util、bytes | 下流サーバーと上流クライアントの両方。h1/h2、Upgrade、ボディをストリームのまま扱う |
+| TLS | rustls、tokio-rustls | 下流の終端（ALPNでh2/http1.1を交渉）と上流接続 |
+| 上流の検証 | rustls-platform-verifier（またはrustls-native-certs） | OSの信頼ストアで上流証明書を検証する |
+| 証明書生成 | rcgen | ルートCAとホストごとのリーフ証明書 |
+| 証明書キャッシュ | moka | ホスト名→ServerConfigのキャッシュ |
+| 設定・CLI | serde、toml、clap | 設定ファイルとサブコマンド |
+| 秘密の型 | secrecy、zeroize | 出力時のマスク、破棄時のメモリ消去 |
+| 秘密ストア | keyring、age | OSキーチェーン、または暗号化ファイル |
+| ボディ書き換え | serde\_urlencoded、serde\_json | トークンエンドポイントのフォーム／JSON |
+| スクラブ | aho-corasick | ストリーム中の秘密値検出 |
+| 乱数 | getrandom | ダミートークン生成 |
+| ログ | tracing、tracing-subscriber | 構造化ログと監査ログ |
+| テスト | axum、reqwest、rcgen | モック上流とモックOAuthサーバー、テスト用CA |
+
+WebSocketはフレームを解析せず、Upgradeリクエストのヘッダーだけ差し替えて以降は双方向のバイトコピーにする。そのためWebSocket用クレートは本体には不要。
+
+## リポジトリ構成とClaude Codeでの進め方
+
+判断ロジック（何をどこへ差し替えるか）をI/Oのない純粋な層に切り出し、単体テストで固めるのが最重要。I/O層はそれを呼ぶだけにする。
+
+```text
+credshim/
+├─ Cargo.toml            # workspace
+├─ CLAUDE.md
+├─ docs/threat-model.md  # 前章の内容
+├─ crates/
+│  ├─ core/     # ルール照合、差し替え、ダミー生成、スクラブ（I/Oなし）
+│  ├─ mitm/     # CA、証明書キャッシュ、CONNECT、TLS終端、h1/h2中継
+│  ├─ secrets/  # 秘密ストアのバックエンド
+│  ├─ oauth/    # トークン保管庫、トークンエンドポイント処理
+│  ├─ testkit/  # モック上流、モックOAuthサーバー、テストCA
+│  └─ cli/      # credshim バイナリ
+└─ tests/       # E2E（実SDKを使うものは別ジョブ）
+```
+
+**進め方。** 1フェーズを1〜数セッションで扱い、各フェーズの「完了条件」を自動テストで満たすまで進める。完了条件がテストで書けているので、Claude Codeが自分で検証できる。セキュリティに関わる変更（core の照合・差し替え）は、別セッションでレビューさせる。
+
+**開発中も本物の鍵は使わない。** テストはすべてモック上流とテスト用の偽秘密で行う。実キーでの確認は、各マイルストーンで人間が自分で登録して行う。
+
+**CLAUDE.md に書くルール：**
+
+- 秘密は必ず secrecy の型で持つ。値を取り出す呼び出しは core の差し替え関数と secrets の中だけに限り、CIでgrepして検査する。
+- リクエスト／レスポンスのボディを丸ごと読み込まない。例外は oauth のトークンエンドポイント処理だけで、必ずサイズ上限を付ける。
+- ログ、エラー、パニックに秘密やトークンの値を出さない。テスト用の偽秘密がログ出力に一度も現れないことを検査するテストを常に通す。
+- 新しい挙動には統合テストを付ける。`cargo fmt`、`cargo clippy -D warnings`、`cargo test --workspace` が通ってから完了とする。
+- 実運用の設定ディレクトリや秘密ストアを読まない・編集しない。Claude Code の permission の deny ルールでも塞いでおく（ただしこれは補助的な層で、本当の防御は Phase 6 の分離）。
+
+## Phase 0: 土台づくり
+
+後の全フェーズがテストで自己検証できるよう、先にテスト基盤を作る。ここを手厚くするほど、Claude Codeの手戻りが減る。
+
+**作るもの**
+
+- workspace と CI（fmt、clippy、test）、CLAUDE.md、docs/threat-model.md。
+- testkit のテスト用CA。rcgenでテストごとに生成し、モック上流の証明書を署名する。
+- testkit のモック上流（axum + rustls、h1/h2両対応）。受け取ったヘッダー・クエリ・ボディをそのまま返すエコー、一定間隔でイベントを送るSSE、数十MBのボディ、WebSocketエコーを用意する。
+- テスト専用の差し込み口。上流検証に追加の信頼アンカーを足す口と、`api.openai.com` のような名前をモックの 127.0.0.1 に解決させる口。どちらも cargo feature `testing` の裏に置き、リリースバイナリには含めない（含めると、偽の上流に本物のキーを送らせる抜け道になる）。
+- ログ出力をキャプチャして「偽秘密の文字列が一度も出ていない」ことを検査するヘルパー。
+
+**完了条件**
+
+- [x] CIがグリーン。
+- [x] モック上流に reqwest で h1 と h2 の両方で接続するテストが通る。
+- [x] リリースビルドに `testing` の口が含まれないことを確認するテストがある。
+
+**実装メモ（Phase 0）**
+
+- `testing` の口は `credshim-mitm` の `Upstream::with_testing_hooks` にある。リリースビルドでは `compile_error!` で止め、`scripts/check-release-excludes-testing.sh` がそのガードとバイナリ中のマーカー文字列の不在を検査する。
+- 上流検証は rustls-platform-verifier の `new_with_extra_roots` を使う。macOS でも有効期限7日・EKU serverAuth のテスト用リーフで通る。
+- 暗号プロバイダは aws-lc-rs に統一（reqwest 0.13 の rustls が aws-lc-rs 固定のため、ring と混在させない）。
+
+## Phase 1: HTTPフォワードプロキシとCONNECTトンネル
+
+まだ何も差し替えない、素直なフォワードプロキシを作る。ここで「ボディを溜めない」中継の骨格を決めておくと、後のSSEやWebSocketで作り直さずに済む。
+
+**作るもの**
+
+- 127.0.0.1 だけで listen する。外部インターフェースには bind しない。
+- 絶対形式URI（`GET http://host/path`）のリクエストを上流へ中継する。hop-by-hop ヘッダー（Connection とそこに列挙されたもの、Keep-Alive、Proxy-Connection、Proxy-Authorization、TE、Trailer、Transfer-Encoding、Upgrade）を落とす。
+- `CONNECT host:port` を受けたら上流とTCP接続し、200を返して双方向コピーする。この時点では全ホストが素通し。
+- ボディは hyper の受信ボディをそのまま上流へ渡し、レスポンスも同様に返す。
+- 上流へのコネクションプール、接続・アイドルのタイムアウト、上流エラー時の502。
+
+**完了条件**
+
+- [x] `curl -x` でモックの http 上流に GET/POST できる。
+- [x] CONNECT 経由で https のモックに繋がり、クライアントにはモック自身の証明書が見える。
+- [x] SSEモックの各イベントが、プロキシ経由でも溜められずに届く（送出から到着までの遅延に上限を決めてテストする）。
+- [x] 数十MBのアップロード／ダウンロードがバイト単位で一致する。
+
+**実装メモ（Phase 1）**
+
+- `credshim_mitm::Proxy` が下流を hyper の http1 サーバーで受ける（CONNECT と絶対形式URIのプロキシ要求はどちらも h1）。listen 先がループバック以外なら `BindError::NotLoopback` で起動しない。
+- 絶対形式の転送は hyper-util の legacy `Client` に絶対URIのまま渡す。プールは scheme＋authority 単位、接続は `Upstream::connect_tcp` 経由なので `testing` の名前解決上書きも効く。Host はクライアントの値ではなくリクエスト先の authority で上書きする。
+- ログに出すのはメソッド、authority、パスまで。クエリは出さない（Phase 3 以降 `?key=` に秘密が載るため）。
+
+## Phase 2: TLS MITM（HTTP/1.1）
+
+登録済みホストへのCONNECTだけTLSを終端し、中身を読める状態にする。このフェーズの本当の成果物は、後で差し替え判定に使う「検証済み接続コンテキスト」である。
+
+**作るもの**
+
+- `credshim ca init`：ルートCA（ECDSA P-256）を生成する。秘密鍵はプロキシ専用ディレクトリに 0600 で置き、公開証明書だけを外に出す。
+- `credshim ca bundle`：OSのルート証明書と開発CAを結合したバンドルを出力する。SSL\_CERT\_FILE のような変数は既定のバンドルを置き換えるため、結合しないと他のHTTPSが壊れる。
+- インターセプト対象ホストの一覧（設定）。CONNECT先が一覧にあればMITM、なければPhase 1のトンネルに流す。
+- リーフ証明書の動的発行。SANはそのホスト名だけ、有効期限は短く、CAで署名してキャッシュする。
+- 下流のTLS終端。ALPNはまだ `http/1.1` のみ提示する。SNIとCONNECT先が一致しなければ拒否する。
+- 上流へのTLS接続。SNIはCONNECT先、検証はOSの信頼ストア。検証に失敗したら502を返し、下流に成功を見せない。
+- 内側リクエストの Host がCONNECT先と一致するかの検査（原則3）。
+- 接続コンテキスト型。「上流TLS検証済み、宛先は host:port」という事実を型で持ち回し、差し替え判定はこの型がないと呼べないようにする（原則2を型で強制）。
+
+**完了条件**
+
+- [x] 対象ホストでは開発CA署名の証明書、非対象ホストではモック自身の証明書がクライアントに見える。
+- [x] 上流証明書が期限切れ・名前不一致・未知のCAのとき502になる。
+- [x] SNIやHostがCONNECT先と食い違うリクエストが拒否される。
+- [x] Phase 1のSSEと大容量ボディのテストがMITM経由でも通る。
+
+**実装メモ（Phase 2）**
+
+- CAは `credshim_mitm::CertificateAuthority`。`init` はディレクトリを 0700、`ca-key.pem` を 0600 で新規作成し、鍵が既にあれば置き換えを拒否する（信頼済みCAを黙って作り直さない）。既定の置き場所は `$XDG_CONFIG_HOME/credshim/ca`（未設定なら `~/.config/credshim/ca`）で、テストは必ず `--dir` にtempdirを渡す。
+- リーフはSANがCONNECT先ホスト名だけ、有効期限24時間、moka で12時間キャッシュ（ホスト名は小文字化してキー）。
+- MITM経路は `Handler::intercept`。200を返す前に `Upstream::connect_tls` で上流TLSを確立・検証し、失敗なら502。成功したときだけ `VerifiedTarget`（host、port、コンストラクタ非公開）を作り、以後の内側リクエスト処理はこれを持つ `Session` 経由で行う。Phase 3の差し替えは `&VerifiedTarget` を引数に取る。
+- 下流TLSは `LazyConfigAcceptor` で ClientHello を先に読み、SNIが無いかCONNECT先と違えば証明書を出さずに切る。内側の Host（と絶対形式URIのauthority）はポート省略時443として (host, port) で比較し、不一致は421。
+- 上流は1トンネルにつき1本の h1 接続を使い回し、閉じていたら `connect_tls` で再検証して張り直す。インターセプト対象は `credshim run --intercept <host>`（複数可）。設定ファイルは Phase 3。
+- `credshim ca bundle` は rustls-native-certs のOSルートをDER順に並べ重複を除き、末尾に開発CAを足す（出力を決定的にするため）。
+
+## Phase 3: シークレットストアと静的キー注入（MVP）
+
+このフェーズの終わりで、OpenAI SDK がダミーキーのまま実APIを叩ける最初の実用版になる。HTTP/2はまだ無いが、SDKはHTTP/1.1で普通に動く。
+
+**作るもの（secrets）**
+
+- `SecretStore` トレイト。名前で取得・保存でき、値を列挙する操作は持たない。
+- バックエンドは3種：OSキーチェーン（keyring）、age暗号化ファイル（コンテナやヘッドレスLinux向け）、起動時に外部コマンドで取得（1Password CLIなど）。
+- `credshim secret set <name>`：TTYからエコーなしで読む。TTYでなければ拒否する。
+- `credshim secret list`：名前と更新日時だけを出す。`get` は作らない。
+
+**作るもの（core のルールエンジン）**
+
+- ルールは「宛先の一致条件（host、port、任意でpath prefix）」「ダミー値」「秘密の参照」「差し替え場所」の組。
+- 差し替え場所はヘッダー値の中の文字列、Basic認証（デコードして置換し再エンコード）、クエリパラメータの3種。Bearer、x-api-key、`?key=` などはこれで全部表せる。
+- 判定関数は「接続コンテキスト＋リクエストヘッダー」を受けて「素通し／差し替え内容／拒否理由」を返す純粋関数にする。
+- 全ルールのダミー値を常に探し、宛先が一致しないルールのダミーが見つかったら403で拒否して警告を出す（原則4）。ダミーを含まないリクエストは一切変更しない。
+- ダミー値はルールごとに設定可能にする。SDKが接頭辞を検査する場合に合わせるため（例：`sk-credshim-openai-...`）。誤一致しないよう十分長くする。
+- OpenAI、Anthropic、Gemini のプリセット。中身はただの設定スニペット。
+
+**作るもの（監査ログ）**：時刻、宛先、メソッド、パス（クエリ値は除く）、適用ルール名、判定、ステータス。値は一切出さない。
+
+**完了条件**
+
+- [x] テスト用DNS上書きで api.openai.com をモックに向け、エコーされた Authorization が偽秘密に置き換わっている。
+- [x] 同じダミーを別ホストへ送ると403になり、上流に何も届かない。
+- [x] Basic認証とクエリパラメータの差し替えが効く。ダミーを含まないリクエストはバイト単位で変わらない。
+- [x] 公式の openai SDK（Python と Node）が、モック上流相手にストリーミング込みで動くE2Eテストが通る。
+- [ ] 人間が本物のキーを登録し、実APIでストリーミング応答を確認する（手動マイルストーン）。
+
+**実装メモ（Phase 3）**
+
+- ルールエンジンは `credshim_core::RuleSet::decide`（純粋関数）。全ルールのダミーを、全ヘッダー値、Authorization の Basic をデコードした値、パス、クエリ（生の値とパーセントデコード後の両方）から探す。束縛先（host、port、任意の path prefix）と一致しないルールのダミーが1つでもあれば、他に差し替えがあっても拒否する。束縛先に一致したダミーが設定外の場所にあるだけなら何も変えずに通す。
+- path prefix は区切り単位で一致を見る（`/v1` は `/v10` に一致しない）。上流が正規化しうるドットセグメント、`%2e`・`%2f`・`%5c`、`\` を含むパスは一致しないものとして扱い、ダミーがあれば403にする。
+- ダミーは 24〜256 文字の unreserved 文字（`A-Za-z0-9-._~`）に限る。生の値とパーセントデコード後が同じになり、Basic の `user:pass` とも混ざらない。どのダミーも他のダミーを部分文字列として含んではならない。
+- 差し替えは `crates/core/src/inject.rs` の `Injector::apply` だけが行う。呼び出し元は mitm の `Session::relay` 1か所で、`&VerifiedTarget` を取る `inject()` 経由でしか呼ばない。平文HTTPの転送路は差し替えず、ダミーがあれば403にする（明示許可の仕組みは作っていない）。
+- 秘密値は起動時にすべて読み込み、ヘッダーに入れるルールでは制御文字や前後の空白を含む値を拒否する。差し替えたヘッダー値は sensitive にする。
+- ダミーの検出は生の値と1回のデコードだけで、ヘッダー値中のパーセントエンコード・二重エンコード・ヘッダー名・ボディは見ない。これらで届くのはダミーだけ（本物は束縛先以外に注入されない）なので許容する。
+- 403 を観測できるのは MITM しているホスト（＝いずれかのルールのホスト）と平文HTTPだけ。ルールに無いホストへの HTTPS は原則7どおり素のトンネルなので中身を見ない（届くのはダミーだけで実害はない）。
+- 設定ファイルは `--config`（既定は `$XDG_CONFIG_HOME/credshim/config.toml`、無ければルール無しで起動）。インターセプト対象はルールのホストから作り、ルールのホストがインターセプト対象に無ければ起動時に `BindError::RuleHostNotIntercepted` で止める。`--intercept` フラグは廃止。未知のキーはエラーにする（`allow_paths` などは後のフェーズで足す）。
+- 秘密ストアは `credshim-secrets` の `SecretStore`（get、set、名前と更新日時だけの list）。age ファイルは X25519 の鍵ファイル（既定は `<path>.key`、初回の `set` で 0600 で作る）で JSON を暗号化し、一時ファイル経由で置き換える。キーチェーンは keyring 3.6（macOS は Keychain、Linux は keyutils）で、列挙できないため名前と更新日時の索引を別項目に持つ。外部コマンドは `{name}` を置換して実行し、標準出力の末尾改行1つを除いた値を使う（set と list は非対応）。
+- 監査ログは tracing のターゲット `credshim::audit`（scheme、host、port、method、クエリ抜きの path、rules、decision、status）。`[audit] path` を設定すると JSON Lines で 0600 のファイルにも書く。
+- SDK E2E は `crates/e2e`（`#[ignore]`、CIでは別ジョブ `sdk-e2e`）。プロキシはプロセス内で起動し、実SDKを子プロセスで動かす。Python（openai 3.x）は `HTTPS_PROXY` と `SSL_CERT_FILE`（結合バンドル）だけで動く。Node 24 の fetch は `NODE_USE_ENV_PROXY=1` が無いとプロキシを使わず直接つながるので、`NODE_EXTRA_CA_CERTS` と合わせて必要。
+- キーチェーンのバックエンドは CI で実物を触らない（テストは偽の `Keychain` 実装で行う）。実キーチェーンでの確認は手動。
+
+## Phase 4: HTTP/2・ストリーミング・WebSocket
+
+プロトコル面の透過性を仕上げる。差し替えロジックには手を入れず、Phase 3のテストがプロトコルの組み合わせ全部で通ることを目標にする。
+
+**作るもの**
+
+- 下流のALPNで `h2` と `http/1.1` を提示し、上流とも独立に交渉する。下流と上流でバージョンが違っても中継できるようにし、h2で禁止されている接続固有ヘッダーの除去と Host と :authority の対応を正規化する。
+- h2ではストリームごとに :authority がCONNECT先と一致するかを検査する。一致しないストリームだけをリセットする。
+- バックプレッシャーの確認。下流の読み取りが遅いとき、上流から無制限に読み込まないこと。
+- トレーラーの中継（gRPCを通すため）。
+- クライアント切断の伝播。SSEの途中でクライアントが切れたら上流も閉じる。LLMの生成と課金が止まる。
+- WebSocket（HTTP/1.1 Upgrade）。Upgradeリクエストにも差し替えルールを適用し、上流が101を返したら両側の接続を取り出して双方向コピーする。OpenAI Realtime API のような用途を想定する。
+- h2上のWebSocket（Extended CONNECT）は扱わない。プロキシがその設定を広告しなければ、クライアントはh1で接続してくる。
+
+**完了条件**
+
+- [x] 下流h1/h2 × 上流h1/h2 の4通りで、Phase 3の差し替えテストとSSEテストが全部通る。
+- [x] 1本のh2接続で複数ストリームを並行処理でき、:authority 不一致のストリームだけが拒否される。
+- [x] WebSocketエコーがヘッダー差し替え込みで動く。
+- [x] SSE途中でクライアントを切ると、モック上流が切断を観測する。
+- [x] openai SDK のE2EがHTTP/2を有効にしたクライアントでも通る。
+
+**実装メモ（Phase 4）**
+
+- 下流は ALPN で `h2` と `http/1.1` を提示し、交渉結果で hyper の h2 サーバーか h1 サーバー（`with_upgrades`）を選ぶ。交渉結果は debug ログ `MITM session established protocol=...` に出す（値は出さない）。
+- 上流はトンネルごとに hyper-util の legacy `Client` を1つ持つ。コネクタは URI を無視して常に `VerifiedTarget` の host:port へ `h2`・`http/1.1` を提示して TLS 接続し、ALPN が h2 なら h2 で話す。CONNECT に 200 を返す前に検証した最初の接続をコネクタが持っておき、最初のリクエストで使う（検証前に何も送らない性質は Phase 2 のまま）。以降の新規接続も毎回 `connect_tls` で検証する。上流 h1 では同時リクエストの数だけ接続が増える（共有ロックで直列化しない）。
+- 正規化：内側リクエストは Host を外し、URI を `https://<CONNECT先>/<path>` にして HTTP/1.1 として Client に渡す。Client が上流 h1 なら URI から Host を付け（443 は省略）、h2 なら :authority にする。接続固有ヘッダーは除去するが、`te: trailers` と `Trailer` は残す（gRPC 用）。下流 h2 で分割された Cookie は `; ` で連結する。レスポンスも接続固有ヘッダーを除去し、バージョンを HTTP/1.1 に揃える。
+- 宛先検査：URI の authority があれば一致必須、Host があれば一致必須、どちらも無ければ拒否。h1 は Host 必須のまま、h2 は :authority だけでよい。不一致は RST_STREAM ではなくそのストリームにだけ 421 を返す（クライアントが別接続で再試行できる意味のある応答で、h1 とも揃う）。
+- トレーラー：下流 h2 へは常に中継する。下流 h1 へは hyper の制約で、クライアントが `TE: trailers` を送り、かつ上流が `Trailer` ヘッダーで名前を宣言したときだけ届く（宣言の無い h2 上流のトレーラーを h1 クライアントへは渡せない）。
+- WebSocket：下流 h1 で `Connection: upgrade` と `Upgrade: websocket` があるリクエストは、差し替え（同じ `inject()`）のあと、プールを使わず ALPN `http/1.1` だけで上流へ新しく接続して送る。101 なら両側の Upgraded を `copy_bidirectional` でつなぐ。h1 を話せない上流（h2 のみ）は 502。`h2c` など websocket 以外の Upgrade は素通しのトンネルにせず、`Upgrade` を外して通常のリクエストとして中継する（トンネル内の後続リクエストが差し替えと宛先検査を通らなくなるため）。
+- バックプレッシャーとクライアント切断は hyper のボディ転送（h1 のソケット、h2 のフロー制御）に任せ、テストで確認している（遅い読み手で上流からの読み込みが止まり、SSE 途中の切断で上流のストリームが閉じる）。
+- SDK E2E の HTTP/2 は Python（httpx の `http2=True`）で確認する。Node の fetch で h2 を使うには `undici` パッケージの追加が要るため、Node は HTTP/1.1 のまま。
+
+## Phase 5: OAuthトークン保管庫
+
+プロキシはトークンエンドポイントの往復を横取りし、本物のトークンを保管庫にしまってアプリにはダミーを返す。以後のAPI呼び出しは、保管庫の「ダミー→本物」対応を動的なルールとして Phase 3 のエンジンに渡すだけで済む。
+
+**プロバイダーごとの設定**：トークンエンドポイント（host＋path）、失効エンドポイント、client\_id、client\_secret の秘密参照とダミー値、クライアント認証方式（client\_secret\_post／client\_secret\_basic）、アクセストークンを差し替えてよいリソースホストの一覧、id\_token の扱い。
+
+**各段階でプロキシがすること**
+
+1. **認可リクエスト**（ブラウザ→プロバイダー）：秘密が要らないので関与しない。PKCE の code\_verifier もアプリが持ったままでよい。
+2. **コード交換**：リクエストボディ（上限付きで読み込む）またはBasic認証のダミー client\_secret を本物に差し替える。上流には Accept-Encoding: identity で送る。応答はJSONとフォーム形式の両方を解析し、access\_token と refresh\_token をダミーに置き換え、Content-Length を付け直して返す。expires\_in、scope、token\_type は変えない。
+3. **API呼び出し**：Bearer のダミーを、リソースホスト一覧に一致するときだけ本物に差し替える。一致しなければ403。
+4. **リフレッシュ**：ダミーの refresh\_token を本物に差し替えて送る。新しいトークンが返ったら保存し、新しいダミーを発行する。refresh\_token がローテーションされなかった場合は既存のダミーを維持する。
+5. **失効**：ダミーを本物に差し替えて送り、保管庫から消す。
+6. **client credentials グラント**：2と同じ処理で、リフレッシュが無いだけ。
+
+**ダミートークンと保管庫**
+
+- ダミーは `csh_at_` や `csh_rt_` の接頭辞に十分な長さのランダム値を付けた形にする。
+- 保管庫はダミーをキーに「本物、プロバイダー、種別、有効期限、作成日時」を持つ。暗号化ファイルに永続化し、鍵はキーチェーンに置く。プロキシを再起動してもアプリのリフレッシュが通るようにするため。
+- 期限切れのアクセストークンは定期的に掃除する。
+- 同じ refresh\_token での同時リフレッシュはプロキシ側で直列化し、直後の重複要求には同じ結果を返す。ローテーション型のプロバイダーで2本目が失敗するのを防ぐ。
+- id\_token は既定で素通しにする。アプリが署名やnonceを検証するため、ダミーに置き換えると壊れる。id\_token をBearerとして受け付けるサービスを使う場合だけ、ブロック設定を検討する。
+
+**完了条件**
+
+- [x] testkit にモックOAuthサーバーがある。認可コード＋PKCE、client\_secret\_post と basic、JSONとフォーム形式の応答、ローテーションあり／なしのリフレッシュ、失効に対応する。
+- [x] アプリから見えるトークンがすべてダミーで、モックAPIに届く Bearer が本物になっている。
+- [x] ローテーション、同時リフレッシュ、プロキシ再起動後のリフレッシュが通る。
+- [x] ダミーのアクセストークンをリソースホスト以外へ送ると403になる。
+- [ ] 人間が実プロバイダー（例：Google、GitHub）で一連のフローを確認する（手動マイルストーン）。
+
+**実装メモ（Phase 5）**
+
+- core のルールは「ダミー＋秘密（名前参照か値そのもの）＋束縛先の一覧」になった。束縛先は (host、port、任意の path prefix、差し替え場所) で、差し替え場所が空の束縛先は「ここに現れてよいが core は差し替えない（ボディは oauth が扱う）」を意味する。どの束縛先にも一致しない宛先にダミーがあれば従来どおり403。設定ファイルの `[[rule]]` は束縛先1つのルールになる。
+- 発行済みトークンのダミーは `csh_at_`／`csh_rt_` に英数字40文字。`Injector` は要求のヘッダー（Basic のデコード後を含む）、パス、クエリからこの形の文字列を拾い、`TokenResolver`（oauth の `OAuth`）に問い合わせて得たルールを静的ルールと同じ判定に流す。差し替え箇所は `Injector::apply` のまま1か所。保管庫に無いダミーは素通し（届くのはダミーだけ）。静的ルールのダミーにこれらの接頭辞を含めることは禁止。平文HTTPの転送路も発行済みダミーを検出して403にする。
+- 束縛：アクセストークンはリソースホスト（443、Authorization ヘッダー）と失効エンドポイント（クエリ `token`）。リフレッシュトークンはトークンエンドポイント（差し替え場所なし）と失効エンドポイント（クエリ `token`）。client_secret は静的ルール `oauth.<name>` としてトークン・失効エンドポイントに束縛し、`client_secret_basic` なら Basic 認証を core が差し替え、`client_secret_post` ならボディを oauth が差し替える。
+- トークン・失効エンドポイントへの要求（host と port が一致し、パーセントデコードと小文字化をしたパスが設定のパスと同じか、その後に `/`、`.`、`;` が続くもの。上流が同じ処理に回しうる `/token/` や `/token.json` を取りこぼさないため）は `Session::relay` で `inject()` のあと `Exchange::run` に回す。ボディは `[limits] max_token_body_bytes`（既定 64KiB）まで読み、超えたら413。form と JSON の両方を解析し、ダミーがあったときだけ書き換えて送り直す（無ければ元のバイト列のまま）。上流へは `Accept-Encoding: identity` と付け直した Content-Length で送る。
+- 応答：2xx のトークン応答は JSON オブジェクトか form で `access_token` を含み、Content-Encoding が無いか identity でなければ502にして下流へ何も渡さない（fail closed）。例外は `error` を持ちトークンを含まない 2xx（GitHub の形）で、そのまま返す。応答の上限超過も502。access_token と refresh_token を入れ子のオブジェクト（Slack の `authed_user` など）も含めてダミーにし、それ以外（expires_in、scope、token_type、id_token）は変えない。2xx 以外は変更せずに返す。
+- リフレッシュ：送った本物と同じ refresh_token が返るか返らなければ既存のダミーを維持し、違えば新しいダミーを発行して古いダミーを保管庫から消す。同じダミーでのリフレッシュはダミー文字列ごとの非同期ロックで直列化し、書き換え後の応答（ダミーだけを含む）を30秒間そのまま再生する。
+- 失効：ボディの `token` は oauth が、クエリの `token`（複数あればすべて）は core が差し替え、2xx なら保管庫から消す。別プロバイダーのトークンや、設定した client_id と違う client_id（ボディか Basic のユーザー部）を送る要求は上流に送らず403。
+- 保管庫は age（X25519）で暗号化した JSON を `[vault] path`（既定 `$XDG_CONFIG_HOME/credshim/oauth-vault.age`）に 0600 で原子的に置き換えて保存する。鍵は秘密ストア（macOS ではキーチェーン）の `credshim-oauth-vault-key` で、無ければ起動時に生成して保存する（外部コマンドのストアは書けないので事前登録が要る）。期限切れのアクセストークンは期限の5分後に1分ごとの掃除で消す。リフレッシュトークンは失効かローテーションまで残る。
+- id_token は `passthrough` だけ実装した。ブロック設定は必要になったら足す。
+- 監査ログはトークン・失効エンドポイントの往復を decision `oauth`、rules `oauth.<name>` で記録する。
+- モックOAuthサーバーは `credshim_testkit::MockOAuth`（認可コード＋PKCE S256、client_secret_post／basic、JSON／form 応答、ローテーションあり／なし、client credentials、失効、Bearer を検査する `/api/me`）。
+
+## Phase 6: ハードニングとプロセス分離
+
+ここまでで機能は揃うが、同じOSユーザーでエージェントとプロキシが動く限り、原理的な保証にはならない。このフェーズで「エージェントには原理的に読めない」状態に持っていく。
+
+**レスポンスのスクラブ**
+
+- 登録済みの秘密と保管庫の本物トークンを、レスポンスのヘッダーとボディから検出してダミーに置き換える。
+- Aho-Corasick でストリーム処理する。チャンク境界をまたぐ一致に備え、「秘密の先頭部分になりうる末尾」だけを次のチャンクまで保留し、それ以外は即座に流す。SSEの遅延はほぼ増えない。
+- 対象はMITMしているホストだけでよい。本物を送っていないホストの応答に本物は現れない。圧縮されたボディに対応するため、スクラブ対象の上流には Accept-Encoding: identity を要求する。
+
+**乱用の緩和**
+
+- ルールごとのメソッド・パス許可リスト。例えば OpenAI なら推論系のパスだけ許し、組織管理系のパスは拒否する。
+- ルールごとのレート、同時実行数、日次リクエスト数の上限。
+
+**分離の段階**
+
+| 段階 | 構成 | 防げる | 防げない |
+| --- | --- | --- | --- |
+| A：同一ユーザー | プロキシも開発ユーザーで動き、秘密はキーチェーン | .env・ログ・コンテキストへの混入 | 同一ユーザー権限でのストア読み出し、設定改ざん |
+| B：別OSユーザー | 専用ユーザーで launchd／systemd 常駐。設定・秘密・CA鍵はそのユーザー所有の 0600。開発ユーザーは sudo 不可 | Aに加え、ストアとメモリの読み出し、設定改ざん | プロキシを経由しない通信（そもそも秘密は無いので実害は小さい） |
+| C：コンテナ分離 | Claude Code とアプリは devcontainer 内、プロキシはホスト側。コンテナの外向き通信はプロキシだけ | Bに加え、全通信がプロキシの監査下に入る | 許可済みAPIの乱用（上の緩和策で抑える） |
+
+- 開発中の既定はA、実運用はBかCにする。Bでの秘密登録は `sudo -u credshim credshim secret set` のように、人間だけが知るパスワードを経由させる。
+- Cではプロキシをdockerブリッジ側のインターフェースにだけ bind する。
+- 全段階で、コアダンプを無効化する。Linuxでは PR\_SET\_DUMPABLE を 0 にし、同一ユーザーからの ptrace と /proc/pid/mem の読み出しも塞ぐ。
+- 管理用のHTTP APIは作らない。状態確認は、ルール名とカウンタだけを返す読み取り専用のUnixソケットにする。
+
+**完了条件**
+
+- [x] モック上流が秘密をエコーしても（チャンク境界をまたいでも）クライアントに届かない。スクラブ有効時もSSEの遅延が上限内。
+- [x] 許可リスト外のパスと上限超過が403／429になる。
+- [x] 脅威モデルの表の各行に、対応する回帰テストがある。
+- [x] 段階Bの構築スクリプトがあり、開発ユーザーから設定・秘密・CA鍵を読めず書けないことを検証するスクリプトが通る。
+- [x] Basic認証のデコード、トークン応答の解析、ヘッダー書き換えを cargo-fuzz にかけ、クラッシュしない。
+
+**実装メモ（Phase 6）**
+
+- スクラブは `credshim_core::Scrubber`（`crates/core/src/scrub.rs`、`expose_secret` の許可先に追加）。静的ルールの秘密と保管庫の本物トークンを Aho-Corasick（leftmost-longest）にかけ、それぞれのダミーに置き換える。プロキシ自身が上流へ送る形も対象にする：パーセントエンコード（大文字・小文字の16進）と、Basic 認証に埋め込まれた base64（3通りのバイト境界それぞれで、秘密だけで決まる文字の範囲）。8バイト未満の秘密は本文を壊すので対象にせず、起動時にルール名を警告する。同じ値は1つにまとめる。JSON エスケープや16進など、プロキシが作らない変換形は対象外。オートマトンの内部に持つパターンのコピーはゼロ化されない（プロセスメモリの保護は段階B/Cの分離が担う）。
+- ストリーム処理の `ScrubStream` は、バッファ末尾のうち「どれかの秘密の真の接頭辞」になっている最長部分だけを保留する。完全な一致でも、より長い秘密の接頭辞でありうるものは保留し、終端でまとめて置換する（チャンクの切り方で結果が変わらないことを単体テストと fuzz で確認）。
+- 保管庫は変更ごとに世代番号を進め、`Injector::scrubber()` は世代が変わったときだけオートマトンを作り直す（`TokenResolver::generation`／`issued`）。
+- MITM のレスポンスはすべてスクラブを通す（`[scrub] enabled`、既定 true）。ヘッダーとトレーラーは値ごと、ボディは `ScrubBody` でストリームのまま。置換で長さが変わるので Content-Length は外す（h1 は chunked になる）。HEAD、1xx、204、304 はボディを包まない。上流へは `Accept-Encoding: identity` を付け直し、それでも Content-Encoding 付きのボディが返れば502にする（fail closed）。これが Phase 3 の「ダミーを含まないリクエストは変えない」の唯一の例外。
+- トークン・失効エンドポイントの応答は全体を読んだあとにスクラブし、Content-Length を付け直す（2xx 以外のエラー応答が client_secret をエコーする場合も対象）。
+- 上流の HTTP/1.1 の reason phrase はスクラブの有無に関係なく捨てる（hyper は下流の h1 へそのまま書き出すため、秘密をエコーする抜け道になる）。
+- 保留の有無はチャンク末尾が秘密の接頭辞かどうかで決まるので、応答を操れる上流が送出を区切って観測すれば、到着のタイミングから接頭辞を1文字ずつ推測できる余地が残る（固定長で保留すると SSE の遅延の保証が崩れるため、残存リスクとして扱う）。
+- WebSocket は 101 のヘッダーだけスクラブし、以降のフレームは素通し（長さ付きフレームを書き換えられないため）。平文HTTPの転送路は本物を注入しないのでスクラブしない。
+- テストのモック上流はエコーの値を16進で返し（`Echo` が透過的に戻す）、スクラブと干渉させない。スクラブの検査には生のボディを指定のチャンク幅で返す `/reflect` を使う。
+- 許可リストと上限は `[[rule]]` の `allow_methods`、`allow_paths`（区切り単位の接頭辞一致。ドットセグメント（`..;` のように `;` 以降を落とすと `.`・`..` になるものを含む）や `%2f` などを含むパスは一致しない）、`limits = { per_minute, per_day, concurrent }`。ダミーを差し替えるときだけ適用し、ダミーを含まない要求は対象外（本物を使わないため）。許可リスト外は403（audit の decision `not_allowed`）、上限超過は429（`limited`）で、どちらも上流に何も送らない。
+- 上限は `credshim_core::Limiter`。毎分は直近60秒の窓、日次は UTC の暦日で数え、プロセス再起動で0に戻る（段階B以降は開発ユーザーが再起動できない）。同時実行数はレスポンスのボディを最後まで返すか切断されるまで数える（WebSocket は 101 を返した時点で解放）。複数ルールにまたがる要求は全ルールの枠を確認してからまとめて消費する。Retry-After は付けない。
+- OAuth の発行済みトークンには許可リストと上限を付けていない（アクセストークンのルールは失効エンドポイントにも束縛されるので、パス許可リストを単純に掛けると失効が止まる）。
+- プリセットは推論系のパスだけの `allow_paths` と `allow_methods = ["GET", "POST"]` を出力する。
+- 全サブコマンドの開始時に RLIMIT_CORE を 0 にし、Linux では PR_SET_DUMPABLE を 0 にする（rustix。同一ユーザーからの ptrace と `/proc/<pid>/mem`・`environ` が閉じる）。macOS はコアダンプの無効化だけで、同一ユーザーからのデバッガ接続は段階Bの別ユーザー化で防ぐ。
+- `credshim run` は設定ファイル、CA秘密鍵、age の秘密ストアとその鍵、OAuth保管庫、監査ログ、状態ソケットについて、ファイルとその親ディレクトリが自分か root の所有で group/others に書き込み権が無いことを確かめ、違えば起動しない。秘密を含むファイル（CA秘密鍵、秘密ストアとその鍵、保管庫）は group/others の読み取り権も拒否する。
+- 状態確認は `[status] socket` の Unix ソケット（0600）。接続するとルール名ごとのカウンタ（injected、exchanged、denied、not_allowed、limited、failed）を JSON で1回返して閉じる。入力は読まない。`credshim status` がこれを表示する。
+- listen は既定でループバックのみ。段階C向けに `[listen] allow_non_loopback = true` で特定のインターフェース（docker ブリッジなど）に bind できる。`0.0.0.0` や `::` は常に拒否する。
+- 段階Bは `scripts/stage-b/setup-linux.sh`（systemd、ユーザー `credshim`）と `setup-macos.sh`（launchd、ユーザー `_credshim`）。バイナリは root だけが書ける場所（Linux は `/usr/local/libexec/credshim/credshim`、macOS は `/Library/CredShim/bin/credshim`。構築時に祖先のディレクトリがすべて root 所有で group/others に書き込み権が無いことを確かめる）、状態は `/var/lib/credshim`（0700）、秘密ストアは age ファイル、公開用の CA 証明書と結合バンドルは `/etc/credshim` に置く。`scripts/stage-b/verify.sh` は開発ユーザーとして、sudo できず管理者グループ（sudo、wheel、admin）にも属さないこと、状態ディレクトリが専用ユーザーの所有で存在すること、プロキシのバイナリとサービス定義とそれらの親ディレクトリに書き込めないこと、状態ディレクトリと各ファイルを読めず書けないこと、プロキシが専用ユーザーで動き signal も `/proc` の読み出しも通らないこと、公開証明書を読めてプロキシに接続できることを確かめる。CI の `stage-b` ジョブが Linux で構築から検証まで通し、sudo できるユーザーでは検証が失敗することも確認する。macOS のスクリプトは CI で動かしていない。
+- fuzz は `fuzz/`（独立した workspace、nightly と cargo-fuzz）。`inject_request`（ヘッダー・Basic・クエリの差し替え。差し替え以外で要求が変わらないこと、束縛外の宛先に本物が出ないこと）、`token_response`（トークン応答の解析と書き換え）、`scrub_stream`（チャンクの切り方に依らない出力と秘密の残存なし）。CI の `fuzz` ジョブで各60秒回す。
+
+## Phase 7: 開発体験（env出力、doctor、base URLモード）
+
+MITMプロキシで一番つまずくのは「そのランタイムがプロキシとCAを本当に使っているか」。これを1コマンドで確かめられるようにして仕上げる。
+
+**作るもの**
+
+- `credshim env`：シェルに読み込む変数を出力する。HTTPS\_PROXY、HTTP\_PROXY、NO\_PROXY（localhost など）、結合バンドルを指す SSL\_CERT\_FILE・REQUESTS\_CA\_BUNDLE・CURL\_CA\_BUNDLE、開発CAを指す NODE\_EXTRA\_CA\_CERTS、それに各サービスのダミーキー（OPENAI\_API\_KEY など）。ダミーなので .env にそのまま書いてよい。
+- `credshim doctor`：予約ホスト名（例：`credshim.test`）へのCONNECTをプロキシ自身が応答し、「プロキシ経由か」「CAを信頼しているか」「h2で繋がったか」を返す。Python（requests、httpx）、Node、Go、curl から叩くワンライナーを添える。
+- Node の注意書き。組み込みの fetch はバージョンによって HTTPS\_PROXY を自動では見ない（環境変数での有効化や undici の EnvHttpProxyAgent が必要）。doctor で検出して案内する。
+- base URLモード。`http://127.0.0.1:8788/openai/` を `https://api.openai.com/` に固定で対応させるリバースプロキシで、LiteLLM Proxy と同じ使い方になる。CA設定が不要で、プロキシ変数を見ないランタイムでも使える。対応表は設定で固定されるのでホスト混同の余地がなく、同じルールエンジンをそのまま使える。
+- `credshim service install`：launchd／systemd への常駐登録（段階Bの専用ユーザー向け）。
+- `credshim tail`：監査ログのライブ表示。エージェントが今何を叩いているかが見える。
+
+**完了条件**
+
+- [x] `credshim env` を読み込んだ新しいシェルで、Python、Node、Go、curl のサンプルが doctor を通る。
+- [x] base URLモードで openai SDK のE2Eが通る。
+- [x] README に、インストールから最初のストリーミング応答までの手順がある。
+
+**実装メモ（Phase 7）**
+
+- `credshim env` は sh 向けの `export` 行を出す（値は単一引用符で囲む）。`HTTPS_PROXY`・`HTTP_PROXY` は小文字も出す（curl は大文字の `HTTP_PROXY` を読まない）。`NO_PROXY` は `localhost,127.0.0.1,::1`（base URL の listen がループバック以外ならその IP も）で、`credshim.test` は含めない。`SSL_CERT_FILE`・`REQUESTS_CA_BUNDLE`・`CURL_CA_BUNDLE` は結合バンドル、`NODE_EXTRA_CA_CERTS` は開発CA、`NODE_USE_ENV_PROXY=1`、ルールの `env` があればそのダミー。base URL は `#` のコメント行で出す。出力は `eval` されるので、`run` と同じく設定ファイルの権限を確かめ、全ルールを `Rule::from_spec` と `BaseUrls` で検査してから出す（rule 名や接頭辞に改行を入れてコードを実行させる手を塞ぐ）。`env` は環境変数名で、かつ `_KEY`・`_TOKEN`・`_SECRET`・`_PASSWORD` のどれかで終わるものだけ許す（`NO_PROXY`・`SSL_CERT_FILE`・`PROMPT_COMMAND` などを上書きさせない）。CA とバンドルの場所は `--ca-cert`・`--bundle` で差し替えられる。
+- `credshim ca init` は CA ディレクトリに `bundle.pem` も書く。結合バンドルは開発CAを先頭に置く（macOS の LibreSSL 2.8 は途中で読めない証明書に当たると残りを読まないため）。
+- 予約ホスト `credshim.test` はプロキシ自身が答える。CONNECT なら開発CAで `credshim.test` の証明書を出して TLS を終端し（ALPN は h2 と http/1.1）、平文の `http://credshim.test/` なら `tls:false` を返す。応答は固定の JSON（`via_proxy`、`tls`、`ca_trusted`、`protocol`）で、要求の中身は一切返さない。CA が無ければ CONNECT に 503 を返す。`credshim run` はルールが無くても CA があれば読み込む。
+- `credshim doctor` はまず自分でプロキシへ `credshim.test` の CONNECT を送り、開発CAだけを信頼して h2/h1 で確かめる。プロキシの場所は `--proxy`、`HTTPS_PROXY`、設定の順、CA は `--ca-cert`、`NODE_EXTRA_CA_CERTS`、設定の順に決めるので、設定を読めない段階Bの開発ユーザーでも `/etc/credshim/env` を読み込めば動く。次に環境変数を確かめ（足りなければ warn）、PATH にある curl、python3（標準ライブラリの urllib）、node（組み込み fetch）、go（`go run`）をこのシェルの環境のまま実行する。名前解決の失敗は「プロキシを素通りした」、証明書の失敗は「CA を信頼していない」と読み替えて案内する（Node なら `NODE_USE_ENV_PROXY` と undici の `EnvHttpProxyAgent`）。`--snippets` は requests、httpx、Node、Go のワンライナーを出す。Apple 同梱の `/usr/bin/python3` の ssl は `SSL_CERT_FILE` を読まないので doctor は失敗として報告する。
+- base URL モードは `[listen] base_url_addr` と、ルールごとの `base_url_prefix`。対応表は `credshim_core::BaseUrls`（I/O なし）で、接頭辞は `path_prefix` と同じ検査に加えて1セグメント以上を要し、文字は非予約文字と `/` だけに限り、末尾の `/` は落とし、互いに包含する接頭辞は拒否する。要求パスはセグメント単位で照合し、ドットセグメントや `%2e`・`%2f`・`%5c`・`\` を含むものは一致させない（404）。一致したら接頭辞を取り除き、クエリはそのまま付け直す。`base_url_addr` が無ければ接頭辞は使わない（プリセットは接頭辞を出す）。
+- base URL の listener は HTTP/1.1 の平文で、MITM と同じ bind の制限（ループバックのみ、`0.0.0.0`・`::` は常に拒否）。CONNECT は405、絶対形式の URI は400、Host がループバックの IP 字句か `localhost`（または bind した IP）でなければ421（DNS リバインディングで別オリジンのページから読まれるのを防ぐ）。上流へは宛先ごとに1つの `Session` を初回の要求で開いて使い回し、`Session::respond` から MITM と同じ差し替え・許可リスト・上限・OAuth 交換・スクラブを通す。ダミーを含まない要求はそのまま上流へ転送する（MITM の pass と同じ扱いで、本物は使わない）。監査ログの `ingress` は `connect`・`forward`・`base_url`。
+- `credshim service install` は段階Bの構築スクリプト（`scripts/stage-b/setup-*.sh` を埋め込んだもの）を、自分自身のバイナリ（canonicalize したもの）を引数にして、環境変数を消し PATH を固定した bash で root として実行する。root でなければ拒否し、`--print` で中身を出す。インストール済みのバイナリがあれば、それ自身から実行するか `--upgrade` を付けない限り置き換えない（開発ユーザーが書き換えられる場所のバイナリを、ルール変更のたびの再実行で root の常駐バイナリに上書きさせない）。構築スクリプトは `/etc/credshim/env` も書く（専用ユーザーとして `credshim env` を実行）。CI の `stage-b` ジョブはこの経路で構築し、インストール済みのバイナリでの再実行が冪等なこと、別のバイナリからの再実行が拒否されることと、開発ユーザーが `/etc/credshim/env` を読み込んで doctor を通すことも確かめる。
+- `credshim tail` は `[audit] path` の JSON 行を1行ずつ読みやすく表示し、末尾を250ミリ秒ごとに追う（切り詰められたら先頭から読み直す）。段階Bでは監査ログが専用ユーザーの 0600 なので `sudo -u credshim` で実行する。
+
+## 付録：設定ファイル例
+
+設定は静的キーのルールとOAuthプロバイダーの2種類。ホスト束縛がここに書かれるので、段階B以降はこのファイル自体をプロキシ専用ユーザーの所有にする。
+
+```toml
+[listen]
+addr = "127.0.0.1:8787"          # MITM（HTTPS_PROXY 用）
+base_url_addr = "127.0.0.1:8788" # base URLモード
+
+[ca]
+dir = "/var/lib/credshim/ca"
+
+[secrets]
+backend = "age-file"             # keychain | age-file | command
+path = "/var/lib/credshim/secrets.age"
+
+# ---- 静的キー ----
+[[rule]]
+name = "openai"
+host = "api.openai.com"
+secret = "openai"
+dummy = "sk-credshim-openai-<十分長いランダム>"
+inject = { header = "authorization" }
+allow_paths = ["/v1/chat/completions", "/v1/responses", "/v1/embeddings"]
+base_url_prefix = "/openai"
+
+[[rule]]
+name = "anthropic"
+host = "api.anthropic.com"
+secret = "anthropic"
+dummy = "sk-ant-credshim-<十分長いランダム>"
+inject = { header = "x-api-key" }
+
+[[rule]]
+name = "gemini"
+host = "generativelanguage.googleapis.com"
+secret = "gemini"
+dummy = "credshim-gemini-<十分長いランダム>"
+inject = { header = "x-goog-api-key", query = "key" }
+
+# ---- OAuth ----
+[[oauth]]
+name = "google"
+token_endpoint = "https://oauth2.googleapis.com/token"
+revoke_endpoint = "https://oauth2.googleapis.com/revoke"
+client_id = "<client-id>"
+client_secret = { secret = "google-client-secret", dummy = "credshim-google-secret-<ランダム>" }
+client_auth = "client_secret_post"
+resource_hosts = ["www.googleapis.com", "gmail.googleapis.com"]
+id_token = "passthrough"
+
+[vault]
+path = "/var/lib/credshim/oauth-vault.age"
+
+[scrub]
+enabled = true
+
+[limits]
+max_token_body_bytes = 65536
+```
+
+アプリ側の .env にはダミーだけが並ぶ（`OPENAI_API_KEY=sk-credshim-openai-...`、`GOOGLE_CLIENT_SECRET=credshim-google-secret-...`）。
+
+## 範囲外と未決事項
+
+**範囲外**（必要になったら同じ枠組みで足せる）
+
+- HTTP/3（QUIC）。HTTPS\_PROXY 経由のクライアントは使わない。
+- 署名型の認証（AWS SigV4 など）。リクエスト全体に署名するので単純な置換では済まず、プロキシが再署名する機能が別途要る。
+- private\_key\_jwt やサービスアカウントのJWT bearer グラント。プロキシが署名を肩代わりする形で追加できる。
+- mTLS のクライアント証明書。
+- 本番環境での利用。あくまでローカル開発専用。
+
+**未決事項**
+
+- [ ] Webhook の署名検証用シークレット（Stripe など）。受信側の秘密はこの仕組みでは守れない。プロキシが受信時に検証して結果をヘッダーで渡す逆方向の機能を作るか決める。
+- [ ] OAuth のアクセストークンがJWTで、アプリがクレームを読む場合の扱い。ダミーを「同じペイロードで署名だけ無効なJWT」にするか。
+- [x] 秘密ストアの既定バックエンド（キーチェーンか age ファイルか）。→ macOS はキーチェーン、それ以外は `$XDG_CONFIG_HOME/credshim/secrets.age` の age ファイル（Linux の keyutils は再起動で消えるため）。
+- [ ] SDK がキーの形式を検証するサービスの洗い出しと、プリセットのダミー形式の決定。→ プリセットは `sk-credshim-openai-`、`sk-ant-credshim-`、`credshim-gemini-` に英数字40文字。openai SDK（Python、Node）は形式を検証しないことをE2Eで確認済み。他サービスの洗い出しは未了。

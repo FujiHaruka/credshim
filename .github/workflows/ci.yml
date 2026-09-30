@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: ./scripts/check-secret-exposure.sh
+      - run: ./scripts/check-release-excludes-testing.sh
+
+  sdk-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: crates/e2e/sdk/node/package-lock.json
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+      - run: uv python install 3.13
+      - run: npm ci
+        working-directory: crates/e2e/sdk/node
+      - run: cargo test -p credshim-e2e -- --ignored
+      - name: env + doctor from curl, Python, Node and Go
+        run: cargo test -p credshim --test dev_tools -- --ignored
+
+  stage-b:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p credshim
+      - run: sudo target/release/credshim service install
+      - name: setup is idempotent when rerun with the installed binary
+        run: sudo /usr/local/libexec/credshim/credshim service install
+      - name: a different binary does not replace the installed one without --upgrade
+        run: "! sudo target/release/credshim service install"
+      - run: sudo useradd --create-home devtest
+      - run: install -m 0755 scripts/stage-b/verify.sh /tmp/verify.sh
+      - name: a non-sudo development user cannot read or write the proxy's state
+        run: sudo -u devtest /tmp/verify.sh
+      - name: the development user passes doctor from the public env file
+        run: sudo -u devtest bash -c '. /etc/credshim/env && /usr/local/libexec/credshim/credshim doctor --no-runtimes'
+      - name: verify flags a development user who can sudo
+        run: "! /tmp/verify.sh"
+      - name: diagnostics
+        if: failure()
+        run: ls -ld / /usr /usr/local /usr/local/libexec /usr/local/libexec/credshim /usr/local/libexec/credshim/credshim
+      - name: service logs
+        if: failure()
+        run: sudo journalctl -u credshim --no-pager
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - run: |
+          for target in inject_request token_response scrub_stream; do
+            cargo +nightly fuzz run "$target" --target x86_64-unknown-linux-gnu -- -max_total_time=60
+          done

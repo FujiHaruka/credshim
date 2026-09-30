@@ -1,0 +1,43 @@
+[package]
+name = "credshim-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+rcgen.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+sha2 = "0.10"
+hex = "0.4"
+time = "0.3"
+getrandom = "0.3"
+tower = "0.5"
+async-stream = "0.3"
+base64.workspace = true
+form_urlencoded = "1"
+
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+reqwest = { workspace = true, features = ["form", "query"] }
+tokio-tungstenite = "0.30"

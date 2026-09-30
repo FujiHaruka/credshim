@@ -1,0 +1,56 @@
+use std::io::Write;
+use std::os::unix::fs::MetadataExt;
+use std::path::Path;
+use std::process::{Command, Stdio};
+
+use anyhow::{Context, bail};
+
+#[cfg(target_os = "linux")]
+const SETUP: &str = include_str!("../../../scripts/stage-b/setup-linux.sh");
+#[cfg(target_os = "linux")]
+pub const INSTALLED: &str = "/usr/local/libexec/credshim/credshim";
+#[cfg(target_os = "macos")]
+const SETUP: &str = include_str!("../../../scripts/stage-b/setup-macos.sh");
+#[cfg(target_os = "macos")]
+pub const INSTALLED: &str = "/Library/CredShim/bin/credshim";
+
+pub fn install(print: bool, upgrade: bool) -> anyhow::Result<()> {
+    if print {
+        std::io::stdout().write_all(SETUP.as_bytes())?;
+        return Ok(());
+    }
+    if !rustix::process::geteuid().is_root() {
+        bail!(
+            "`credshim service install` creates a system user and a system service; run it with sudo (review it first with `credshim service install --print`)"
+        );
+    }
+    let binary = std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .context("could not locate the credshim binary")?;
+    let installed = Path::new(INSTALLED);
+    if installed.exists() && !upgrade && !same_file(&binary, installed)? {
+        bail!(
+            "{INSTALLED} is already installed; rerun with it (`sudo {INSTALLED} service install`) to refresh the service, or pass --upgrade to replace it with {}",
+            binary.display()
+        );
+    }
+    let status = Command::new("/bin/bash")
+        .arg("-c")
+        .arg(SETUP)
+        .arg("credshim-service-install")
+        .arg(&binary)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .stdin(Stdio::null())
+        .status()
+        .context("could not start bash")?;
+    if !status.success() {
+        bail!("service setup failed ({status})");
+    }
+    Ok(())
+}
+
+fn same_file(a: &Path, b: &Path) -> anyhow::Result<bool> {
+    let (a, b) = (std::fs::metadata(a)?, std::fs::metadata(b)?);
+    Ok(a.dev() == b.dev() && a.ino() == b.ino())
+}

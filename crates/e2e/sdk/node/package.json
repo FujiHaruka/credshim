@@ -1,0 +1,8 @@
+{
+  "name": "credshim-e2e-node",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "openai": "^7.25.0"
+  }
+}
