@@ -167,7 +167,13 @@ async fn probe_inner(
         .unwrap_or_default()
         .to_string();
     if status_line.split_whitespace().nth(1) != Some("200") {
-        return Err(ProbeError::Refused(status_line));
+        return Err(ProbeError::Refused(
+            status_line
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(120)
+                .collect(),
+        ));
     }
     let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::aws_lc_rs::default_provider(),

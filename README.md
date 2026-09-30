@@ -127,12 +127,12 @@ sudo credshim service install          # Linux は systemd（ユーザー credsh
 credshim service install --print       # 実行前に中身を確認する
 ```
 
-状態は `/var/lib/credshim`（専用ユーザーだけが読める）、公開用の CA 証明書・結合バンドル・シェル用の変数は `/etc/credshim` に置かれる。ルールと秘密の登録は専用ユーザーとして行い、ルールを変えたら `service install` をもう一度実行して `/etc/credshim/env` を更新する。
+状態は `/var/lib/credshim`（専用ユーザーだけが読める）、公開用の CA 証明書・結合バンドル・シェル用の変数は `/etc/credshim` に置かれる。ルールと秘密の登録は専用ユーザーとして行い、ルールを変えたらインストール済みのバイナリで `service install` をもう一度実行して `/etc/credshim/env` を更新する（開発ユーザーが書き換えられるバイナリを sudo で動かさない）。別のバイナリで置き換えるときは `--upgrade` を付ける。
 
 ```sh
 credshim preset openai | sudo -u credshim tee -a /var/lib/credshim/config.toml
 sudo -u credshim /usr/local/libexec/credshim/credshim secret set openai --config /var/lib/credshim/config.toml
-sudo credshim service install
+sudo /usr/local/libexec/credshim/credshim service install   # macOS は /Library/CredShim/bin/credshim
 
 # 開発ユーザーのシェルで
 . /etc/credshim/env && credshim doctor

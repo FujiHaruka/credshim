@@ -106,6 +106,8 @@ enum ServiceCommand {
     Install {
         #[arg(long)]
         print: bool,
+        #[arg(long)]
+        upgrade: bool,
     },
 }
 
@@ -202,8 +204,8 @@ async fn main() -> anyhow::Result<()> {
             tail::run(&path, lines, !no_follow).await
         }
         Command::Service {
-            command: ServiceCommand::Install { print },
-        } => service::install(print),
+            command: ServiceCommand::Install { print, upgrade },
+        } => service::install(print, upgrade),
     }
 }
 
@@ -212,7 +214,15 @@ fn print_env(
     ca_cert: Option<PathBuf>,
     bundle: Option<PathBuf>,
 ) -> anyhow::Result<()> {
-    let config = config::load(config_path)?.config;
+    let loaded = config::load(config_path)?;
+    if let Some(path) = &loaded.source {
+        harden::check_private(path, "config file")?;
+    }
+    let config = loaded.config;
+    for spec in &config.rules {
+        Rule::from_spec(spec.clone())?;
+    }
+    let base_urls = BaseUrls::from_specs(&config.rules)?;
     let ca_dir = config.ca_dir()?;
     let cert = ca_cert.unwrap_or_else(|| ca_dir.join(credshim_mitm::ca::CERT_FILE));
     let bundle = bundle.unwrap_or_else(|| ca_dir.join(credshim_mitm::ca::BUNDLE_FILE));
@@ -230,6 +240,7 @@ fn print_env(
     }
     let rendered = env::render(
         &config,
+        &base_urls,
         &env::CaFiles {
             cert: &cert,
             bundle: &bundle,

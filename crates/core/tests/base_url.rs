@@ -91,7 +91,18 @@ fn port_follows_the_rule() {
 #[test]
 fn unsafe_or_ambiguous_prefixes_are_rejected() {
     for prefix in [
-        "", "/", "openai", "/a/../b", "/a%2fb", "/a?x", "/a#x", "/a\\b", "/./a",
+        "",
+        "/",
+        "openai",
+        "/a/../b",
+        "/a%2fb",
+        "/a?x",
+        "/a#x",
+        "/a\\b",
+        "/./a",
+        "/a\necho x",
+        "/a b",
+        "/a'b",
     ] {
         let err =
             BaseUrls::from_specs(&[spec("openai", "api.openai.com", Some(prefix))]).unwrap_err();

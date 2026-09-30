@@ -118,6 +118,12 @@ impl Config {
                     "rule {:?}: env {name:?} must be an environment variable name (A-Z, 0-9, '_', not starting with a digit)",
                     rule.name
                 );
+                anyhow::ensure!(
+                    ends_like_a_credential(name),
+                    "rule {:?}: env {name:?} must end in one of {} so it cannot override proxy, CA or shell variables",
+                    rule.name,
+                    CREDENTIAL_SUFFIXES.join(", ")
+                );
             }
         }
         Ok(())
@@ -176,6 +182,14 @@ fn default_backend() -> anyhow::Result<BackendConfig> {
         path: config_dir()?.join("secrets.age"),
         identity: None,
     })
+}
+
+const CREDENTIAL_SUFFIXES: [&str; 4] = ["_KEY", "_TOKEN", "_SECRET", "_PASSWORD"];
+
+fn ends_like_a_credential(name: &str) -> bool {
+    CREDENTIAL_SUFFIXES
+        .iter()
+        .any(|suffix| name.len() > suffix.len() && name.ends_with(suffix))
 }
 
 fn is_env_name(name: &str) -> bool {

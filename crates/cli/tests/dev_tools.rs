@@ -164,16 +164,43 @@ async fn env_prints_proxy_ca_and_dummy_variables_for_a_shell() {
 }
 
 #[tokio::test]
-async fn env_names_must_be_environment_variables() {
-    let home = Home::new(&format!(
-        "[[rule]]\nname = \"openai\"\nhost = \"api.openai.com\"\nsecret = \"openai\"\ndummy = \"{OPENAI_DUMMY}\"\nenv = \"X; rm -rf ~\"\ninject = {{ header = \"authorization\" }}\n"
-    ))
-    .await;
+async fn env_refuses_config_values_that_could_run_or_redirect_the_shell() {
+    let rule = |name: &str, env: &str, prefix: &str| {
+        format!(
+            "[[rule]]\nname = {name:?}\nhost = \"api.openai.com\"\nsecret = \"openai\"\ndummy = \"{OPENAI_DUMMY}\"\nenv = {env:?}\ninject = {{ header = \"authorization\" }}\nbase_url_prefix = {prefix:?}\n"
+        )
+    };
+    for (config, needle) in [
+        (
+            rule("openai", "X; rm -rf ~", "/openai"),
+            "must be an environment variable name",
+        ),
+        (
+            rule("openai", "PROMPT_COMMAND", "/openai"),
+            "must end in one of",
+        ),
+        (rule("openai", "NO_PROXY", "/openai"), "must end in one of"),
+        (
+            rule("openai", "SSL_CERT_FILE", "/openai"),
+            "must end in one of",
+        ),
+        (
+            rule("x\necho pwned", "OPENAI_API_KEY", "/openai"),
+            "rule name",
+        ),
+        (
+            rule("openai", "OPENAI_API_KEY", "/openai\necho pwned"),
+            "base_url_prefix",
+        ),
+    ] {
+        let home = Home::new(&config).await;
 
-    let env = output(home.path(), &["env", "--config", home.config()]).await;
+        let env = output(home.path(), &["env", "--config", home.config()]).await;
 
-    assert!(!env.status.success());
-    assert!(text(&env).contains("must be an environment variable name"));
+        assert!(!env.status.success(), "{config}");
+        assert!(text(&env).contains(needle), "{needle}\n{}", text(&env));
+        assert!(env.stdout.is_empty());
+    }
 }
 
 #[tokio::test]

@@ -2,6 +2,7 @@ use std::fmt::Write;
 use std::path::Path;
 
 use anyhow::Context;
+use credshim_core::BaseUrls;
 
 use crate::config::Config;
 
@@ -10,7 +11,7 @@ pub struct CaFiles<'a> {
     pub bundle: &'a Path,
 }
 
-pub fn render(config: &Config, ca: &CaFiles<'_>) -> anyhow::Result<String> {
+pub fn render(config: &Config, base_urls: &BaseUrls, ca: &CaFiles<'_>) -> anyhow::Result<String> {
     let proxy = format!("http://{}", config.listen());
     let cert = utf8(ca.cert)?;
     let bundle = utf8(ca.bundle)?;
@@ -45,13 +46,8 @@ pub fn render(config: &Config, ca: &CaFiles<'_>) -> anyhow::Result<String> {
     }
     if let Some(addr) = config.listen.base_url_addr {
         for rule in &config.rules {
-            if let Some(prefix) = &rule.base_url_prefix {
-                writeln!(
-                    out,
-                    "# base URL for {}: http://{addr}{}",
-                    rule.name,
-                    prefix.trim_end_matches('/')
-                )?;
+            if let Some(prefix) = base_urls.prefix_for(&rule.name) {
+                writeln!(out, "# base URL for {}: http://{addr}{prefix}", rule.name)?;
             }
         }
     }

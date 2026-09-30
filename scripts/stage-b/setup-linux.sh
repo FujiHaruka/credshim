@@ -40,7 +40,7 @@ install -d -m 0700 -o "$user" -g "$user" "$state"
 install -d -m 0755 -o root -g root "$public"
 install -d -m 0755 -o root -g root /usr/local/libexec /usr/local/libexec/credshim
 refuse_writable_ancestors /usr/local/libexec/credshim
-install -m 0755 -o root -g root "$binary" "$bin"
+[[ $binary -ef $bin ]] || install -m 0755 -o root -g root "$binary" "$bin"
 
 if [[ ! -e $state/config.toml ]]; then
   cat > "$tmp/config.toml" <<TOML
@@ -65,7 +65,7 @@ socket = "$state/status.sock"
 
 # Add rules with: credshim preset openai | sudo -u $user tee -a $state/config.toml
 # then register the secret: sudo -u $user $bin secret set openai --config $state/config.toml
-# then rerun `sudo credshim service install` so $public/env carries the new dummies
+# then rerun `sudo $bin service install` so $public/env carries the new dummies
 TOML
   install -m 0600 -o "$user" -g "$user" "$tmp/config.toml" "$state/config.toml"
 fi

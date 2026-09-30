@@ -1,4 +1,4 @@
-use crate::rule::{DEFAULT_PORT, RuleSpec, is_clean_path_prefix, path_is_under};
+use crate::rule::{DEFAULT_PORT, RuleSpec, is_clean_path_prefix, is_unreserved, path_is_under};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Route {
@@ -24,7 +24,7 @@ pub struct Resolved<'m, 'p> {
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum BaseUrlError {
     #[error(
-        "rule {rule:?}: base_url_prefix {prefix:?} must start with '/', name at least one segment, and contain no dot segments, '%', '?', '#' or '\\'"
+        "rule {rule:?}: base_url_prefix {prefix:?} must start with '/', name at least one segment, use only A-Z, a-z, 0-9, '-', '.', '_', '~' and '/', and contain no dot segments"
     )]
     InvalidPrefix { rule: String, prefix: String },
     #[error("rules {0:?} and {1:?} have base_url_prefix values where one contains the other")]
@@ -41,7 +41,10 @@ impl BaseUrls {
                 continue;
             };
             let trimmed = prefix.trim_end_matches('/');
-            if trimmed.is_empty() || !is_clean_path_prefix(trimmed) {
+            if trimmed.is_empty()
+                || !is_clean_path_prefix(trimmed)
+                || !trimmed.bytes().all(|b| b == b'/' || is_unreserved(b))
+            {
                 return Err(BaseUrlError::InvalidPrefix {
                     rule: spec.name.clone(),
                     prefix: prefix.clone(),
