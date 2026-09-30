@@ -166,3 +166,19 @@ fn encoded_forms_the_proxy_sends_are_scrubbed_too() {
         assert_eq!(scrubbed, b"/x?key=DUMMY-VALUE-0123456789");
     }
 }
+
+#[test]
+fn base64url_echoes_are_scrubbed_too() {
+    use base64::Engine;
+    use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+
+    let secret = "real-secret-???>>>-value";
+    assert!(STANDARD.encode(secret).contains(['+', '/']));
+    let s = scrubber(&[(secret, "dummy-secret-0123456789")]);
+    for prefix in ["", "{", "{\""] {
+        let encoded = URL_SAFE_NO_PAD.encode(format!("{prefix}{secret}\"}}"));
+        let scrubbed = s.scrub(encoded.as_bytes()).expect("base64url scrubbed");
+        let decoded = URL_SAFE_NO_PAD.decode(&scrubbed).unwrap_or_default();
+        assert!(!String::from_utf8_lossy(&decoded).contains(secret), "{prefix}");
+    }
+}
