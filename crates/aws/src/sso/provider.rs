@@ -18,6 +18,8 @@ const SCRUBBED_TOKEN: &str = "credshim-scrubbed-aws-sso-token";
 const KEPT_GENERATIONS: usize = 2;
 const REFRESH_BACKOFF: Duration = Duration::from_secs(30);
 
+type ScrubPairs = Vec<(SecretString, String)>;
+
 #[derive(Clone, Debug)]
 pub struct SsoOptions {
     pub refresh_before: Duration,
@@ -96,7 +98,7 @@ pub struct SsoProvider {
     transport: Arc<dyn Transport>,
     options: SsoOptions,
     generation: AtomicU64,
-    scrub: Mutex<BTreeMap<String, VecDeque<Vec<(SecretString, String)>>>>,
+    scrub: Mutex<BTreeMap<String, VecDeque<ScrubPairs>>>,
 }
 
 impl std::fmt::Debug for SsoProvider {
@@ -360,13 +362,14 @@ impl SsoProvider {
         }
         let secret = refreshed.to_secret(&state.session);
         let store = self.store.clone();
-        let written = tokio::task::spawn_blocking(move || store.set(&name, secret))
-            .await
-            .unwrap_or_else(|_| Err(StoreError::ReadOnly("panicked")));
-        match written {
-            Ok(()) => {}
-            Err(StoreError::ReadOnly(_)) if login.warned_read_only => {}
-            Err(StoreError::ReadOnly(backend)) => {
+        let written = tokio::task::spawn_blocking(move || store.set(&name, secret)).await;
+        match written.map_err(|err| err.to_string()) {
+            Ok(Ok(())) => {}
+            Err(panicked) => {
+                tracing::error!(session = state.session.name(), error = %panicked, "saving the refreshed AWS SSO token failed")
+            }
+            Ok(Err(StoreError::ReadOnly(_))) if login.warned_read_only => {}
+            Ok(Err(StoreError::ReadOnly(backend))) => {
                 login.warned_read_only = true;
                 tracing::warn!(
                     session = state.session.name(),
@@ -374,7 +377,7 @@ impl SsoProvider {
                     "the secret store is read-only, so the refreshed AWS SSO token lives only in memory"
                 );
             }
-            Err(err) => {
+            Ok(Err(err)) => {
                 tracing::warn!(session = state.session.name(), error = %err, "could not save the refreshed AWS SSO token")
             }
         }
@@ -447,7 +450,7 @@ impl SsoProvider {
         );
     }
 
-    fn record(&self, key: String, pairs: Vec<(SecretString, String)>) {
+    fn record(&self, key: String, pairs: ScrubPairs) {
         let mut scrub = self
             .scrub
             .lock()

@@ -172,6 +172,21 @@ session-bind の無い要求、任意データへの署名要求は拒否する�
 - [ ] 脅威モデルの AWS の追加行それぞれに回帰テストがある。
 - [ ] 人間が実際の IAM Identity Center でログインし、`aws` コマンドを確認する（手動マイルストーン）。
 
+**実装メモ（Phase 10）**
+
+- 保存先：SSO トークン（アクセストークン、リフレッシュトークン、`RegisterClient` のクライアント ID とシークレット、それぞれの期限）は**秘密ストア**に、セッションごとに1つの JSON（`credshim-aws-sso-<session>`）として置く。OAuth 保管庫はダミーをキーにした表で、プロキシのプロセスがファイル全体を書き直すので、別プロセスの `credshim aws sso login` が書く先には向かない。秘密ストアは `login` とプロキシの両方がすでに使っている経路で、段階Bでは専用ユーザーの側にある（Phase 11 の「SSO ログインは `secret set` と同じく専用ユーザーとして」に合う）。age-file はロックファイル（`<path>.lock`）で読み書きを直列にし、`secret set` とプロキシの書き戻しが互いの値を消さないようにした。`SecretStore` に `remove` を足した（`command` は読み取り専用なので拒否）。
+- 書き戻し：プロキシはトークンを更新したら秘密ストアへ書き戻す。書く前に読み直し、保存されたログインの ID が自分の更新元と違えば（その間に人間がログインし直した）、書かずにそちらを採る。`command` のように書けないストアでは、更新したトークンはメモリだけに置き、一度だけ警告する。
+- 読み直し：実行中のプロキシは、トークンが無いか使えない（期限切れで更新できない、ポータルが401を返した）ときに秘密ストアを読み直す（1秒に1回まで）。再ログインは再起動なしで効く。
+- 期限前の取り直し：ロール認証情報と SSO トークンは期限の10分前から取り直す（botocore の目安に合わせた）。取得はルールごとに直列にし、同時の要求で何度も取らない。ロール認証情報の取得がネットワークの失敗なら、まだ期限内の手持ちを使い続ける。トークンの更新に失敗したら30秒は再試行しない（期限内なら手持ちを使う）。
+- SSO トークンは要求ごとに期限を確かめる。ロール認証情報がまだ有効でも、SSO のログインが切れて更新できなければ上流へ送らない（完了条件の「SSO トークンの期限切れ後は上流へ送らずエラー」をそのまま守る）。`logout` はポータルの `Logout` でサーバー側のセッションを終わらせてから秘密ストアから消すが、実行中のプロキシのメモリにあるトークンは、次にロール認証情報を取り直す時に401を受けるまで使われる。
+- ログインが要るときの応答：403 で、要求の形に合わせたエラー（JSON は `__type`、Query は `<ErrorResponse>`、S3 は `<Error>`、EC2 は `<Response><Errors>`。どれも `x-amzn-ErrorType` 付き）を返す。コードは `CredShimSsoLoginRequired`、メッセージに `credshim aws sso login <session>` を入れ、`aws` CLI の表示に出ることを E2E で確かめた。拒否の理由は `sso_login_required`、`sso_refused`（ポータルが401以外の4xx）、`sso_unavailable`（届かない、5xx、429。502 を返す）。
+- `RegisterClient` は `clientType: public`、`scopes: ["sso:account:access"]`、`grantTypes: ["urn:ietf:params:oauth:grant-type:device_code", "refresh_token"]` で登録する。デバイス認可でリフレッシュトークンが出るかは実物では未確認（手動マイルストーンで確かめる）。出なければトークンの期限（IAM Identity Center の設定、既定8時間）まで使い、切れたら再ログインを促す。ポーリングは応答の `interval`（最低1秒）で行い、`slow_down` で5秒延ばし、`expiresIn` で打ち切る。`GetRoleCredentials` の `expiration` はミリ秒として扱う。
+- プロキシ自身の SSO 通信は `UpstreamTransport`（mitm）が `Upstream` で直接 TLS を張って行う。応答は1MiB、全体は30秒まで。`testing` フィーチャーの DNS 上書きで MockSso に向けてテストする。待ち受けを通らないので、クライアントからの `oidc.*`・`portal.sso.*` への CONNECT の拒否はそのまま。
+- スクラブ：core に `ScrubSource`（世代つきの置き換え対の提供元）を足し、SSO のプロバイダが取得したロール認証情報（アクセスキー ID はダミーに、シークレットとセッショントークンは固定文字列に）と SSO トークンを、キーごとに直近2世代まで渡す。
+- 設定：`[[aws_sso_session]]`（`name`、`start_url` は `https://` のみ、`region` は小文字・数字・`-`）と `[[aws_sso_role]]`（`name`、`dummy_access_key_id`、`session`、`account_id` は12桁、`role_name` は IAM の文字種で64文字まで、`services`、`regions`）。静的キーと名前空間とダミーの重なり検査を共有する。`credshim preset aws-sso`、`credshim aws sso login <session>`（stdin が TTY でなければ拒否。URL とユーザーコードだけを表示し、デバイスコードは出さない）、`credshim aws sso logout <session>`。
+- `expose_secret()` の許可先に `crates/aws/src/sso/api.rs`（トークン交換）と `crates/aws/src/sso/stored.rs`（保存形式）を足した。
+- テスト：testkit の `MockSso` は `oidc.<region>` と `portal.sso.<region>` を1つの待ち受けで受け、クライアント登録、デバイス認可（`approve` するまで `authorization_pending`）、トークン発行と回転するリフレッシュ、ロール認証情報の発行、ログアウトを行う。発行したロール認証情報は `MockAws` と共有する鍵束（`Keyring`）に期限とセッショントークン付きで入り、`MockAws` は期限切れを `ExpiredToken` で拒否し、`x-amz-security-token` が署名されていることを確かめる。
+
 ## Phase 11: 運用への組み込み
 
 v0.1 の段階B・Cと開発体験の仕組みに SSH と AWS を載せる。

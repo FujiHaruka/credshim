@@ -44,6 +44,8 @@ CredShim は ssh-agent として、鍵をプロキシの中だけに置いて署
 
 `~/.aws` にはダミーのアクセスキーだけを置く。CredShim は `amazonaws.com` 配下を MITM し、Authorization の資格スコープにダミーのアクセスキー ID が入った SigV4 要求だけを、本物の認証情報で署名し直して上流へ送る。署名し直すヘッダーはクライアントが署名したものと同じ集合で、時刻とスコープもクライアントの値を使う。S3 は `x-amz-content-sha256` の値をそのまま署名に使いボディはストリームで流し、それ以外のサービスは上限付きでボディを読んでハッシュを計算する。サービスとリージョンの絞り込みはスコープで行い、ホストがスコープのサービスとリージョンのエンドポイントでなければ再署名しない（対応表は botocore から生成）。利用者が作る API の前段（`execute-api`）は、署名した要求が持ち主のバックエンドに届くので、ルールに明示したときだけ再署名する。`X-Amz-Date` が現在時刻から15分より離れた要求も再署名しない。
 
+SSO のロールでは、SSO のログインを CredShim が行う。`credshim aws sso login` がデバイス認可フローで得たトークンを秘密ストアに置き、プロキシはそれでロール認証情報を取得してメモリに持ち、期限前に取り直す。プロキシ自身の SSO の通信は待ち受けを通らないので、クライアントからの SSO OIDC とポータルへの CONNECT は引き続き拒否される。
+
 | エージェントが取りうる行動 | 対策 |
 | --- | --- |
 | `~/.aws` の credentials を読む | ダミーのアクセスキーしか無い。本物は秘密ストアとプロキシのメモリだけ |
@@ -52,6 +54,10 @@ CredShim は ssh-agent として、鍵をプロキシの中だけに置いて署
 | 署名の要らない API（SSO OIDC のデバイス認可、SSO ポータル、`AssumeRoleWithWebIdentity`・`AssumeRoleWithSAML`、`GetCredentialsForIdentity`、`aws login`）で自分で認証情報を得る、人間に承認させる | ルールと無関係に拒否。SSO OIDC、SSO ポータル、signin はホストごと CONNECT の段階で（AWS の設定が無くても）、STS と Cognito Identity の操作は MITM したうえで操作名で |
 | AWS の応答に本物のキーをエコーさせる | 本物のアクセスキー ID とシークレットをスクラブ対象に加える |
 | 署名付きチャンク（`STREAMING-AWS4-HMAC-SHA256-PAYLOAD`）でプロキシの知らない署名を続けさせる | 拒否 |
+| SSO のキャッシュ（`~/.aws/sso/cache`、`~/.aws/cli/cache`）を読む | ログインは `credshim aws sso login` で行い、`~/.aws` には何も書かない。SSO トークン（アクセス、リフレッシュ、クライアントのシークレット）は秘密ストアに暗号化して置き、ロール認証情報はプロキシのメモリだけ |
+| SSO トークンやロール認証情報を、ログ、エラー、応答から得る | 取得したロール認証情報と SSO トークンは直近2世代までスクラブ対象に加える。ログとエラーには状態コードと AWS のエラーコードだけを出す |
+| SSO の期限切れやログアウトのあとも使い続ける | プロキシは要求ごとに SSO トークンの期限を確かめ、更新できなければ上流へ送らず拒否する。ロール認証情報の取得が401なら秘密ストアを読み直し、新しいログインが無ければ拒否する |
+| 自分で `credshim aws sso login` を実行して人間に承認させる | `login` は stdin が TTY でなければ拒否する。段階Bでは専用ユーザーの秘密ストアに書くので開発ユーザーからは実行できない |
 
 ## 回帰テスト対応表
 
@@ -77,3 +83,7 @@ CredShim は ssh-agent として、鍵をプロキシの中だけに置いて署
 | 署名の要らない API で自分で認証情報を得る、人間に承認させる | `crates/mitm/tests/aws.rs` の `unsigned_credential_apis_are_refused_without_any_rule_matching`、`crates/cli/tests/aws.rs` の `sso_and_signin_endpoints_are_refused_even_without_aws_config`、`crates/aws/tests/policy.rs` の `unsigned_credential_apis_are_denied_without_any_rule`・`unsigned_credential_apis_are_denied_on_fips_endpoints` |
 | AWS の応答に本物のキーをエコーさせる | `crates/mitm/tests/aws.rs` の `query_protocol_request_signed_with_the_dummy_is_resigned_and_echoes_are_scrubbed` |
 | 署名付きチャンクでプロキシの知らない署名を続けさせる | `crates/mitm/tests/aws.rs` の `signed_chunk_uploads_and_oversized_non_s3_bodies_never_reach_aws` |
+| SSO のキャッシュを読む | `crates/e2e/tests/aws_sso_cli.rs` の `aws_cli_uses_an_sso_role_after_a_credshim_login_with_only_a_dummy_profile`（`~/.aws/sso` が作られず、一時 HOME のどのファイルにも SSO トークンとロール認証情報の平文が無い）、`crates/mitm/tests/aws_sso.rs` の `an_expiring_sso_token_is_refreshed_and_saved_back_encrypted` |
+| SSO トークンやロール認証情報を、ログ、エラー、応答から得る | `crates/mitm/tests/aws_sso.rs` の `requests_need_a_login_then_use_role_credentials_that_never_reach_the_client`・`role_credentials_are_replaced_before_they_expire_and_no_request_fails`（MockAws がエコーしたロールのアクセスキー ID がダミーに置き換わる）、`crates/e2e/tests/aws_sso_cli.rs` の `aws_cli_keeps_working_while_role_credentials_expire_and_are_replaced`、`crates/core/tests/scrub.rs` の `a_scrub_source_is_reread_when_its_generation_moves` |
+| SSO の期限切れやログアウトのあとも使い続ける | `crates/mitm/tests/aws_sso.rs` の `after_the_sso_token_expires_nothing_reaches_aws_until_the_next_login`・`logout_revokes_the_token_and_the_next_role_fetch_needs_a_login`、`crates/e2e/tests/aws_sso_cli.rs` の `aws_cli_reports_an_expired_sso_login_and_recovers_after_logging_in_again` |
+| 自分で `credshim aws sso login` を実行して人間に承認させる | `crates/cli/tests/aws.rs` の `sso_login_is_for_a_person_at_a_terminal_and_logout_needs_no_network_without_a_login`、`crates/mitm/tests/aws_sso.rs` の `clients_still_cannot_reach_the_sso_endpoints_the_proxy_itself_uses` |

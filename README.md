@@ -158,7 +158,37 @@ services = ["sts", "s3", "dynamodb"]         # 省略すると全サービス（
 regions = ["ap-northeast-1"]                 # 省略すると全リージョン
 ```
 
-認証情報を発行する操作（`sts:AssumeRole`・`GetSessionToken`、`iam:CreateAccessKey`、`s3:CreateSession` など37操作）は拒否する。SSO OIDC、SSO ポータル、`aws login` の signin のホストへの CONNECT は、AWS の設定が無くても常に拒否する。`aws sso login`、AssumeRole するプロファイル、`aws s3 presign` などクライアント側で署名するもの、S3 Express One Zone は動かない。
+認証情報を発行する操作（`sts:AssumeRole`・`GetSessionToken`、`iam:CreateAccessKey`、`s3:CreateSession` など37操作）は拒否する。SSO OIDC、SSO ポータル、`aws login` の signin のホストへの CONNECT は、AWS の設定が無くても常に拒否する。`aws sso login`（代わりに `credshim aws sso login`）、AssumeRole するプロファイル、`aws s3 presign` などクライアント側で署名するもの、S3 Express One Zone は動かない。
+
+## AWS（IAM Identity Center／SSO）
+
+SSO のロールも、`~/.aws` にはダミーの静的アクセスキーだけを置いて使う。ログインは `aws sso login` ではなく `credshim aws sso login` で人間が行い、SSO トークンは秘密ストアに、ロール認証情報はプロキシのメモリにだけ置く。プロキシは期限の10分前にロール認証情報と SSO トークンを取り直す（リフレッシュトークンがあれば）。
+
+```sh
+credshim preset aws-sso >> ~/.config/credshim/config.toml   # start_url、region、アカウント、ロールを書き換える
+credshim run
+credshim aws sso login sso       # 表示された URL をブラウザで開いてコードを確かめ、承認する
+aws sts get-caller-identity      # ~/.aws/credentials はダミー（静的キーと同じ）
+credshim aws sso logout sso      # IAM Identity Center のセッションを終わらせ、保存したトークンを消す
+```
+
+```toml
+[[aws_sso_session]]
+name = "sso"
+start_url = "https://your-portal.awsapps.com/start"
+region = "us-east-1"                 # IAM Identity Center のリージョン
+
+[[aws_sso_role]]
+name = "aws-sso"
+dummy_access_key_id = "CREDSHIMAWS..."
+session = "sso"
+account_id = "123456789012"
+role_name = "Developer"
+services = ["sts", "s3"]             # 省略すると全サービス（静的キーと同じ）
+regions = ["ap-northeast-1"]
+```
+
+ログインしていない、または SSO トークンが切れて更新できないときは、要求を上流へ送らずに `CredShimSsoLoginRequired` のエラー（`credshim aws sso login <session>` を促すメッセージ付き）を返し、監査ログに `sso_login_required` を残す。実行中のプロキシは次の AWS の要求で新しいログインを読み込むので、再起動は要らない。`logout` のあとも、プロキシがすでに持っているロール認証情報は取り直しの時期まで使われる。`login` は端末から実行する（stdin が TTY でなければ拒否）。
 
 ## 監査ログと状態
 
