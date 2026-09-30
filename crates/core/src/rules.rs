@@ -19,6 +19,7 @@ pub enum Decision<'r> {
     Pass,
     Inject(Vec<Edit<'r>>),
     Deny(&'r Rule),
+    NotAllowed(&'r Rule),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -102,6 +103,12 @@ pub(crate) fn decide<'r>(
                 edits.push(Edit { rule, location });
             }
         }
+    }
+    if let Some(edit) = edits
+        .iter()
+        .find(|edit| !edit.rule.policy().allows(&parts.method, parts.uri.path()))
+    {
+        return Decision::NotAllowed(edit.rule);
     }
     if edits.is_empty() {
         Decision::Pass

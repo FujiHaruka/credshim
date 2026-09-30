@@ -11,6 +11,7 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_encode};
 use secrecy::{ExposeSecret, SecretString};
 use zeroize::Zeroizing;
 
+use crate::policy::{Limiter, Permit};
 use crate::rule::{Location, Rule, SecretRef};
 use crate::rules::{self, Decision, Destination, Edit, RuleSet};
 use crate::scan;
@@ -68,6 +69,7 @@ pub enum Verdict {
     Pass,
     Injected(Vec<String>),
     Denied(String),
+    NotAllowed(String),
 }
 
 pub trait TokenResolver: Send + Sync + fmt::Debug {
@@ -88,6 +90,7 @@ pub struct Injector {
     secrets: Secrets,
     tokens: Option<Arc<dyn TokenResolver>>,
     scrubber: Mutex<Option<(u64, Arc<Scrubber>)>>,
+    limiter: Limiter,
 }
 
 impl Injector {
@@ -109,6 +112,7 @@ impl Injector {
             secrets,
             tokens: None,
             scrubber: Mutex::default(),
+            limiter: Limiter::default(),
         })
     }
 
@@ -119,6 +123,18 @@ impl Injector {
 
     pub fn rules(&self) -> &RuleSet {
         &self.rules
+    }
+
+    pub fn admit(&self, applied: &[String]) -> Result<Permit, String> {
+        let limits = applied.iter().filter_map(|name| {
+            let rule = self.rules.rules().iter().find(|rule| rule.name() == name)?;
+            Some((rule.name(), rule.policy().limits()))
+        });
+        self.limiter.admit(
+            limits,
+            std::time::Instant::now(),
+            std::time::SystemTime::now(),
+        )
     }
 
     pub fn scrubber(&self) -> Arc<Scrubber> {
@@ -172,6 +188,7 @@ impl Injector {
         match rules::decide(self.rules.rules().iter().chain(&issued), dest, parts) {
             Decision::Pass => Ok(Verdict::Pass),
             Decision::Deny(rule) => Ok(Verdict::Denied(rule.name().to_string())),
+            Decision::NotAllowed(rule) => Ok(Verdict::NotAllowed(rule.name().to_string())),
             Decision::Inject(edits) => {
                 let mut applied: Vec<String> = Vec::new();
                 for edit in edits {

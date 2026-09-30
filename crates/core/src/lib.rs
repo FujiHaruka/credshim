@@ -1,11 +1,13 @@
 pub mod dummy;
 pub mod inject;
+pub mod policy;
 pub mod rule;
 pub mod rules;
 mod scan;
 pub mod scrub;
 
 pub use inject::{InjectError, Injector, InjectorError, Secrets, TokenResolver, Verdict};
+pub use policy::{Limiter, Limits, Permit, Policy, PolicyError};
 pub use rule::{
     Binding, BindingError, DEFAULT_PORT, InjectSpec, Location, Rule, RuleError, RuleSpec, SecretRef,
 };

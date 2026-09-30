@@ -8,6 +8,8 @@ pub(crate) enum Outcome {
     Injected(Vec<String>),
     Exchanged(String),
     Denied(String),
+    NotAllowed(String),
+    Limited(String),
     Misdirected,
     Failed(String),
 }
@@ -19,6 +21,8 @@ impl Outcome {
             Outcome::Injected(_) => "inject",
             Outcome::Exchanged(_) => "oauth",
             Outcome::Denied(_) => "deny",
+            Outcome::NotAllowed(_) => "not_allowed",
+            Outcome::Limited(_) => "limited",
             Outcome::Misdirected => "misdirected",
             Outcome::Failed(_) => "error",
         }
@@ -27,9 +31,11 @@ impl Outcome {
     fn rules(&self) -> String {
         match self {
             Outcome::Injected(rules) => rules.join(","),
-            Outcome::Exchanged(rule) | Outcome::Denied(rule) | Outcome::Failed(rule) => {
-                rule.clone()
-            }
+            Outcome::Exchanged(rule)
+            | Outcome::Denied(rule)
+            | Outcome::NotAllowed(rule)
+            | Outcome::Limited(rule)
+            | Outcome::Failed(rule) => rule.clone(),
             Outcome::Pass | Outcome::Misdirected => String::new(),
         }
     }

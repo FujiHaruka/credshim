@@ -58,6 +58,9 @@ impl Setup {
             host: API.into(),
             port: None,
             path_prefix: None,
+            allow_methods: None,
+            allow_paths: None,
+            limits: Default::default(),
             secret: "api".into(),
             dummy: DUMMY.into(),
             inject: InjectSpec {

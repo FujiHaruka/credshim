@@ -14,7 +14,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio_rustls::LazyConfigAcceptor;
 
-use credshim_core::{Destination, InjectError, Injector, Verdict};
+use credshim_core::{Destination, InjectError, Injector, Permit, Verdict};
 use credshim_oauth::{Exchange, OAuth};
 
 use crate::audit::{self, Outcome};
@@ -297,9 +297,38 @@ impl Session {
             .oauth
             .as_deref()
             .and_then(|oauth| oauth.exchange(&target.host, target.port, &parts));
+        let mut permit = None;
         let outcome = match inject(target, &self.injector, &mut parts) {
             Ok(Verdict::Pass) => Outcome::Pass,
-            Ok(Verdict::Injected(rules)) => Outcome::Injected(rules),
+            Ok(Verdict::Injected(rules)) => match self.injector.admit(&rules) {
+                Ok(held) => {
+                    permit = Some(held);
+                    Outcome::Injected(rules)
+                }
+                Err(rule) => {
+                    tracing::warn!(
+                        %rule,
+                        host = %target.host,
+                        port = target.port,
+                        "request exceeds a rule's limits"
+                    );
+                    return (
+                        Outcome::Limited(rule),
+                        status(StatusCode::TOO_MANY_REQUESTS),
+                    );
+                }
+            },
+            Ok(Verdict::NotAllowed(rule)) => {
+                tracing::warn!(
+                    %rule,
+                    host = %target.host,
+                    port = target.port,
+                    method = %parts.method,
+                    path = parts.uri.path(),
+                    "method or path is not in the rule's allow list"
+                );
+                return (Outcome::NotAllowed(rule), status(StatusCode::FORBIDDEN));
+            }
             Ok(Verdict::Denied(rule)) => {
                 tracing::warn!(
                     %rule,
@@ -331,7 +360,18 @@ impl Session {
             Some(protocol) => self.upgrade(parts, body, protocol).await,
             None => self.forward(parts, body).await,
         };
-        (outcome, self.scrubbed(&method, response))
+        let response = self.scrubbed(&method, response);
+        let response = match permit {
+            Some(permit) => response.map(|body| {
+                Holding {
+                    body,
+                    _permit: permit,
+                }
+                .boxed()
+            }),
+            None => response,
+        };
+        (outcome, response)
     }
 
     fn scrubbed(&self, method: &Method, response: Response<ProxyBody>) -> Response<ProxyBody> {
@@ -553,6 +593,31 @@ impl Session {
             None => parts.version == Version::HTTP_2 && uri_authority.is_some(),
         };
         uri_ok && host_ok
+    }
+}
+
+struct Holding {
+    body: ProxyBody,
+    _permit: Permit,
+}
+
+impl http_body::Body for Holding {
+    type Data = bytes::Bytes;
+    type Error = hyper::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        std::pin::Pin::new(&mut self.body).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.body.size_hint()
     }
 }
 

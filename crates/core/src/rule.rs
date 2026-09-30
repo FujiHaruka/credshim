@@ -6,6 +6,7 @@ use secrecy::SecretString;
 use serde::Deserialize;
 
 use crate::dummy;
+use crate::policy::{Limits, Policy, PolicyError};
 
 pub const DEFAULT_PORT: u16 = 443;
 pub const MIN_DUMMY_LEN: usize = 24;
@@ -21,6 +22,10 @@ pub struct RuleSpec {
     pub secret: String,
     pub dummy: String,
     pub inject: InjectSpec,
+    pub allow_methods: Option<Vec<String>>,
+    pub allow_paths: Option<Vec<String>>,
+    #[serde(default)]
+    pub limits: Limits,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -59,6 +64,7 @@ pub struct Rule {
     dummy: String,
     secret: SecretRef,
     bindings: Vec<Binding>,
+    policy: Policy,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -105,6 +111,8 @@ pub enum RuleError {
     InvalidQueryParam(String),
     #[error("rule {0:?}: must be bound to at least one destination")]
     Unbound(String),
+    #[error("rule {rule:?}: {source}")]
+    InvalidPolicy { rule: String, source: PolicyError },
 }
 
 impl Binding {
@@ -191,7 +199,13 @@ impl Rule {
             dummy,
             secret,
             bindings,
+            policy: Policy::default(),
         })
+    }
+
+    pub fn with_policy(mut self, policy: Policy) -> Self {
+        self.policy = policy;
+        self
     }
 
     pub fn issued(
@@ -205,6 +219,7 @@ impl Rule {
             dummy,
             secret: SecretRef::Inline(secret),
             bindings,
+            policy: Policy::default(),
         }
     }
 
@@ -217,6 +232,9 @@ impl Rule {
             secret,
             dummy,
             inject,
+            allow_methods,
+            allow_paths,
+            limits,
         } = spec;
         if !is_identifier(&name) {
             return Err(RuleError::InvalidName(name));
@@ -234,7 +252,13 @@ impl Rule {
                     prefix,
                 },
             })?;
-        Self::new(name, dummy, SecretRef::Named(secret), vec![binding])
+        let policy = Policy::new(allow_methods, allow_paths, limits).map_err(|source| {
+            RuleError::InvalidPolicy {
+                rule: name.clone(),
+                source,
+            }
+        })?;
+        Ok(Self::new(name, dummy, SecretRef::Named(secret), vec![binding])?.with_policy(policy))
     }
 
     pub fn name(&self) -> &str {
@@ -258,6 +282,10 @@ impl Rule {
 
     pub fn bindings(&self) -> &[Binding] {
         &self.bindings
+    }
+
+    pub fn policy(&self) -> &Policy {
+        &self.policy
     }
 
     pub fn hosts(&self) -> impl Iterator<Item = &str> {
@@ -355,7 +383,7 @@ fn is_valid_dummy(dummy: &str) -> bool {
     (MIN_DUMMY_LEN..=MAX_DUMMY_LEN).contains(&dummy.len()) && dummy.bytes().all(is_unreserved)
 }
 
-fn is_clean_path_prefix(prefix: &str) -> bool {
+pub(crate) fn is_clean_path_prefix(prefix: &str) -> bool {
     prefix.starts_with('/') && !prefix.contains(['%', '?', '#', '\\']) && !has_dot_segment(prefix)
 }
 
@@ -371,7 +399,7 @@ fn has_encoded_separator(path: &str) -> bool {
         .any(|encoded| lower.contains(encoded))
 }
 
-fn path_is_under(path: &str, prefix: &str) -> bool {
+pub(crate) fn path_is_under(path: &str, prefix: &str) -> bool {
     if path.contains('\\') || has_dot_segment(path) || has_encoded_separator(path) {
         return false;
     }

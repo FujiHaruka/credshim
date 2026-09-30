@@ -218,6 +218,9 @@ fn static_dummies_may_not_use_issued_token_prefixes() {
         host: "x.example.test".to_string(),
         port: None,
         path_prefix: None,
+        allow_methods: None,
+        allow_paths: None,
+        limits: Default::default(),
         secret: "x".to_string(),
         dummy: format!("prefix-{}", dummy::generate(ACCESS_TOKEN_PREFIX)),
         inject: InjectSpec {

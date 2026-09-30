@@ -47,6 +47,9 @@ impl Fixture {
             host: OPENAI.into(),
             port: None,
             path_prefix: None,
+            allow_methods: None,
+            allow_paths: None,
+            limits: Default::default(),
             secret: "openai".into(),
             dummy: DUMMY.into(),
             inject: InjectSpec {
