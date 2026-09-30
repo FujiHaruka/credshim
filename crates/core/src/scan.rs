@@ -20,6 +20,7 @@ const LENIENT_BASE64: GeneralPurpose = GeneralPurpose::new(
 pub(crate) enum Hit {
     Header(HeaderName),
     BasicAuth,
+    EncodedHeader,
     Query(Vec<u8>),
     Uri,
 }
@@ -48,7 +49,7 @@ pub(crate) fn hits(dummy: &str, parts: &Parts) -> Vec<Hit> {
             hits.push(if name == AUTHORIZATION {
                 Hit::BasicAuth
             } else {
-                Hit::Header(name.clone())
+                Hit::EncodedHeader
             });
         }
     }
