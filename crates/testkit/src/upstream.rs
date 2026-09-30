@@ -52,6 +52,7 @@ struct Shared {
 }
 
 pub struct MockUpstreamBuilder {
+    bind: SocketAddr,
     tls: Option<LeafCert>,
     alpn: Alpn,
 }
@@ -154,6 +155,7 @@ pub struct SseTick {
 impl MockUpstream {
     pub fn http() -> MockUpstreamBuilder {
         MockUpstreamBuilder {
+            bind: SocketAddr::from(([127, 0, 0, 1], 0)),
             tls: None,
             alpn: Alpn::Both,
         }
@@ -161,6 +163,7 @@ impl MockUpstream {
 
     pub fn https(leaf: LeafCert) -> MockUpstreamBuilder {
         MockUpstreamBuilder {
+            bind: SocketAddr::from(([127, 0, 0, 1], 0)),
             tls: Some(leaf),
             alpn: Alpn::Both,
         }
@@ -208,8 +211,13 @@ impl MockUpstreamBuilder {
         self
     }
 
+    pub fn bind(mut self, addr: SocketAddr) -> Self {
+        self.bind = addr;
+        self
+    }
+
     pub async fn start(self) -> MockUpstream {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
+        let listener = TcpListener::bind(self.bind).await.expect("bind mock");
         let addr = listener.local_addr().unwrap();
         let shared = Arc::new(Shared::default());
         let router = router(shared.clone());

@@ -60,6 +60,7 @@ impl BaseUrlServer {
                 Ok(conn) => conn,
                 Err(err) => {
                     tracing::warn!(error = %err, "base URL accept failed");
+                    tokio::time::sleep(crate::proxy::ACCEPT_RETRY_DELAY).await;
                     continue;
                 }
             };

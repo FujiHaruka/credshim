@@ -208,12 +208,15 @@ async fn purge_loop(oauth: Arc<OAuth>, every: Duration) {
     }
 }
 
+pub(crate) const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
+
 async fn accept_loop(listener: TcpListener, handler: Arc<Handler>, config: ProxyConfig) {
     loop {
         let (tcp, peer) = match listener.accept().await {
             Ok(conn) => conn,
             Err(err) => {
                 tracing::warn!(error = %err, "accept failed");
+                tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
                 continue;
             }
         };
@@ -400,6 +403,12 @@ impl Handler {
             );
             return status(StatusCode::FORBIDDEN);
         }
+        let mut uri = http::uri::Parts::from(std::mem::take(&mut parts.uri));
+        uri.authority = Some(authority.clone());
+        let Ok(uri) = Uri::from_parts(uri) else {
+            return status(StatusCode::BAD_REQUEST);
+        };
+        parts.uri = uri;
         strip_hop_by_hop(&mut parts.headers);
         match http::HeaderValue::from_str(authority.as_str()) {
             Ok(host) => {
@@ -441,18 +450,20 @@ enum TunnelError {
 fn connect_target(uri: &Uri) -> Option<(String, u16)> {
     let authority = uri.authority()?;
     let port = authority.port_u16()?;
-    let host = authority
-        .host()
-        .trim_start_matches('[')
-        .trim_end_matches(']');
-    Some((host.to_string(), port))
+    Some((bare_host(authority.host()).to_string(), port))
 }
 
 fn forward_authority(uri: &Uri) -> Option<http::uri::Authority> {
     if uri.scheme() != Some(&http::uri::Scheme::HTTP) {
         return None;
     }
-    uri.authority().cloned()
+    let authority = uri.authority()?.as_str();
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, rest)| rest);
+    host_port.parse().ok()
+}
+
+fn bare_host(host: &str) -> &str {
+    host.trim_start_matches('[').trim_end_matches(']')
 }
 
 const HOP_BY_HOP: [HeaderName; 8] = [
@@ -510,7 +521,7 @@ impl tower_service::Service<Uri> for Connector {
         let upstream = self.upstream.clone();
         let timeout = self.timeout;
         Box::pin(async move {
-            let host = uri.host().unwrap_or_default().to_string();
+            let host = bare_host(uri.host().unwrap_or_default()).to_string();
             let port = uri.port_u16().unwrap_or(80);
             let tcp = tokio::time::timeout(timeout, upstream.connect_tcp(&host, port))
                 .await
