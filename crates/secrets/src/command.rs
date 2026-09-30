@@ -41,12 +41,14 @@ impl CommandStore {
             .spawn()
             .map_err(|err| format!("could not start {:?}: {err}", args[0]))?;
         let stdout = child.stdout.take().expect("stdout is piped");
-        let reader = std::thread::spawn(move || {
+        let (sent, output) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
             let mut output = Zeroizing::new(Vec::new());
-            stdout
+            let read = stdout
                 .take(MAX_OUTPUT + 1)
                 .read_to_end(&mut output)
-                .map(|_| output)
+                .map(|_| output);
+            let _ = sent.send(read);
         });
         let deadline = Instant::now() + self.timeout;
         let status = loop {
@@ -61,9 +63,9 @@ impl CommandStore {
                 Err(err) => return Err(err.to_string()),
             }
         };
-        let output = reader
-            .join()
-            .map_err(|_| "output reader panicked".to_string())?
+        let output = output
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| format!("timed out after {:?} waiting for its output to close", self.timeout))?
             .map_err(|err| err.to_string())?;
         if !status.success() {
             return Err(format!("exited with {status}"));
