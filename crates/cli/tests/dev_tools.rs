@@ -204,6 +204,36 @@ async fn env_refuses_config_values_that_could_run_or_redirect_the_shell() {
 }
 
 #[tokio::test]
+async fn config_rejects_two_rules_exporting_the_same_env_variable() {
+    let rule = |name: &str, host: &str| {
+        format!(
+            "[[rule]]\nname = {name:?}\nhost = {host:?}\nsecret = {name:?}\ndummy = \"{OPENAI_DUMMY}\"\nenv = \"OPENAI_API_KEY\"\ninject = {{ header = \"authorization\" }}\n\n"
+        )
+    };
+    let home = Home::new(&format!(
+        "{}{}",
+        rule("openai", "api.openai.com"),
+        rule("azure", "example.openai.azure.com")
+    ))
+    .await;
+
+    for args in [
+        vec!["env", "--config", home.config()],
+        vec!["run", "--listen", "127.0.0.1:0", "--config", home.config()],
+    ] {
+        let output = output(home.path(), &args).await;
+
+        assert!(!output.status.success(), "{args:?}");
+        assert!(
+            text(&output).contains(r#"rules "openai" and "azure" both set env "OPENAI_API_KEY""#),
+            "{}",
+            text(&output)
+        );
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[tokio::test]
 async fn curl_passes_doctor_in_a_shell_that_loaded_env() {
     let home = Home::new("").await;
     let _proxy = spawn_run(home.path(), &["--config", home.config()]).await;
