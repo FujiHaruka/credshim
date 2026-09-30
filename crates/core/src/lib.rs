@@ -7,6 +7,8 @@ pub mod rules;
 mod scan;
 pub mod scrub;
 
+pub const AUDIT_TARGET: &str = "credshim::audit";
+
 pub use base_url::{BaseUrlError, BaseUrls, Resolved};
 pub use inject::{InjectError, Injector, InjectorError, Secrets, TokenResolver, Verdict};
 pub use policy::{Limiter, Limits, Permit, Policy, PolicyError};

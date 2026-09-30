@@ -40,12 +40,64 @@ pub const PRESETS: &[Preset] = &[
     },
 ];
 
-pub fn find(name: &str) -> Option<&'static Preset> {
-    PRESETS.iter().find(|preset| preset.name == name)
+pub struct SshPreset {
+    pub name: &'static str,
+    rule: &'static str,
+    users: &'static [&'static str],
+    host_keys: &'static [&'static str],
+}
+
+pub const SSH_PRESETS: &[SshPreset] = &[SshPreset {
+    name: "github-ssh",
+    rule: "github",
+    users: &["git"],
+    host_keys: &[
+        "SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU",
+        "SHA256:p2QAMXNIC1TJYWeIOttrVc98/R1BUFWu3/LiyKgUfQM",
+        "SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s",
+    ],
+}];
+
+pub fn names() -> impl Iterator<Item = &'static str> {
+    PRESETS
+        .iter()
+        .map(|preset| preset.name)
+        .chain(SSH_PRESETS.iter().map(|preset| preset.name))
+}
+
+pub fn render(name: &str) -> Option<String> {
+    PRESETS
+        .iter()
+        .find(|preset| preset.name == name)
+        .map(Preset::render)
+        .or_else(|| {
+            SSH_PRESETS
+                .iter()
+                .find(|preset| preset.name == name)
+                .map(SshPreset::render)
+        })
+}
+
+impl SshPreset {
+    fn render(&self) -> String {
+        let quoted = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| format!("\"{value}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        format!(
+            "[[ssh_key]]\nname = \"{rule}\"\nsecret = \"ssh-{rule}\"\nusers = [{users}]\nhost_keys = [{host_keys}]\n",
+            rule = self.rule,
+            users = quoted(self.users),
+            host_keys = quoted(self.host_keys),
+        )
+    }
 }
 
 impl Preset {
-    pub fn render(&self) -> String {
+    fn render(&self) -> String {
         let dummy = dummy::generate(self.dummy_prefix);
         format!(
             "[[rule]]\nname = \"{name}\"\nhost = \"{host}\"\nsecret = \"{name}\"\ndummy = \"{dummy}\"\nenv = \"{env}\"\ninject = {inject}\nallow_methods = [\"GET\", \"POST\"]\nallow_paths = {allow_paths}\nbase_url_prefix = \"{base_url_prefix}\"\n",

@@ -15,6 +15,7 @@ credshim-mitm = { path = "crates/mitm" }
 credshim-secrets = { path = "crates/secrets" }
 credshim-oauth = { path = "crates/oauth" }
 credshim-testkit = { path = "crates/testkit" }
+credshim-ssh = { path = "crates/ssh" }
 
 aho-corasick = "1"
 anyhow = "1"

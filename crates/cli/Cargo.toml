@@ -19,6 +19,7 @@ credshim-core.workspace = true
 credshim-mitm.workspace = true
 credshim-oauth.workspace = true
 credshim-secrets.workspace = true
+credshim-ssh.workspace = true
 rpassword = "7"
 rustix.workspace = true
 rustls.workspace = true

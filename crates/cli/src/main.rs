@@ -22,6 +22,7 @@ use credshim_mitm::{
 };
 use credshim_oauth::{DEFAULT_MAX_BODY, OAuth, Provider, Vault};
 use credshim_secrets::SecretStore;
+use credshim_ssh::{Agent, SigningKey, SshRule};
 use secrecy::SecretString;
 use tracing_subscriber::filter::{EnvFilter, Targets};
 use tracing_subscriber::layer::SubscriberExt;
@@ -63,7 +64,7 @@ enum Command {
     },
     Preset {
         #[arg(value_parser = clap::builder::PossibleValuesParser::new(
-            preset::PRESETS.iter().map(|preset| preset.name)
+            preset::names()
         ))]
         name: String,
     },
@@ -98,6 +99,19 @@ enum Command {
     Service {
         #[command(subcommand)]
         command: ServiceCommand,
+    },
+    Ssh {
+        #[command(subcommand)]
+        command: SshCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SshCommand {
+    Keygen {
+        name: String,
+        #[arg(long, value_name = "FILE")]
+        config: Option<PathBuf>,
     },
 }
 
@@ -172,8 +186,8 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Status { config } => status(config.as_deref()).await,
         Command::Preset { name } => {
-            let preset = preset::find(&name).context("unknown preset")?;
-            write!(std::io::stdout(), "{}", preset.render())?;
+            let rendered = preset::render(&name).context("unknown preset")?;
+            write!(std::io::stdout(), "{rendered}")?;
             Ok(())
         }
         Command::Env {
@@ -206,6 +220,12 @@ async fn main() -> anyhow::Result<()> {
         Command::Service {
             command: ServiceCommand::Install { print, upgrade },
         } => service::install(print, upgrade),
+        Command::Ssh {
+            command: SshCommand::Keygen { name, config },
+        } => {
+            init_logging(None)?;
+            ssh_keygen(config.as_deref(), &name)
+        }
     }
 }
 
@@ -364,8 +384,19 @@ async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::
     if !proxy_config.scrub {
         tracing::warn!("response scrubbing is disabled");
     }
-    if !rules.is_empty() || !config.oauth.is_empty() {
-        let store = config.secrets()?.open()?;
+    let intercepts = !rules.is_empty() || !config.oauth.is_empty();
+    let store = if intercepts || !config.ssh_keys.is_empty() {
+        Some(config.secrets()?.open()?)
+    } else {
+        None
+    };
+    let _agent = match &store {
+        Some(store) if !config.ssh_keys.is_empty() => {
+            Some(start_ssh_agent(&config, store.as_ref())?)
+        }
+        _ => None,
+    };
+    if let Some(store) = store.filter(|_| intercepts) {
         let oauth = if config.oauth.is_empty() {
             None
         } else {
@@ -422,6 +453,48 @@ async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::
     Ok(())
 }
 
+fn start_ssh_agent(
+    config: &config::Config,
+    store: &dyn SecretStore,
+) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+    let entries = SshRule::from_specs(&config.ssh_keys)?
+        .into_iter()
+        .map(|rule| {
+            let secret = required_secret(store, rule.secret_name())?;
+            let signer = SigningKey::from_secret(&secret).with_context(|| {
+                format!(
+                    "ssh_key {:?}: secret {:?} cannot be used",
+                    rule.name(),
+                    rule.secret_name()
+                )
+            })?;
+            Ok((rule, signer))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let path = config.ssh_socket()?;
+    Arc::new(Agent::new(entries))
+        .bind(&path)
+        .with_context(|| format!("could not open ssh agent socket {}", path.display()))
+}
+
+fn ssh_keygen(config_path: Option<&Path>, name: &str) -> anyhow::Result<()> {
+    credshim_secrets::check_name(name)?;
+    let store = load_config(config_path)?.config.secrets()?.open()?;
+    if store.get(name)?.is_some() {
+        bail!(
+            "secret {name:?} already exists; choose another name so the key in use is not replaced"
+        );
+    }
+    let (private, public) = SigningKey::generate(&format!("credshim:{name}"))?;
+    store.set(name, private)?;
+    writeln!(std::io::stdout(), "{}", public.to_openssh()?)?;
+    writeln!(
+        std::io::stderr(),
+        "stored {name}; register the public key above with the server, then point an [[ssh_key]] rule at secret {name:?}"
+    )?;
+    Ok(())
+}
+
 fn check_state_paths(config: &config::Config) -> anyhow::Result<()> {
     let ca_key = config.ca_dir()?.join(credshim_mitm::ca::KEY_FILE);
     harden::check_secret(&ca_key, "CA private key")?;
@@ -435,6 +508,9 @@ fn check_state_paths(config: &config::Config) -> anyhow::Result<()> {
     }
     if let Some(path) = &config.audit.path {
         harden::check_private(path, "audit log")?;
+    }
+    if !config.ssh_keys.is_empty() {
+        harden::check_private(&config.ssh_socket()?, "ssh agent socket")?;
     }
     Ok(())
 }

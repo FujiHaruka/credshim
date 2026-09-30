@@ -58,6 +58,22 @@ fn render(line: &str) -> String {
         serde_json::Value::Null => String::new(),
         other => other.to_string(),
     };
+    let time = entry["timestamp"].as_str().unwrap_or("-");
+    if text("ingress") == "ssh_agent" {
+        let reason = text("reason");
+        let reason = if reason.is_empty() {
+            String::new()
+        } else {
+            format!(" ({reason})")
+        };
+        return format!(
+            "{time} {decision:<11} ssh {user}@{host_key} [{rules}]{reason} via ssh_agent",
+            decision = text("decision"),
+            user = text("user"),
+            host_key = text("host_key"),
+            rules = text("rules"),
+        );
+    }
     let rules = text("rules");
     let rules = if rules.is_empty() {
         String::new()
@@ -66,7 +82,6 @@ fn render(line: &str) -> String {
     };
     format!(
         "{time} {decision:<11} {status} {method} {scheme}://{host}:{port}{path}{rules} via {ingress}",
-        time = entry["timestamp"].as_str().unwrap_or("-"),
         decision = text("decision"),
         status = text("status"),
         method = text("method"),

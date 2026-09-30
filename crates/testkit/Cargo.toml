@@ -33,6 +33,7 @@ tower = "0.5"
 async-stream = "0.3"
 base64.workspace = true
 form_urlencoded = "1"
+tempfile.workspace = true
 
 
 [lints]

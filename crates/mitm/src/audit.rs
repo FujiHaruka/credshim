@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use http::{Method, StatusCode};
 
-pub const AUDIT_TARGET: &str = "credshim::audit";
+pub use credshim_core::AUDIT_TARGET;
 
 #[derive(Debug)]
 pub(crate) enum Outcome {

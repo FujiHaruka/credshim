@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "${1:-$(dirname "$0")/..}"
 
-allowed='^crates/(core/src/(inject|scrub)\.rs|secrets/src/|oauth/src/vault\.rs|oauth/src/token_exchange\.rs)'
+allowed='^crates/(core/src/(inject|scrub)\.rs|secrets/src/|oauth/src/vault\.rs|oauth/src/token_exchange\.rs|ssh/src/key\.rs)'
 crate_tests='^crates/[^/]+/tests/'
 
 matches=$(grep -rnE --include='*.rs' '\bexpose_secret(_mut)?\b' crates || [[ $? == 1 ]])

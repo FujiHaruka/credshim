@@ -2,6 +2,7 @@ pub mod ca;
 pub mod logs;
 pub mod oauth;
 pub mod pattern;
+pub mod sshd;
 pub mod upstream;
 
 pub use ca::{LeafCert, LeafOptions, TestCa};

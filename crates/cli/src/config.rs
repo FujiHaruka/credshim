@@ -6,6 +6,7 @@ use anyhow::Context;
 use credshim_core::RuleSpec;
 use credshim_oauth::ProviderSpec;
 use credshim_secrets::BackendConfig;
+use credshim_ssh::{SshKeySpec, SshRule};
 use serde::Deserialize;
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8787";
@@ -32,6 +33,16 @@ pub struct Config {
     pub scrub: ScrubConfig,
     #[serde(default)]
     pub status: StatusConfig,
+    #[serde(default)]
+    pub ssh: SshConfig,
+    #[serde(default, rename = "ssh_key")]
+    pub ssh_keys: Vec<SshKeySpec>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshConfig {
+    pub socket: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -103,6 +114,7 @@ pub fn load(explicit: Option<&Path>) -> anyhow::Result<Loaded> {
         toml::from_str(&text).with_context(|| format!("invalid config {}", path.display()))?;
     config
         .check_env_names()
+        .and_then(|()| Ok(SshRule::from_specs(&config.ssh_keys).map(drop)?))
         .with_context(|| format!("invalid config {}", path.display()))?;
     Ok(Loaded {
         config,
@@ -156,6 +168,13 @@ impl Config {
         match &self.vault.path {
             Some(path) => Ok(path.clone()),
             None => Ok(config_dir()?.join("oauth-vault.age")),
+        }
+    }
+
+    pub fn ssh_socket(&self) -> anyhow::Result<PathBuf> {
+        match &self.ssh.socket {
+            Some(path) => Ok(path.clone()),
+            None => Ok(config_dir()?.join("ssh-agent.sock")),
         }
     }
 
