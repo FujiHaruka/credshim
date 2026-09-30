@@ -458,7 +458,9 @@ fn forward_authority(uri: &Uri) -> Option<http::uri::Authority> {
         return None;
     }
     let authority = uri.authority()?.as_str();
-    let host_port = authority.rsplit_once('@').map_or(authority, |(_, rest)| rest);
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, rest)| rest);
     host_port.parse().ok()
 }
 

@@ -65,7 +65,12 @@ impl CommandStore {
         };
         let output = output
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .map_err(|_| format!("timed out after {:?} waiting for its output to close", self.timeout))?
+            .map_err(|_| {
+                format!(
+                    "timed out after {:?} waiting for its output to close",
+                    self.timeout
+                )
+            })?
             .map_err(|err| err.to_string())?;
         if !status.success() {
             return Err(format!("exited with {status}"));
