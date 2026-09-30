@@ -59,18 +59,22 @@ pub const SSH_PRESETS: &[SshPreset] = &[SshPreset {
 }];
 
 pub const AWS_PRESET: &str = "aws";
+pub const AWS_SSO_PRESET: &str = "aws-sso";
 
 pub fn names() -> impl Iterator<Item = &'static str> {
     PRESETS
         .iter()
         .map(|preset| preset.name)
         .chain(SSH_PRESETS.iter().map(|preset| preset.name))
-        .chain([AWS_PRESET])
+        .chain([AWS_PRESET, AWS_SSO_PRESET])
 }
 
 pub fn render(name: &str) -> Option<String> {
     if name == AWS_PRESET {
         return Some(render_aws());
+    }
+    if name == AWS_SSO_PRESET {
+        return Some(render_aws_sso());
     }
     PRESETS
         .iter()
@@ -87,6 +91,13 @@ pub fn render(name: &str) -> Option<String> {
 fn render_aws() -> String {
     format!(
         "[[aws_key]]\nname = \"aws\"\ndummy_access_key_id = \"{dummy}\"\naccess_key_id = \"aws-access-key-id\"\nsecret_access_key = \"aws-secret-access-key\"\n",
+        dummy = dummy::generate("CREDSHIMAWS"),
+    )
+}
+
+fn render_aws_sso() -> String {
+    format!(
+        "[[aws_sso_session]]\nname = \"sso\"\nstart_url = \"https://your-portal.awsapps.com/start\"\nregion = \"us-east-1\"\n\n[[aws_sso_role]]\nname = \"aws-sso\"\ndummy_access_key_id = \"{dummy}\"\nsession = \"sso\"\naccount_id = \"123456789012\"\nrole_name = \"Developer\"\n",
         dummy = dummy::generate("CREDSHIMAWS"),
     )
 }
