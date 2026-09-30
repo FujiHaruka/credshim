@@ -551,3 +551,84 @@ async fn every_revoked_query_token_is_forgotten() {
     assert_eq!(result.unwrap().status(), StatusCode::OK);
     assert!(oauth.vault().is_empty());
 }
+
+#[tokio::test]
+async fn paths_that_reach_an_endpoint_only_after_normalization_are_refused() {
+    let oauth = oauth();
+    for path in [
+        "//token",
+        "/x/../token",
+        "/%2e%2e/token",
+        "/x;y/../token",
+        "/token/..",
+        "/revoke/../token",
+        "/token/../revoke",
+        "//revoke",
+    ] {
+        let parts = parts(path, "application/x-www-form-urlencoded");
+        let exchange = oauth
+            .exchange("a.example.test", 443, &parts)
+            .unwrap_or_else(|| panic!("{path} was forwarded as ordinary traffic"));
+        let sent: Sent = Arc::default();
+        let record = sent.clone();
+        let result = exchange
+            .run(
+                parts,
+                Full::new(Bytes::from_static(CLIENT_CREDENTIALS.as_bytes())),
+                |req| async move {
+                    *record.lock().unwrap() = Some(req);
+                    Ok::<_, Infallible>(json(StatusCode::OK, "{\"access_token\":\"real\"}"))
+                },
+            )
+            .await;
+        let err = result.expect_err(path);
+        assert!(matches!(err, ExchangeError::DisguisedPath), "{path}: {err}");
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(sent.lock().unwrap().is_none(), "{path}");
+    }
+    for path in ["/x/../tokeninfo", "//other", "/tokens/../other"] {
+        let parts = parts(path, "application/json");
+        assert!(
+            oauth.exchange("a.example.test", 443, &parts).is_none(),
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn refreshes_with_unknown_tokens_are_never_replayed() {
+    let oauth = oauth();
+    for _ in 0..2 {
+        let (result, sent) = run(
+            &oauth,
+            "a.example.test",
+            "/token",
+            "grant_type=refresh_token&refresh_token=not-a-dummy&client_id=client-a",
+            json(StatusCode::OK, "{\"access_token\":\"real-at\"}"),
+        )
+        .await;
+        assert_eq!(result.unwrap().status(), StatusCode::OK);
+        assert!(sent_body(&sent).contains("not-a-dummy"));
+    }
+}
+
+#[tokio::test]
+async fn revoke_query_tokens_of_another_provider_are_refused() {
+    let oauth = oauth();
+    let foreign = oauth
+        .vault()
+        .issue("b", TokenKind::Access, &SecretString::from("real-b"), None);
+
+    let (result, sent) = run(
+        &oauth,
+        "a.example.test",
+        &format!("/revoke?token={foreign}"),
+        "",
+        json(StatusCode::OK, ""),
+    )
+    .await;
+
+    assert!(matches!(result, Err(ExchangeError::ForeignToken)));
+    assert!(sent.lock().unwrap().is_none());
+    assert!(oauth.vault().get(&foreign).is_some());
+}
