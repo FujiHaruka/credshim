@@ -358,7 +358,7 @@ fn is_forbidden_header(header: &HeaderName) -> bool {
     .contains(header)
 }
 
-fn is_identifier(value: &str) -> bool {
+pub fn is_identifier(value: &str) -> bool {
     !value.is_empty()
         && value
             .bytes()
@@ -383,7 +383,7 @@ pub(crate) fn is_unreserved(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~')
 }
 
-fn is_valid_dummy(dummy: &str) -> bool {
+pub fn is_valid_dummy(dummy: &str) -> bool {
     (MIN_DUMMY_LEN..=MAX_DUMMY_LEN).contains(&dummy.len()) && dummy.bytes().all(is_unreserved)
 }
 

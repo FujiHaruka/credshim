@@ -16,4 +16,5 @@ pub use rule::{
     Binding, BindingError, DEFAULT_PORT, InjectSpec, Location, Rule, RuleError, RuleSpec, SecretRef,
 };
 pub use rules::{Decision, Destination, Edit, RuleSet};
+pub use scan::appears_in;
 pub use scrub::{ScrubStream, Scrubber};

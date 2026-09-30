@@ -5,7 +5,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.94.1"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/FujiHaruka/credshim"
 
@@ -16,6 +16,7 @@ credshim-secrets = { path = "crates/secrets" }
 credshim-oauth = { path = "crates/oauth" }
 credshim-testkit = { path = "crates/testkit" }
 credshim-ssh = { path = "crates/ssh" }
+credshim-aws = { path = "crates/aws" }
 
 aho-corasick = "1"
 anyhow = "1"
@@ -51,6 +52,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 axum = { version = "0.8", features = ["http2", "ws"] }
 reqwest = { version = "0.13", features = ["stream", "json"] }
+aws-sigv4 = "1.6"
+aws-credential-types = "1.3"
+sha2 = "0.10"
+hex = "0.4"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
