@@ -125,6 +125,23 @@ impl Injector {
         &self.rules
     }
 
+    pub fn unscrubbable_rules(&self) -> Vec<&str> {
+        self.rules
+            .rules()
+            .iter()
+            .filter(|rule| {
+                let secret = match rule.secret() {
+                    SecretRef::Named(name) => self.secrets.get(name),
+                    SecretRef::Inline(secret) => Some(secret),
+                };
+                secret.is_some_and(|secret| {
+                    secret.expose_secret().len() < crate::scrub::MIN_SCRUB_LEN
+                })
+            })
+            .map(Rule::name)
+            .collect()
+    }
+
     pub fn admit(&self, applied: &[String]) -> Result<Permit, String> {
         let limits = applied.iter().filter_map(|name| {
             let rule = self.rules.rules().iter().find(|rule| rule.name() == name)?;

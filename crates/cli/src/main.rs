@@ -202,6 +202,13 @@ async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::
         let rules = RuleSet::from_rules(rules)?;
         let secrets = load_secrets(store.as_ref(), &rules)?;
         let mut injector = Injector::new(rules, secrets)?;
+        for rule in injector.unscrubbable_rules() {
+            tracing::warn!(
+                %rule,
+                "secret is shorter than {} bytes, so responses echoing it cannot be scrubbed",
+                credshim_core::scrub::MIN_SCRUB_LEN
+            );
+        }
         if let Some(oauth) = &oauth {
             injector = injector.with_tokens(oauth.clone());
         }
@@ -244,14 +251,14 @@ async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::
 
 fn check_state_paths(config: &config::Config) -> anyhow::Result<()> {
     let ca_key = config.ca_dir()?.join(credshim_mitm::ca::KEY_FILE);
-    harden::check_private(&ca_key, "CA private key")?;
+    harden::check_secret(&ca_key, "CA private key")?;
     if let credshim_secrets::BackendConfig::AgeFile { path, identity } = &config.secrets()? {
-        harden::check_private(path, "secret store")?;
+        harden::check_secret(path, "secret store")?;
         let store = credshim_secrets::AgeFileStore::new(path.clone(), identity.clone());
-        harden::check_private(store.identity_path(), "secret store key")?;
+        harden::check_secret(store.identity_path(), "secret store key")?;
     }
     if !config.oauth.is_empty() {
-        harden::check_private(&config.vault_path()?, "OAuth token vault")?;
+        harden::check_secret(&config.vault_path()?, "OAuth token vault")?;
     }
     if let Some(path) = &config.audit.path {
         harden::check_private(path, "audit log")?;

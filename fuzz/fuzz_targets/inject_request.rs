@@ -73,6 +73,15 @@ fuzz_target!(|data: &[u8]| {
         }
     }
     let before = format!("{:?}{:?}", builder.uri, builder.headers);
+    let carries_real = |parts: &http::request::Parts| {
+        parts.headers.values().any(|value| {
+            value
+                .as_bytes()
+                .windows(REAL.len())
+                .any(|w| w == REAL.as_bytes())
+        }) || parts.uri.to_string().contains(REAL)
+    };
+    let real_before = carries_real(&builder);
     for host in ["api.example.test", "evil.example.test"] {
         let mut parts = builder.clone();
         let verdict = INJECTOR
@@ -83,7 +92,11 @@ fuzz_target!(|data: &[u8]| {
             assert_eq!(before, after, "only an injection may change the request");
         }
         if host == "evil.example.test" {
-            assert!(!after.contains(REAL) || before.contains(REAL));
+            assert!(
+                !matches!(verdict, Verdict::Injected(_)),
+                "injected into an unbound host"
+            );
+            assert!(!carries_real(&parts) || real_before);
         }
     }
 });

@@ -326,6 +326,7 @@ struct ReflectParams {
     interval_ms: Option<u64>,
     header: Option<String>,
     encoding: Option<String>,
+    reason: Option<String>,
 }
 
 async fn reflect(Query(params): Query<ReflectParams>, body: Bytes) -> Response {
@@ -348,6 +349,11 @@ async fn reflect(Query(params): Query<ReflectParams>, body: Bytes) -> Response {
     }
     if let Some(encoding) = params.encoding {
         response = response.header("content-encoding", encoding);
+    }
+    if let Some(reason) = params.reason {
+        response = response
+            .status(StatusCode::BAD_REQUEST)
+            .extension(hyper::ext::ReasonPhrase::try_from(reason.into_bytes()).unwrap());
     }
     response.body(Body::from_stream(stream)).unwrap()
 }

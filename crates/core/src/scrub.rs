@@ -2,12 +2,21 @@ use std::fmt;
 use std::sync::Arc;
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD_NO_PAD;
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_encode};
 use secrecy::{ExposeSecret, SecretString};
 use zeroize::Zeroizing;
 
 pub const MIN_SCRUB_LEN: usize = 8;
+
+const QUERY_VALUE: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
 
 #[derive(Default)]
 pub struct Scrubber {
@@ -30,11 +39,20 @@ impl Scrubber {
         let mut replacements = Vec::new();
         for (secret, dummy) in pairs {
             let bytes = secret.expose_secret().as_bytes();
-            if bytes.len() < MIN_SCRUB_LEN || patterns.iter().any(|seen| seen.as_slice() == bytes) {
+            if bytes.len() < MIN_SCRUB_LEN {
                 continue;
             }
-            patterns.push(Zeroizing::new(bytes.to_vec()));
-            replacements.push(Bytes::copy_from_slice(dummy.as_bytes()));
+            for (pattern, replacement) in encodings(bytes, dummy.as_bytes()) {
+                if pattern.len() < MIN_SCRUB_LEN
+                    || patterns
+                        .iter()
+                        .any(|seen| seen.as_slice() == pattern.as_slice())
+                {
+                    continue;
+                }
+                patterns.push(pattern);
+                replacements.push(replacement);
+            }
         }
         let automaton = (!patterns.is_empty()).then(|| {
             AhoCorasickBuilder::new()
@@ -103,6 +121,55 @@ impl Scrubber {
             .max()
             .unwrap_or(0)
     }
+}
+
+fn encodings(secret: &[u8], dummy: &[u8]) -> Vec<(Zeroizing<Vec<u8>>, Bytes)> {
+    let mut out = vec![(
+        Zeroizing::new(secret.to_vec()),
+        Bytes::copy_from_slice(dummy),
+    )];
+    let upper = Zeroizing::new(percent_encode(secret, QUERY_VALUE).to_string());
+    let lower = Zeroizing::new(lowercase_escapes(&upper));
+    for encoded in [&upper, &lower] {
+        out.push((
+            Zeroizing::new(encoded.as_bytes().to_vec()),
+            Bytes::copy_from_slice(dummy),
+        ));
+    }
+    for offset in 0..3 {
+        out.push((
+            base64_at(secret, offset),
+            Bytes::from(base64_at(dummy, offset).to_vec()),
+        ));
+    }
+    out
+}
+
+fn lowercase_escapes(encoded: &str) -> String {
+    let mut out = String::with_capacity(encoded.len());
+    let mut escape = 0;
+    for c in encoded.chars() {
+        if c == '%' {
+            escape = 2;
+            out.push(c);
+        } else if escape > 0 {
+            escape -= 1;
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn base64_at(bytes: &[u8], offset: usize) -> Zeroizing<Vec<u8>> {
+    let mut shifted = Zeroizing::new(vec![0u8; offset]);
+    shifted.extend_from_slice(bytes);
+    let encoded = Zeroizing::new(STANDARD_NO_PAD.encode(&*shifted).into_bytes());
+    let skip = (offset * 8).div_ceil(6);
+    let bits = shifted.len() * 8;
+    let keep = bits / 6;
+    Zeroizing::new(encoded[skip.min(keep)..keep].to_vec())
 }
 
 pub struct ScrubStream {

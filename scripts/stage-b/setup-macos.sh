@@ -18,7 +18,7 @@ trap 'rm -rf "$tmp"' EXIT
 user=_credshim
 state=/var/lib/credshim
 public=/etc/credshim
-bin=/usr/local/bin/credshim
+bin=/opt/credshim/bin/credshim
 label=dev.credshim.proxy
 plist=/Library/LaunchDaemons/$label.plist
 
@@ -39,8 +39,11 @@ if ! dscl . -read "/Users/$user" >/dev/null 2>&1; then
   dscl . -create "/Users/$user" Password '*'
 fi
 
+for dir in /var/lib /opt; do
+  [[ -d $dir ]] || install -d -m 0755 -o root -g wheel "$dir"
+done
 install -d -m 0700 -o "$user" -g "$user" "$state"
-install -d -m 0755 -o root -g wheel "$public" /usr/local/bin
+install -d -m 0755 -o root -g wheel "$public" /opt/credshim /opt/credshim/bin
 install -m 0755 -o root -g wheel "$binary" "$bin"
 
 if [[ ! -e $state/config.toml ]]; then

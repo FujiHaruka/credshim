@@ -33,7 +33,7 @@ fuzz_target!(|data: &[u8]| {
     let mut rest = input;
     let mut seed = split_seed as usize;
     while !rest.is_empty() {
-        let size = (seed % 7 + 1).min(rest.len());
+        let size = (seed % 40 + 1).min(rest.len());
         seed = seed.wrapping_mul(31).wrapping_add(7);
         streamed.extend_from_slice(&stream.push(Bytes::copy_from_slice(&rest[..size])));
         rest = &rest[size..];

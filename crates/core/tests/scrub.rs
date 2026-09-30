@@ -130,3 +130,39 @@ fn debug_output_never_contains_secret_values() {
     let rendered = format!("{s:?} {stream:?}");
     assert!(!rendered.contains("sk-real"), "{rendered}");
 }
+
+#[test]
+fn encoded_forms_the_proxy_sends_are_scrubbed_too() {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+
+    let secret = "REAL/SECRET+VALUE=0123";
+    let s = scrubber(&[(secret, "DUMMY-VALUE-0123456789")]);
+    for user in ["", "u", "us", "client-id"] {
+        let basic = format!(
+            "Authorization: Basic {}",
+            STANDARD.encode(format!("{user}:{secret}"))
+        );
+        let scrubbed =
+            String::from_utf8(s.scrub(basic.as_bytes()).expect("basic scrubbed")).unwrap();
+        let credential = scrubbed.strip_prefix("Authorization: Basic ").unwrap();
+        let lenient = base64::engine::GeneralPurpose::new(
+            &base64::alphabet::STANDARD,
+            base64::engine::GeneralPurposeConfig::new()
+                .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent)
+                .with_decode_allow_trailing_bits(true),
+        );
+        if let Ok(decoded) = lenient.decode(credential) {
+            let decoded = String::from_utf8_lossy(&decoded);
+            assert!(!decoded.contains(secret), "{user}: {decoded}");
+        }
+        assert!(!basic.is_empty() && scrubbed != basic);
+    }
+    for query in [
+        "/x?key=REAL%2FSECRET%2BVALUE%3D0123",
+        "/x?key=REAL%2fSECRET%2bVALUE%3d0123",
+    ] {
+        let scrubbed = s.scrub(query.as_bytes()).expect("query scrubbed");
+        assert_eq!(scrubbed, b"/x?key=DUMMY-VALUE-0123456789");
+    }
+}

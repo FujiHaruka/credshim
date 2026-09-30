@@ -44,7 +44,7 @@ impl Preset {
     pub fn render(&self) -> String {
         let dummy = dummy::generate(self.dummy_prefix);
         format!(
-            "# app side: {env}={dummy}\n[[rule]]\nname = \"{name}\"\nhost = \"{host}\"\nsecret = \"{name}\"\ndummy = \"{dummy}\"\ninject = {inject}\nallow_paths = {allow_paths}\n",
+            "# app side: {env}={dummy}\n[[rule]]\nname = \"{name}\"\nhost = \"{host}\"\nsecret = \"{name}\"\ndummy = \"{dummy}\"\ninject = {inject}\nallow_methods = [\"GET\", \"POST\"]\nallow_paths = {allow_paths}\n",
             env = self.env,
             name = self.name,
             host = self.host,

@@ -388,8 +388,10 @@ pub(crate) fn is_clean_path_prefix(prefix: &str) -> bool {
 }
 
 fn has_dot_segment(path: &str) -> bool {
-    path.split('/')
-        .any(|segment| segment == "." || segment == "..")
+    path.split('/').any(|segment| {
+        let name = segment.split(';').next().unwrap_or(segment);
+        name == "." || name == ".."
+    })
 }
 
 fn has_encoded_separator(path: &str) -> bool {

@@ -64,6 +64,8 @@ allow_paths = ["/v1/chat/completions", "/v1/embeddings"]"#,
         "/v1/organization/api_keys",
         "/v1/chat/completionsX",
         "/v1/chat/completions/../../organization",
+        "/v1/chat/completions/..;/..;/organization",
+        "/v1/chat/completions/.;/x",
         "/v1/chat/completions/%2e%2e/x",
         "/v1/chat%2fcompletions",
     ] {

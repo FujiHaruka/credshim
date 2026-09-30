@@ -81,6 +81,21 @@ async fn run_refuses_secret_store_and_ca_key_others_could_write() {
 }
 
 #[tokio::test]
+async fn run_refuses_secret_files_others_could_read() {
+    for target in ["secrets.age", "secrets.key", "ca/ca-key.pem"] {
+        let (home, config) = ready_home().await;
+        chmod(&home.path().join(target), 0o644);
+
+        let stderr = run_refused(home.path(), &config).await;
+
+        assert!(
+            stderr.contains("readable by group or others"),
+            "{target}: {stderr}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn run_refuses_to_listen_on_every_interface() {
     let (home, config) = ready_home().await;
 

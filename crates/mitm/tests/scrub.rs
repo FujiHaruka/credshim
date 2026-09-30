@@ -193,3 +193,26 @@ async fn scrubbing_can_be_turned_off() {
 
     assert_eq!(text, format!("echo {}", setup.secret));
 }
+
+#[tokio::test]
+async fn upstream_reason_phrase_never_reaches_the_client() {
+    for scrub in [true, false] {
+        let setup = Setup::new(Downstream::Http1, Alpn::H1Only, scrub).await;
+        let (tcp, head) = common::connect(setup.proxy.local_addr(), &format!("{API}:443")).await;
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(setup.dev_ca.cert_der().clone()).unwrap();
+        let mut tls = common::tls_over(tcp, roots, API, true).await.unwrap();
+        let response = common::exchange(
+            &mut tls,
+            &format!(
+                "POST /reflect?reason={} HTTP/1.1\r\nHost: {API}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                setup.secret
+            ),
+        )
+        .await;
+        let status_line = response.lines().next().unwrap();
+        assert!(status_line.starts_with("HTTP/1.1 400"), "{status_line}");
+        assert!(!response.contains(&setup.secret), "{status_line}");
+    }
+}

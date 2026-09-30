@@ -377,7 +377,10 @@ impl Session {
         (outcome, response)
     }
 
-    fn scrubbed(&self, method: &Method, response: Response<ProxyBody>) -> Response<ProxyBody> {
+    fn scrubbed(&self, method: &Method, mut response: Response<ProxyBody>) -> Response<ProxyBody> {
+        response
+            .extensions_mut()
+            .remove::<hyper::ext::ReasonPhrase>();
         if !self.scrub {
             return response;
         }
@@ -411,6 +414,7 @@ impl Session {
         mut parts: http::response::Parts,
         body: bytes::Bytes,
     ) -> Response<ProxyBody> {
+        parts.extensions.remove::<hyper::ext::ReasonPhrase>();
         if !self.scrub {
             return Response::from_parts(parts, full(body));
         }

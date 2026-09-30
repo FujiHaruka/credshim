@@ -18,7 +18,7 @@ trap 'rm -rf "$tmp"' EXIT
 user=credshim
 state=/var/lib/credshim
 public=/etc/credshim
-bin=/usr/local/bin/credshim
+bin=/opt/credshim/bin/credshim
 
 if ! id -u "$user" >/dev/null 2>&1; then
   useradd --system --home-dir "$state" --no-create-home --shell /usr/sbin/nologin "$user"
@@ -26,6 +26,8 @@ fi
 
 install -d -m 0700 -o "$user" -g "$user" "$state"
 install -d -m 0755 -o root -g root "$public"
+[[ -d /opt ]] || install -d -m 0755 -o root -g root /opt
+install -d -m 0755 -o root -g root /opt/credshim /opt/credshim/bin
 install -m 0755 -o root -g root "$binary" "$bin"
 
 if [[ ! -e $state/config.toml ]]; then

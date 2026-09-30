@@ -20,8 +20,16 @@ pub fn disable_core_dumps() -> anyhow::Result<()> {
 }
 
 pub fn check_private(path: &Path, what: &str) -> anyhow::Result<()> {
+    check(path, what, 0o022)
+}
+
+pub fn check_secret(path: &Path, what: &str) -> anyhow::Result<()> {
+    check(path, what, 0o066)
+}
+
+fn check(path: &Path, what: &str, forbidden: u32) -> anyhow::Result<()> {
     match std::fs::metadata(path) {
-        Ok(metadata) => check_owner_only_writable(path, &metadata, what)?,
+        Ok(metadata) => check_mode(path, &metadata, what, forbidden)?,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
         Err(err) => {
             return Err(err).with_context(|| format!("could not inspect {}", path.display()));
@@ -33,19 +41,21 @@ pub fn check_private(path: &Path, what: &str) -> anyhow::Result<()> {
     {
         let parent_metadata = std::fs::metadata(parent)
             .with_context(|| format!("could not inspect {}", parent.display()))?;
-        check_owner_only_writable(
+        check_mode(
             parent,
             &parent_metadata,
             &format!("the directory holding the {what}"),
+            0o022,
         )?;
     }
     Ok(())
 }
 
-fn check_owner_only_writable(
+fn check_mode(
     path: &Path,
     metadata: &std::fs::Metadata,
     what: &str,
+    forbidden: u32,
 ) -> anyhow::Result<()> {
     let me = geteuid().as_raw();
     if metadata.uid() != me && metadata.uid() != 0 {
@@ -55,9 +65,16 @@ fn check_owner_only_writable(
             metadata.uid()
         );
     }
-    if metadata.mode() & 0o022 != 0 {
+    if metadata.mode() & forbidden & 0o022 != 0 {
         bail!(
             "refusing to use {what} {}: it is writable by group or others (mode {:o}); run `chmod go-w` on it",
+            path.display(),
+            metadata.mode() & 0o7777
+        );
+    }
+    if metadata.mode() & forbidden & 0o044 != 0 {
+        bail!(
+            "refusing to use {what} {}: it is readable by group or others (mode {:o}); run `chmod go-rwx` on it",
             path.display(),
             metadata.mode() & 0o7777
         );
