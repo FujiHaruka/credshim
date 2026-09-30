@@ -379,9 +379,9 @@ MITMプロキシで一番つまずくのは「そのランタイムがプロキ�
 
 **完了条件**
 
-- [ ] `credshim env` を読み込んだ新しいシェルで、Python、Node、Go、curl のサンプルが doctor を通る。
-- [ ] base URLモードで openai SDK のE2Eが通る。
-- [ ] README に、インストールから最初のストリーミング応答までの手順がある。
+- [x] `credshim env` を読み込んだ新しいシェルで、Python、Node、Go、curl のサンプルが doctor を通る。
+- [x] base URLモードで openai SDK のE2Eが通る。
+- [x] README に、インストールから最初のストリーミング応答までの手順がある。
 
 **実装メモ（Phase 7）**
 
