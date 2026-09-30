@@ -60,6 +60,9 @@ jobs:
         run: sudo -u devtest /tmp/verify.sh
       - name: verify flags a development user who can sudo
         run: "! /tmp/verify.sh"
+      - name: diagnostics
+        if: failure()
+        run: ls -ld / /opt /opt/credshim /opt/credshim/bin /opt/credshim/bin/credshim
       - name: service logs
         if: failure()
         run: sudo journalctl -u credshim --no-pager
@@ -77,5 +80,5 @@ jobs:
           tool: cargo-fuzz
       - run: |
           for target in inject_request token_response scrub_stream; do
-            cargo fuzz run "$target" -- -max_total_time=60
+            cargo +nightly fuzz run "$target" --target x86_64-unknown-linux-gnu -- -max_total_time=60
           done

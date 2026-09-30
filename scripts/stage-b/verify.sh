@@ -35,15 +35,24 @@ esac
 cannot_read() { [[ ! -r $1 ]] && ! cat "$1" >/dev/null 2>&1; }
 cannot_write() { [[ ! -w $1 ]] && ! { : >>"$1"; } 2>/dev/null; }
 cannot_list() { ! ls "$1" >/dev/null 2>&1; }
-cannot_create_in() { ! touch "$1/.credshim-verify" 2>/dev/null; }
+cannot_create_in() {
+  if touch "$1/.credshim-verify" 2>/dev/null; then
+    rm -f "$1/.credshim-verify"
+    return 1
+  fi
+}
 no_sudo() { ! sudo -n true 2>/dev/null; }
 not_admin() { ! id -Gn | tr ' ' '\n' | grep -qxE 'sudo|wheel|admin'; }
 immutable_path() {
   local path=$1
-  if [[ -d $path ]]; then cannot_create_in "$path" || return 1; else cannot_write "$path" || return 1; fi
+  if [[ -d $path ]]; then
+    cannot_create_in "$path" || { echo "      writable: $path"; return 1; }
+  else
+    cannot_write "$path" || { echo "      writable: $path"; return 1; }
+  fi
   while [[ $path != / ]]; do
     path=$(dirname "$path")
-    cannot_create_in "$path" || return 1
+    cannot_create_in "$path" || { echo "      writable: $path"; return 1; }
   done
 }
 
