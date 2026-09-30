@@ -10,6 +10,7 @@ use ssh_agent_lib::proto::{Identity, PublicCredential, Request, Response, SignRe
 use ssh_agent_lib::ssh_encoding::{Decode, Encode};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
 use crate::key::SigningKey;
@@ -17,6 +18,8 @@ use crate::policy::{AgentKey, Connection, Decision};
 use crate::rule::SshRule;
 
 pub const MAX_MESSAGE_LEN: usize = 256 * 1024;
+pub const MAX_CONNECTIONS: usize = 64;
+pub const FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 #[derive(Debug)]
@@ -46,12 +49,21 @@ impl Agent {
     }
 
     pub async fn serve(self: Arc<Self>, listener: UnixListener) {
+        let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
                 continue;
             };
-            tokio::spawn(self.clone().handle(stream));
+            let Ok(slot) = slots.clone().try_acquire_owned() else {
+                tracing::warn!("ssh agent connection refused: {MAX_CONNECTIONS} already open");
+                continue;
+            };
+            let agent = self.clone();
+            tokio::spawn(async move {
+                agent.handle(stream).await;
+                drop(slot);
+            });
         }
     }
 
@@ -65,8 +77,13 @@ impl Agent {
             if len == 0 || len > MAX_MESSAGE_LEN {
                 return;
             }
-            let mut body = vec![0; len];
-            if stream.read_exact(&mut body).await.is_err() {
+            let mut body = Vec::new();
+            let read = tokio::time::timeout(
+                FRAME_TIMEOUT,
+                (&mut stream).take(len as u64).read_to_end(&mut body),
+            )
+            .await;
+            if !matches!(read, Ok(Ok(n)) if n == len) {
                 return;
             }
             let response = self.respond(&mut connection, &body);

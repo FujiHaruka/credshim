@@ -188,3 +188,33 @@ fn debug_output_never_contains_secret_values() {
         assert!(!rendered.contains(line), "{rendered}");
     }
 }
+
+#[tokio::test]
+async fn connections_beyond_the_cap_are_closed_and_slots_are_reused() {
+    let setup = Setup::new();
+    let mut held = Vec::new();
+    for _ in 0..credshim_ssh::MAX_CONNECTIONS {
+        let mut client = setup.client().await;
+        assert!(matches!(
+            client.send(Request::RequestIdentities).await,
+            Response::IdentitiesAnswer(_)
+        ));
+        held.push(client);
+    }
+    let mut refused = setup.client().await;
+    assert_eq!(
+        refused.raw(&encode(&Request::RequestIdentities)).await,
+        None
+    );
+    held.pop();
+    let mut reply = None;
+    for _ in 0..50 {
+        let mut client = setup.client().await;
+        reply = client.raw(&encode(&Request::RequestIdentities)).await;
+        if reply.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(matches!(reply, Some(Response::IdentitiesAnswer(_))));
+}

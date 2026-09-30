@@ -164,6 +164,15 @@ fn users_outside_the_allow_list_are_refused() {
     let decision = case.decide(&connection, data);
     assert_eq!(decision.refusal, Some(Refusal::UserNotAllowed));
     assert_eq!(decision.user.as_deref(), Some("root"));
+
+    let forged = "git\n2026 sign ssh git@SHA256:x [github] via ssh_agent";
+    let data = Auth::hostbound(&case.session_id, forged, &case.user, &case.host).to_bytes();
+    let decision = case.decide(&connection, data);
+    assert_eq!(decision.refusal, Some(Refusal::UserNotAllowed));
+    assert_eq!(
+        decision.user.as_deref(),
+        Some(credshim_ssh::UNPRINTABLE_USER)
+    );
 }
 
 #[test]

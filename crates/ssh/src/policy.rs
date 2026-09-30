@@ -4,9 +4,10 @@ use ssh_agent_lib::ssh_encoding::{Decode, Encode};
 use ssh_key::public::KeyData;
 use ssh_key::{Fingerprint, HashAlg};
 
-use crate::rule::SshRule;
+use crate::rule::{SshRule, is_plain_name};
 
 pub const MAX_SESSION_ID_LEN: usize = 128;
+pub const UNPRINTABLE_USER: &str = "<invalid>";
 const SSH_MSG_USERAUTH_REQUEST: u8 = 50;
 const SERVICE: &str = "ssh-connection";
 const PUBLICKEY: &str = "publickey";
@@ -156,7 +157,11 @@ impl Connection {
         let Some(auth) = UserAuth::parse(&request.data) else {
             return refuse(decision, Refusal::NotUserAuth);
         };
-        decision.user = Some(auth.user.clone());
+        decision.user = Some(if is_plain_name(&auth.user) {
+            auth.user.clone()
+        } else {
+            UNPRINTABLE_USER.to_string()
+        });
         if &auth.session_id != session_id {
             return refuse(decision, Refusal::SessionMismatch);
         }

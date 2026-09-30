@@ -139,7 +139,7 @@ fn parse_fingerprint(value: &str) -> Option<Fingerprint> {
         .filter(|fingerprint| fingerprint.algorithm() == HashAlg::Sha256)
 }
 
-fn is_plain_name(name: &str) -> bool {
+pub(crate) fn is_plain_name(name: &str) -> bool {
     !name.is_empty()
         && name
             .bytes()

@@ -54,9 +54,9 @@ fn render(line: &str) -> String {
     };
     let fields = &entry["fields"];
     let text = |name: &str| match &fields[name] {
-        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::String(value) => printable(value),
         serde_json::Value::Null => String::new(),
-        other => other.to_string(),
+        other => printable(&other.to_string()),
     };
     let time = entry["timestamp"].as_str().unwrap_or("-");
     if text("ingress") == "ssh_agent" {
@@ -91,4 +91,44 @@ fn render(line: &str) -> String {
         path = text("path"),
         ingress = text("ingress"),
     )
+}
+
+fn printable(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|c| {
+            if c.is_control() {
+                c.escape_default().collect::<Vec<_>>()
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_characters_in_fields_cannot_forge_lines_or_drive_the_terminal() {
+        let line = serde_json::json!({
+            "timestamp": "t",
+            "fields": {
+                "ingress": "ssh_agent",
+                "decision": "deny",
+                "user": "x\n2026 sign ssh git@SHA256:x [github] via ssh_agent\u{1b}[2K",
+                "host_key": "SHA256:y",
+                "rules": "github",
+                "reason": "user_not_allowed",
+            }
+        })
+        .to_string();
+        let rendered = render(&line);
+        assert!(
+            !rendered.contains('\n') && !rendered.contains('\u{1b}'),
+            "{rendered}"
+        );
+        assert!(rendered.contains(r"x\n2026"), "{rendered}");
+    }
 }
