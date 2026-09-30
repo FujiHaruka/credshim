@@ -14,8 +14,6 @@ const RUNTIME_TIMEOUT: Duration = Duration::from_secs(120);
 const GO_PROBE: &str = r#"package main
 
 import (
-	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,18 +21,7 @@ import (
 )
 
 func main() {
-	pool, err := x509.SystemCertPool()
-	if err != nil {
-		pool = x509.NewCertPool()
-	}
-	if path := os.Getenv("SSL_CERT_FILE"); path != "" {
-		if pem, err := os.ReadFile(path); err == nil {
-			pool.AppendCertsFromPEM(pem)
-		}
-	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.TLSClientConfig = &tls.Config{RootCAs: pool}
-	res, err := (&http.Client{Transport: transport}).Get("https://credshim.test/")
+	res, err := http.Get("https://credshim.test/")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
