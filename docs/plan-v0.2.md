@@ -1,0 +1,219 @@
+# CredShim v0.2：SSH 鍵と AWS 認証情報の保護
+
+Sep 30, 2026 · @Haruka Fuji
+
+## 目的とスコープ
+
+`~/.ssh` の秘密鍵や `~/.aws` の認証情報（`credentials` のアクセスキー、`sso/cache` の SSO トークン、`cli/cache` のロール認証情報）は、コーディングエージェントが読んで外へ送れてしまう。v0.2 ではこれらの本物をプロキシの中だけに置き、エージェントとアプリは値を一度も見ずに `ssh`、`git` over SSH、`aws` コマンドを使える状態を作る。AWS は静的なアクセスキーと IAM Identity Center（SSO）の両方を対象にする。
+
+v0.1 と同じく、**守るもの**は認証情報の「値」、**守らないもの**は「利用」。エージェントは束縛先に対しては本物の権限を使える。これは許可リスト、上限、監査ログで緩和する。
+
+## 前提
+
+SSH も AWS も、秘密そのものを送らず署名で認証する。v0.1 の「ダミーを送らせて本物に差し替える」方式はそのままでは使えず、プロキシが署名を肩代わりする必要がある。
+
+- SSH は公開鍵署名によるチャレンジ応答。署名だけを代行する ssh-agent の仕組みがそのまま使える。
+- AWS は SigV4 で、リクエスト全体（メソッド、パス、クエリ、署名対象ヘッダー、ボディのハッシュ）に HMAC で署名する。クライアントがダミーで付けた署名を、プロキシが本物で付け直す。
+
+## アプローチ
+
+### SSH：CredShim を ssh-agent にする
+
+CredShim が ssh-agent プロトコルを話す Unix ソケットを出し、開発者側は `SSH_AUTH_SOCK` をそこに向ける。鍵は既存の秘密ストアに置き、プロキシの外へは公開鍵しか出さない。
+
+署名は、宛先を確かめられたときだけ行う。OpenSSH 8.9 以降のクライアントは、SSH 接続ごとに agent への接続を1本開き、最初に `session-bind@openssh.com` でサーバーのホスト鍵と、そのホスト鍵によるセッション ID への署名を渡し、同じ agent 接続で署名を求める。プロキシはこれを検証し、次の条件をすべて満たす要求にだけ署名する。
+
+- 同じ agent 接続に、検証済みの bind がある。クライアントは bind が拒否されても署名要求を続けるので、束縛を強制できるのは agent 側だけ。
+- ホスト鍵が、その鍵の束縛先として設定された指紋に含まれる（ホスト名や DNS は信用しない。v0.1 の原則3「照合はクライアントが操れる値でなく接続先で」と同じ）。
+- 署名対象が、その接続で最後に bind したセッション ID と許可されたユーザー名を含むユーザー認証要求の形をしている。method は `publickey-hostbound-v00@openssh.com`（ユーザー公開鍵の後ろにサーバーのホスト鍵が付き、bind のホスト鍵と一致しなければならない）か、hostbound に対応しないサーバー向けの `publickey`。セッション ID の長さは鍵交換の方式で変わる（32 または 64 バイト）。
+- フォワードされた接続（`ssh -A` の先）からの要求ではない。フォワード経由の agent 接続には、手元の `ssh` が `is_forwarding=1` の bind を先に送るので、その接続に一度でも `is_forwarding=1` があれば拒否する。
+
+session-bind の無い要求、任意データへの署名要求は拒否する（fail closed）。素の ssh-agent は制約なしの鍵なら bind の無い接続でも任意のデータに署名する。`ssh-add -h` で宛先を制約した鍵は bind の無い接続での署名を拒否するので、宛先の制約そのものは素の ssh-agent でも得られる。CredShim の存在理由はそれ以外の点にある：鍵がプロキシの中で生成され、ディスクに一度も現れない、段階Bで agent と鍵を別ユーザーに置ける、許可するユーザー名を絞れる、監査ログとレート制限、設定ファイルで束縛を管理できる。
+
+鍵はプロキシの中で生成するのを基本にし、公開鍵だけを出す。既存の `~/.ssh` の鍵はすでに読まれた前提で扱い、取り込みではなく入れ替えを案内する。
+
+### AWS：ダミーのアクセスキーで署名させ、プロキシが再署名する
+
+`aws` コマンドは v0.1 と同じく `HTTPS_PROXY` と CA バンドル（`AWS_CA_BUNDLE`）でプロキシを通す。`AWS_CA_BUNDLE` は信頼ストアを追加ではなく置き換えるので、v0.1 の `SSL_CERT_FILE` と同じ結合バンドル（開発CA＋システムのルート）を指す。開発CAだけにすると、MITM せずトンネルするホストで TLS 検証が落ちる。`~/.aws` に置くのは、静的キーの場合も SSO の場合も**ダミーの静的アクセスキー**だけにする。
+
+- プロキシは AWS のエンドポイントを MITM し、Authorization ヘッダーのアクセスキー ID でルールを引く。クライアントの署名は捨て、本物の認証情報で SigV4 署名を付け直して上流へ送る。ダミーのシークレットキーは送信されないので、プロキシは知らなくてよい。本物がセッショントークン付き（SSO のロール認証情報）なら `X-Amz-Security-Token` を足して署名する。
+- ダミーのアクセスキー ID が束縛外のホストに現れたら、v0.1 の原則4と同じく403。
+- 静的キーのルールは、ダミーのアクセスキー ID と、秘密ストアの本物（アクセスキー ID とシークレット）の組。
+- SSO のルールは、ダミーのアクセスキー ID と、SSO のセッション（開始 URL、リージョン）、アカウント、ロールの組。SSO のログインは `aws sso login` ではなく、人間が `credshim` のコマンドで行う。プロキシが SSO OIDC のデバイス認可フローを実行し、人間はブラウザで承認するだけ。得た SSO トークンはプロキシの中だけに置き、ロール認証情報はプロキシが必要なときに取得してメモリに持ち、期限前に取り直す。
+  - `aws sso login` の往復を MITM して SSO キャッシュにダミーを書かせる案は採らない。CLI 内部のキャッシュ形式と SSO API の往復に依存して壊れやすく、エージェント自身にログインを始めさせる経路も残るため。
+  - `credential_process` やコンテナ認証エンドポイントで一時認証情報を渡す案も採らない。短命でも本物の値がエージェントの手に渡るため。
+- 束縛先の API には、新しい認証情報を発行させる操作がある（`iam:CreateAccessKey`、`sts:AssumeRole*`、`sts:GetSessionToken`、`sts:GetFederationToken`、`s3:CreateSession` など）。応答に本物の新しい値が乗るので、これらは既定で拒否する。IAM 側でも最小権限のロールを使うよう案内する。
+- 署名の無い（`noAuth`）認証情報発行の API は、ダミーのアクセスキー ID を運ばないのでルールでは引けない。SSO OIDC（`oidc.<region>.amazonaws.com` の `RegisterClient`・`StartDeviceAuthorization`・`CreateToken`）、SSO ポータル（`portal.sso.<region>.amazonaws.com` の `GetRoleCredentials` などで、認証は `x-amz-sso_bearer_token` ヘッダー）、`sts:AssumeRoleWithWebIdentity`・`AssumeRoleWithSAML`、`aws login` の signin（`<region>.signin.aws.amazon.com`、`<region>.oauth.signin.aws`）がそれにあたる。これらはルールと無関係に、ホストと操作で常に拒否する（SSO OIDC とポータルはホストごと CONNECT の段階で拒否）。エージェントが自分でデバイス認可フローを始めて人間に承認させる経路もこれで塞ぐ（段階Cではプロキシが唯一の出口なので効く）。プロキシ自身の SSO 通信はプロキシの待ち受けを通らないので影響しない。
+- SSO トークンは OAuth 保管庫か秘密ストアに置く（どちらにするかは実装時に決める）。
+- プロキシが持つ本物（アクセスキー ID、シークレット、セッショントークン）はレスポンスのスクラブ対象に加える。
+
+**v0.1 のルールの変更**
+
+- 再署名にはボディのハッシュが要る。S3 はクライアントが `x-amz-content-sha256` を付けるので、その値をそのまま署名に使い、ボディはストリームのまま流す（`STREAMING-UNSIGNED-PAYLOAD-TRAILER`、`UNSIGNED-PAYLOAD`、空ボディのハッシュ、小さい XML ボディの実ハッシュのどれでも、ボディとの整合は S3 が検証する）。それ以外のサービスはヘッダーが無いので、サイズ上限付きでボディを読み込んでハッシュを計算する。操作名の判定もこれを使う（Query と EC2 はフォームの `Action`、JSON は `X-Amz-Target`、rpc-v2-cbor はパスの `/service/<svc>/operation/<op>`、REST はメソッドとパス）。「ボディを丸ごと読まない、例外は OAuth のトークンエンドポイントだけ」というルールにこの例外を加える。
+- v0.1 の束縛先はホストの完全一致だが、AWS はサービス、リージョン、S3 のバケットごとにホストが変わる。`amazonaws.com` 配下への束縛（サービスやリージョンでの絞り込みを含む）と、それに合わせた MITM 対象の指定を加える。束縛の照合はホスト（接続先）で行い、サービスとリージョンの絞り込みには Authorization の資格スコープ（`<AKID>/<date>/<region>/<service>/aws4_request`）を使う。スコープはクライアントが書く値だが、再署名もこのスコープで行い、スコープとエンドポイントの食い違いは AWS が拒否する前提なので、偽っても別のサービスやリージョンには届かない（この前提は Phase 9 の手動マイルストーンで確かめる。成り立たなければ、ホストの束縛は保たれるが、スコープで引くサービスの許可リストは迂回できる）。
+- `expose_secret()` の許可先に SigV4 の署名処理と SSO のトークン交換を加える。
+
+## 脅威モデルへの追加
+
+| エージェントが取りうる行動 | 対策 |
+| --- | --- |
+| `~/.ssh` やプロセスのメモリから秘密鍵を読む | 鍵はプロキシの中だけ。ディスク上の鍵ファイルは作らない |
+| agent ソケットを自作クライアントで叩き、攻撃者のサーバーへの認証に使う | session-bind 必須。ホスト鍵が束縛先でなければ署名しない |
+| 束縛先への正規セッションで得た署名を別ホストへ流用する | 署名はそのセッション ID に結び付いており、他の接続では通らない |
+| 任意のデータ（コミット署名、別プロトコルの challenge）に署名させる | ユーザー認証要求の形以外は拒否 |
+| agent フォワードを経由して別ホストから使う | フォワードされた接続からの要求は拒否 |
+| `~/.aws` の credentials、SSO キャッシュ、CLI キャッシュを読む | そこにはダミーのアクセスキーしか無い。SSO トークンとロール認証情報はプロキシの中だけ |
+| ダミーのアクセスキーで署名した要求を AWS 以外のホストへ送る | 束縛外は403。本物での再署名は束縛先の AWS エンドポイント宛てにしか行わない |
+| 束縛先の API で新しい認証情報を発行させ、応答から本物の値を得る | 認証情報を発行する操作は既定で拒否 |
+| 署名の要らない API（SSO OIDC のデバイス認可、SSO ポータル、`AssumeRoleWithWebIdentity`、`aws login`）で自分で認証情報を得る、人間に承認させる | ルールと無関係に、ホストと操作で常に拒否 |
+| AWS の応答に本物のキーをエコーさせる | プロキシが持つ本物をスクラブ対象に加える |
+| 束縛先へ本物の権限でアクセスし乱用する | 残存リスク。SSH はホスト鍵とユーザー名、AWS はサービスと操作の許可リスト、上限、監査ログで緩和。AWS は最小権限のロールも併用 |
+
+## Phase 8: SSH エージェント
+
+このフェーズの終わりで、同一ユーザー構成（段階A）のまま `ssh -T git@github.com` と `git clone git@github.com:...` が、ディスクに秘密鍵の無い状態で通る。
+
+**作るもの**
+
+- ssh-agent プロトコルのソケット。公開鍵の一覧と署名要求に応え、鍵の追加・削除・ロックなど書き込み系の要求は拒否する。
+- 鍵の生成コマンド。秘密鍵は秘密ストアに保存し、出力するのは公開鍵だけ。
+- 設定ファイルに SSH 鍵のルール：鍵の参照、束縛先ホスト鍵の指紋、許可するユーザー名。ProxyJump では踏み台と宛先で agent 接続が別になり、それぞれ bind と署名が来るので、踏み台に同じ鍵で入るなら踏み台のホスト鍵も束縛先に入れる。
+- session-bind の検証と、アプローチ節の条件による署名判定。判定は v0.1 のルールエンジンと同じく I/O の無い純粋関数にする。
+- 監査ログ：時刻、ルール名、宛先ホスト鍵の指紋、ユーザー名、判定。署名や鍵の値は出さない。
+- テスト用 SSH サーバーは、OpenSSH の `sshd` を一般ユーザーのまま高いポートで起動する（`UsePAM no`、`StrictModes no`、絶対パスの `AuthorizedKeysFile`）。macOS の `/usr/sbin/sshd`（9.9p2）でこの起動と `sshd-session` の動作を確認済み。ログインできるのは実行ユーザーだけ。
+
+**完了条件**
+
+- [ ] テスト用 SSH サーバーに対し、OpenSSH の `ssh` が CredShim の agent 経由で認証できる（ホスト鍵は Ed25519、ECDSA、RSA の3種）。
+- [ ] 束縛外のホスト鍵を持つサーバーへの認証では署名せず、拒否が監査ログに残る。
+- [ ] session-bind を送らないクライアント、bind が検証に失敗した接続、フォワードされた接続、ユーザー認証要求以外のデータ（`ssh-keygen -Y sign` の `SSHSIG` を含む）への署名要求がすべて拒否される。
+- [ ] `publickey-hostbound-v00@openssh.com` の署名対象に入ったホスト鍵が bind のホスト鍵と違えば拒否される。
+- [ ] 許可されていないユーザー名での認証要求が拒否される。
+- [ ] 秘密鍵がログ、エラー、ディスク上のファイルに現れない（`capture_logs().assert_absent(..)`）。
+- [ ] 脅威モデルの SSH の追加行それぞれに回帰テストがある。
+- [ ] 人間が生成した公開鍵を GitHub に登録し、実物の `git clone` と `git push` を確認する（手動マイルストーン）。
+
+## Phase 9: AWS 静的キー（SigV4 再署名）
+
+このフェーズの終わりで、`~/.aws/credentials` にダミーのアクセスキーだけがある状態で、`aws` コマンドが実際の AWS を操作できる。
+
+**作るもの**
+
+- SigV4 の再署名。ヘッダー署名方式で、S3 のペイロード無署名（`UNSIGNED-PAYLOAD` と aws-chunked のトレーラー方式）と、それ以外のサービスの上限付きボディ読み込みに対応する。
+- `amazonaws.com` 配下への束縛と MITM 対象の指定。
+- 静的キーのルール：ダミーのアクセスキー ID、本物のアクセスキー ID とシークレットの秘密参照、束縛先。本物の登録は v0.1 と同じく TTY から。
+- 認証情報を発行する操作の既定拒否と、署名の要らない認証情報発行 API（SSO OIDC、SSO ポータル、`AssumeRoleWithWebIdentity`・`AssumeRoleWithSAML`、signin）の常時拒否。
+- 本物のスクラブ対象への追加。
+- 監査ログにサービス、リージョン、操作名を加える。
+- testkit に SigV4 を検証するモック AWS（JSON、Query、REST-XML の各プロトコルと S3 のアップロード）。S3 のアップロードは `aws` CLI v2 の既定の形（`Content-Encoding: aws-chunked`、`Transfer-Encoding: chunked`、`x-amz-trailer` の CRC64NVME、`Expect: 100-continue`）で受ける。
+
+**完了条件**
+
+- [ ] モック AWS で、ダミーで署名した要求が本物の認証情報で検証を通る（JSON、Query、REST-XML、S3 の各形式）。
+- [ ] `aws` CLI（v2）が、ダミーのプロファイルのままモック AWS に対して動く E2E テストが通る。
+- [ ] ダミーのアクセスキーを束縛外のホストへ送ると403になり、上流に何も届かない。
+- [ ] 認証情報を発行する操作が拒否され、上流に何も届かない。署名の要らない認証情報発行 API は、ルールが無くても拒否される。
+- [ ] S3 へのアップロード（`Expect: 100-continue` 付きの aws-chunked を含む）とダウンロードがボディをバッファせずに通る。`STREAMING-AWS4-HMAC-SHA256-PAYLOAD`（署名付きチャンク）は拒否される。それ以外のサービスでボディの上限を超えると拒否される。
+- [ ] 本物のアクセスキー ID、シークレットがログ、エラー、クライアントへの応答に現れない。
+- [ ] 人間が本物のキーを登録し、実 AWS で `aws sts get-caller-identity` と `aws s3 cp` を確認する（手動マイルストーン）。
+
+## Phase 10: AWS SSO
+
+このフェーズの終わりで、人間が `credshim` のコマンドで SSO にログインすれば、`~/.aws` にダミーしか無い状態で、SSO のロールの権限で `aws` コマンドが動く。
+
+**作るもの**
+
+- SSO ログインのコマンド。デバイス認可フローの URL とコードを TTY に出し、人間がブラウザで承認する。得た SSO トークンはプロキシの中に保存し、期限前に更新する。
+- SSO のルール：ダミーのアクセスキー ID、SSO のセッション、アカウント、ロール、束縛先。
+- ロール認証情報の取得、メモリ上のキャッシュ、期限前の取り直し。取得した本物はスクラブ対象に加える。
+- SSO トークンが切れたときの応答。上流へ送らず、人間に再ログインを促すエラーを返し、監査ログに残す。
+- SSO のログアウト（トークンの失効と削除）。
+
+**完了条件**
+
+- [ ] testkit のモック SSO（デバイス認可、トークン発行と更新、ロール認証情報の発行）に対し、ログインから `aws` CLI の実行までが通る。
+- [ ] ロール認証情報の期限切れ前後で、`aws` CLI の要求が途切れずに通る。
+- [ ] SSO トークンの期限切れ後は上流へ送らずエラーになり、再ログインで復旧する。
+- [ ] SSO トークンとロール認証情報がログ、エラー、ディスク上の平文、クライアントへの応答に現れない。
+- [ ] 脅威モデルの AWS の追加行それぞれに回帰テストがある。
+- [ ] 人間が実際の IAM Identity Center でログインし、`aws` コマンドを確認する（手動マイルストーン）。
+
+## Phase 11: 運用への組み込み
+
+v0.1 の段階B・Cと開発体験の仕組みに SSH と AWS を載せる。
+
+**作るもの**
+
+- 段階B：agent ソケットを専用ユーザーの所有にし、開発ユーザーは接続だけできるようにする。SSO ログインは `secret set` と同じく専用ユーザーとして人間が行う。`credshim service install` と `scripts/stage-b/verify.sh` を対応させる。
+- 乱用の緩和：SSH はルールごとのレートと日次回数。AWS はサービスと操作の許可リスト、レート、日次回数。
+- `credshim env` に `SSH_AUTH_SOCK` と `AWS_CA_BUNDLE`、ダミーのプロファイルの設定を出す。`credshim doctor` で agent への到達、session-bind に対応した OpenSSH のバージョン、`aws` CLI がプロキシを通ること、`~/.ssh` と `~/.aws` に本物が残っていないことを確かめる。
+- 段階C：コンテナ内の `ssh` から agent を使う方法と、22番ポートを既存の CONNECT トンネル経由で出す設定例。コンテナ内の `aws` コマンドの設定例。
+- 既存の認証情報からの移行手順のドキュメント。SSH は新しい鍵を生成して登録し、古い鍵を無効化して削除する。AWS は静的キーを作り直して古いキーを無効化し、SSO は `aws sso logout` で失効させ、`~/.aws/sso/cache` と `~/.aws/cli/cache` を削除する。
+
+**完了条件**
+
+- [ ] 段階Bで、開発ユーザーが agent と AWS の再署名を使えるが、秘密ストアと設定を読めず書けないことを `verify.sh` が確かめる。
+- [ ] 上限を超えた SSH の署名要求と AWS の要求、許可リスト外の AWS の操作が拒否される。
+- [ ] `credshim doctor` が、agent に届かない場合、OpenSSH が古い場合、`aws` がプロキシを通らない場合、`~/.ssh` や `~/.aws` に本物が残っている場合をそれぞれ報告する。
+- [ ] 段階C の構成でコンテナ内から `git clone` over SSH と `aws` コマンドが通る（手動マイルストーン）。
+
+## 範囲外
+
+- git のコミット署名（`ssh-keygen -Y sign`）。署名対象の形式が認証と異なり、同じ許可経路には乗せない。v0.2 では拒否する。
+- SSH 接続そのものの中継（コマンド単位の許可リスト）。必要になったら別フェーズで検討する。
+- git の SSH を HTTPS に書き換えてトークン注入で扱う方法。既存機能と git の設定だけで実現でき、新しいコードは要らない。
+- SSH 証明書の発行、FIDO（`sk`）鍵、session-bind に対応しない SSH クライアント。
+- AssumeRole によるロールの切り替え。認証情報を発行する操作を既定で拒否するので、`role_arn` と `source_profile` を使うプロファイルや `aws sts assume-role` は v0.2 では動かない。返ってきた一時認証情報を保管庫にしまってダミーを返す形（v0.1 の OAuth と同じ）で後から足せる。
+- クライアント側で署名するもの（クエリ文字列による SigV4）。エージェントがダミーで作った値は無効になる。影響するのは `aws s3 presign`、`aws eks get-token`（`update-kubeconfig` 経由の `kubectl`）、`aws rds generate-db-auth-token`、CodeCommit の git 認証ヘルパー。
+- SigV4a（マルチリージョンアクセスポイント）。
+- S3 Express One Zone（ディレクトリバケット）。`aws` CLI は `s3:CreateSession` で得たセッション認証情報で署名するが、`CreateSession` は認証情報を発行する操作として拒否するので動かない。
+- デュアルスタックのエンドポイント（`*.api.aws`、`use_dualstack_endpoint`）。束縛は `amazonaws.com` 配下だけ。
+- `aws` CLI 以外の AWS SDK での動作保証。同じ仕組みで動く見込みだが、v0.2 の完了条件には入れない。
+- AWS 以外の SSO（Okta などの SAML から AWS へ入る構成）。
+
+## 事前検証の結果
+
+Oct 1, 2026 に実機で確かめた。環境は macOS 15（Darwin 24.6）、OpenSSH_9.9p2（クライアント、`ssh-agent`、`/usr/sbin/sshd`）、`aws-cli/2.37.7`（`mise exec aws-cli@2.37.7`、同梱の botocore モデル）、Rust 1.98。
+
+**SSH**（一般ユーザーで起動した `sshd` と GitHub に対し、`ssh` と scratch の `ssh-agent` の間に agent プロトコルを記録する中継を挟んで観察）
+
+- 確認：SSH 接続ごとに agent 接続は1本で、順序は bind → `REQUEST_IDENTITIES` → `SIGN_REQUEST`。bind のホスト署名は Ed25519、ECDSA P-256、RSA（`rsa-sha2-512`、強制すれば `rsa-sha2-256`）のすべてで検証でき、`ssh-rsa`（SHA-1）は出なかった。署名対象はユーザー認証要求として解析でき、セッション ID は bind と一致した。
+- 確認：署名対象の method は `publickey-hostbound-v00@openssh.com` で、末尾のホスト鍵は4種の接続すべてで bind のホスト鍵と一致した。GitHub も `publickey-hostbound@openssh.com` を広告している。セッション ID は `sntrup761x25519-sha512` で 64 バイト、`curve25519-sha256` で 32 バイト。
+- 確認：`ssh -A` の先から `ssh` すると、フォワード経由の agent 接続に `is_forwarding=1`（外側のセッション）→ `is_forwarding=0`（内側）の順で bind が来て、署名のセッション ID は最後の bind と一致する。ProxyJump は踏み台と宛先で agent 接続が分かれ、どちらも `is_forwarding=0`。
+- 確認：agent が bind に失敗を返しても `ssh` は署名要求を続け、ログインに成功する。束縛は agent 側でしか強制できない。署名を拒否すると `ssh` は残りの認証方式に進み、`Permission denied (publickey)` で終わる。
+- 確認：`ssh-keygen -Y sign` は bind を送らず、署名対象は `SSHSIG` で始まる（namespace は `git`）。
+- 確認：素の `ssh-agent` は制約なしの鍵なら、bind の無い接続で任意のバイト列と偽の認証要求に署名する。
+- **前提が誤り**：`ssh-add -h` で制約した鍵は、bind の無い接続での署名を拒否した。アプローチ節の CredShim の存在理由を書き直した。
+- 確認：`ssh -T git@github.com` と `git ls-remote`（`GIT_SSH_COMMAND` 経由）は認証の前に bind を送り、ホスト鍵は GitHub の公開値と一致した。`ssh.github.com:443` も同じホスト鍵3種。
+- 確認：`ssh-agent-lib` 0.6.0 の `SessionBind::verify_signature()` は実際に取った bind 7件（手元の3種と RSA-256、GitHub の3種）をすべて通し、セッション ID を1ビット変えると7件とも拒否した。
+
+**AWS**（`mitmdump` を `HTTPS_PROXY` に置き、`AWS_CA_BUNDLE` をその CA にして、`--endpoint-url` を使わず実際のホスト名で要求を記録、応答はモック）
+
+- 確認：`aws` CLI はアクセスキー ID の形式を検証しない。32文字の英大文字、`-`・`.`・`_` を含む小文字混じり、20文字の `AKIA…` のどれも受け付け、Authorization の `Credential=` にそのまま載せる。v0.1 のダミーの形式（24文字以上の unreserved 文字）がそのまま使える。
+- 確認：`AWS_CA_BUNDLE` は信頼ストアを置き換える。開発CAだけを入れてプロキシを外すと実 STS で `CERTIFICATE_VERIFY_FAILED`。
+- 確認：通信はすべて HTTP/1.1 の CONNECT。STS はリージョン別のエンドポイント（`sts.ap-northeast-1.amazonaws.com`）。S3 は仮想ホスト形式（`<bucket>.s3.<region>.amazonaws.com`）。
+- 確認：S3 のアップロード（`s3 cp` の単一と 8MiB ごとのマルチパート、`s3api put-object`）は `x-amz-content-sha256: STREAMING-UNSIGNED-PAYLOAD-TRAILER`、`Content-Encoding: aws-chunked`、`Transfer-Encoding: chunked`、`x-amz-trailer: x-amz-checksum-crc64nvme`、`x-amz-decoded-content-length` で、8MiB のパートと 19MiB の `put-object` には `Expect: 100-continue` が付いた（`--debug` で確認）。署名付きチャンク（`STREAMING-AWS4-HMAC-SHA256-PAYLOAD`）は HTTPS では使われなかった。ボディの無い要求は空文字列のハッシュ、`CompleteMultipartUpload` の XML は実ハッシュ。
+- 確認：S3 以外（STS、EC2、DynamoDB、CloudWatch Logs、CloudWatch、Lambda）は `x-amz-content-sha256` を付けず、ボディは `Content-Length` 付き。CloudWatch はモデル上 rpc-v2-cbor が第一だが、CLI は JSON（`X-Amz-Target` と `x-amzn-query-mode: true`）で送った。
+- 確認：採取した要求 20件（S3 の各形式、日本語と空白を含むキー、DynamoDB、Logs、CloudWatch、EC2、Lambda）の署名を、ダミーのシークレットを使って `aws-sigv4` 1.6 で再計算し、20件すべて一致した。S3 は `PercentEncodingMode::Single` と `UriPathNormalizationMode::Disabled`、他は既定の設定。
+- botocore モデル（436 サービス）：Query は17サービス（`autoscaling`、`cloudformation`、`elb`・`elbv2`、`iam`、`rds`、`redshift`、`ses`、`sns`、`sts` など）と EC2。rpc-v2-cbor が第一のものが18サービス。応答に AWS の認証情報（`SecretAccessKey` と `SessionToken`）が乗る操作は17サービスの37操作（`sts` の7操作、`iam:CreateAccessKey`、`s3:CreateSession`、`s3control:GetDataAccess`、`sso:GetRoleCredentials`、`cognito-identity:GetCredentialsForIdentity`、`ssm:GetAccessToken`、`eks-auth:AssumeRoleForPodIdentity`、`lakeformation:GetTemporary*`、`lightsail:CreateBucketAccessKey` など）。このうち `sso`、`sso-oidc`、`signin`、`sts:AssumeRoleWithWebIdentity`・`AssumeRoleWithSAML`、`cognito-identity` は `noAuth` で、ダミーのアクセスキー ID を運ばない。アプローチ節を書き直した。
+- 未確認：資格スコープとエンドポイントが食い違う要求を AWS が拒否すること（ドキュメント上の挙動）。Phase 9 の手動マイルストーンで、スコープのサービスを書き換えた要求が拒否されることも確かめる。
+- 未確認：SSO（デバイス認可、リフレッシュトークン、`GetRoleCredentials`）は実物の IAM Identity Center が要る。モデル上は `RegisterClient`（`/client/register`）→ `StartDeviceAuthorization` → `CreateToken`（`grantType` が device_code か refresh_token）で、`GetRoleCredentials` は `GET /federation/credentials?role_name=&account_id=` に `x-amz-sso_bearer_token`。Phase 10 の手動マイルストーンで確かめる。
+
+**決まったこと**
+
+- クレート：SSH は `ssh-agent-lib` 0.6（`ssh-key` 0.6 を `crypto` フィーチャー付きで、`secrecy` 0.10 はワークスペースと同じ）。SigV4 は `aws-sigv4` 1.6 と `aws-credential-types` 1.3。`aws-sigv4` の MSRV は 1.94.1 なので、ワークスペースの `rust-version` を 1.85 から上げる。
+- 鍵の種類：生成するユーザー鍵は Ed25519 だけ。ホスト鍵の検証は Ed25519、ECDSA、RSA（`rsa-sha2-256`・`rsa-sha2-512`）に対応する（GitHub は3種とも出す）。
+- ホスト鍵の書き方：`SHA256:` の指紋（GitHub が公開している形式）。GitHub のプリセットは `SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU`（Ed25519）、`SHA256:p2QAMXNIC1TJYWeIOttrVc98/R1BUFWu3/LiyKgUfQM`（ECDSA）、`SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s`（RSA）で、`github.com:22` と `ssh.github.com:443` の両方に効く。
+- ダミーのアクセスキー ID：v0.1 のダミーの形式と長さ制約をそのまま使う。
+- AWS の束縛先：ホストの接尾辞（`amazonaws.com` 配下）で束縛し、サービスとリージョンの絞り込みは資格スコープで行う（アプローチ節）。
+- S3 の署名付きチャンク：対応しない。`STREAMING-AWS4-HMAC-SHA256-PAYLOAD` と `STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER` は拒否する。
+- 認証情報を発行する操作の一覧：botocore モデルから、応答に `SecretAccessKey` か `SessionToken` を含む操作を機械的に抜き出したものを既定の拒否リストにする。`noAuth` の操作はホストと操作で常に拒否する（SSO OIDC、SSO ポータル、signin はホストごと）。
+
+## 実装時に決めること
+
+- agent と SigV4 の実装の置き場所（mitm とは別クレートにするか）。
+- 既存の SSH 鍵ファイルの取り込みを用意するか。用意する場合は TTY から1回だけ読む。
+- 使うたびの確認（`ssh-add -c` 相当）を用意するか。
+- 許可リストでの操作名の書き方。AWS の認証情報以外の、サーバーが使える値を返す操作（`ecr:GetAuthorizationToken` による `aws ecr get-login-password`、`codeartifact:GetAuthorizationToken` など）を拒否するか、正当な「利用」として許すか。モデル上、秘密らしい値（トークン、パスワード、秘密鍵）を返す操作は183あり、拒否リストで網羅するのは無理なので、ここから先は許可リストで扱う。
+- 非 S3 のボディ上限の既定値。上限を超える操作は動かなくなる（`aws lambda update-function-code --zip-file`（直接アップロードは最大 50MB）、大きな入力の Bedrock `InvokeModel`、DynamoDB の `BatchWriteItem`（最大 16MB）、CloudWatch Logs の `PutLogEvents`（最大 1MB）など）。
+- SSO トークンとリフレッシュトークンの保存先（秘密ストアか OAuth 保管庫か）。
