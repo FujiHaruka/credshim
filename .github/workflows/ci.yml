@@ -43,3 +43,23 @@ jobs:
       - run: npm ci
         working-directory: crates/e2e/sdk/node
       - run: cargo test -p credshim-e2e -- --ignored
+
+  stage-b:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p credshim
+      - run: sudo scripts/stage-b/setup-linux.sh target/release/credshim
+      - name: setup is idempotent
+        run: sudo scripts/stage-b/setup-linux.sh target/release/credshim
+      - run: sudo useradd --create-home devtest
+      - run: install -m 0755 scripts/stage-b/verify.sh /tmp/verify.sh
+      - name: a non-sudo development user cannot read or write the proxy's state
+        run: sudo -u devtest /tmp/verify.sh
+      - name: verify flags a development user who can sudo
+        run: "! /tmp/verify.sh"
+      - name: service logs
+        if: failure()
+        run: sudo journalctl -u credshim --no-pager
