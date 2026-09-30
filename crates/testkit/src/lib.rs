@@ -5,7 +5,9 @@ pub mod upstream;
 
 pub use ca::{LeafCert, LeafOptions, TestCa};
 pub use logs::{LogCapture, capture_logs, fake_secret};
-pub use upstream::{Alpn, Echo, MockUpstream, RecordedRequest, SseTick, UploadSummary};
+pub use upstream::{
+    Alpn, Echo, MOCK_COMPLETION, MockUpstream, RecordedRequest, SseTick, UploadSummary,
+};
 
 pub fn install_crypto_provider() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();

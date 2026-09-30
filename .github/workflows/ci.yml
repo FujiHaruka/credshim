@@ -27,3 +27,19 @@ jobs:
       - run: cargo test --workspace
       - run: ./scripts/check-secret-exposure.sh
       - run: ./scripts/check-release-excludes-testing.sh
+
+  sdk-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: crates/e2e/sdk/node/package-lock.json
+      - uses: astral-sh/setup-uv@v6
+      - run: npm ci
+        working-directory: crates/e2e/sdk/node
+      - run: cargo test -p credshim-e2e -- --ignored

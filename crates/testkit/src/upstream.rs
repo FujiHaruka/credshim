@@ -209,6 +209,7 @@ fn router(shared: Arc<Shared>) -> Router {
         .route("/upload", post(upload))
         .route("/ws", any(websocket))
         .route("/status/{code}", any(status))
+        .route("/v1/chat/completions", post(chat_completions))
         .fallback(echo)
         .layer(middleware::from_fn_with_state(shared.clone(), record))
         .with_state(shared)
@@ -338,4 +339,53 @@ async fn echo_socket(mut socket: WebSocket, authorization: Option<String>) {
             break;
         }
     }
+}
+
+pub const MOCK_COMPLETION: &str = "hello from mock";
+
+async fn chat_completions(Json(request): Json<serde_json::Value>) -> Response {
+    let model = request["model"].as_str().unwrap_or("mock").to_string();
+    if request["stream"].as_bool() != Some(true) {
+        return Json(serde_json::json!({
+            "id": "chatcmpl-mock",
+            "object": "chat.completion",
+            "created": 0,
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": MOCK_COMPLETION },
+                "finish_reason": "stop",
+            }],
+            "usage": { "prompt_tokens": 1, "completion_tokens": 3, "total_tokens": 4 },
+        }))
+        .into_response();
+    }
+    let chunk = |delta: serde_json::Value, finish: Option<&str>| {
+        serde_json::json!({
+            "id": "chatcmpl-mock",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": model,
+            "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }],
+        })
+        .to_string()
+    };
+    let mut events = vec![chunk(
+        serde_json::json!({ "role": "assistant", "content": "" }),
+        None,
+    )];
+    events.extend(
+        MOCK_COMPLETION
+            .split_inclusive(' ')
+            .map(|piece| chunk(serde_json::json!({ "content": piece }), None)),
+    );
+    events.push(chunk(serde_json::json!({}), Some("stop")));
+    events.push("[DONE]".to_string());
+    let stream = async_stream::stream! {
+        for data in events {
+            yield Ok::<_, Infallible>(Event::default().data(data));
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    Sse::new(stream).into_response()
 }
