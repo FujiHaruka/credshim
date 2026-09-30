@@ -64,7 +64,7 @@ impl CommandStore {
             }
         };
         let output = output
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()).max(POLL))
             .map_err(|_| {
                 format!(
                     "timed out after {:?} waiting for its output to close",
