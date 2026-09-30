@@ -6,6 +6,7 @@ pub const AUDIT_TARGET: &str = "credshim::audit";
 pub(crate) enum Outcome {
     Pass,
     Injected(Vec<String>),
+    Exchanged(String),
     Denied(String),
     Misdirected,
     Failed(String),
@@ -16,6 +17,7 @@ impl Outcome {
         match self {
             Outcome::Pass => "pass",
             Outcome::Injected(_) => "inject",
+            Outcome::Exchanged(_) => "oauth",
             Outcome::Denied(_) => "deny",
             Outcome::Misdirected => "misdirected",
             Outcome::Failed(_) => "error",
@@ -25,7 +27,9 @@ impl Outcome {
     fn rules(&self) -> String {
         match self {
             Outcome::Injected(rules) => rules.join(","),
-            Outcome::Denied(rule) | Outcome::Failed(rule) => rule.clone(),
+            Outcome::Exchanged(rule) | Outcome::Denied(rule) | Outcome::Failed(rule) => {
+                rule.clone()
+            }
             Outcome::Pass | Outcome::Misdirected => String::new(),
         }
     }

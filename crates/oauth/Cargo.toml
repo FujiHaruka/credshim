@@ -6,6 +6,27 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+age = "0.11"
+base64.workspace = true
+bytes.workspace = true
+credshim-core.workspace = true
+form_urlencoded = "1"
+http.workspace = true
+http-body.workspace = true
+http-body-util.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tracing.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+credshim-testkit.workspace = true
+tokio.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true

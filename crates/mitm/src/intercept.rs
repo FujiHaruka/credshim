@@ -6,7 +6,7 @@ use std::time::Duration;
 use http::header::{self, HeaderValue};
 use http::uri::{Authority, PathAndQuery};
 use http::{Request, Response, StatusCode, Uri, Version};
-use http_body_util::BodyExt;
+use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::upgrade::OnUpgrade;
@@ -15,6 +15,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio_rustls::LazyConfigAcceptor;
 
 use credshim_core::{Destination, InjectError, Injector, Verdict};
+use credshim_oauth::{Exchange, OAuth};
 
 use crate::audit::{self, Outcome};
 use crate::ca::CertificateAuthority;
@@ -108,6 +109,18 @@ impl VerifiedTarget {
 }
 
 #[derive(Debug, thiserror::Error)]
+enum SendError {
+    #[error("request URI could not be rebuilt for the upstream")]
+    BadUri,
+    #[error(transparent)]
+    Client(#[from] hyper_util::client::legacy::Error),
+}
+
+fn full(body: bytes::Bytes) -> ProxyBody {
+    Full::new(body).map_err(|never| match never {}).boxed()
+}
+
+#[derive(Debug, thiserror::Error)]
 enum UpgradeError {
     #[error(transparent)]
     Connect(#[from] ConnectError),
@@ -126,6 +139,7 @@ fn inject(
 pub(crate) struct Session {
     target: VerifiedTarget,
     injector: Arc<Injector>,
+    oauth: Option<Arc<OAuth>>,
     connector: TargetConnector,
     client: Client<TargetConnector, ProxyBody>,
 }
@@ -134,6 +148,7 @@ impl Session {
     pub(crate) async fn open(
         upstream: Upstream,
         injector: Arc<Injector>,
+        oauth: Option<Arc<OAuth>>,
         host: String,
         port: u16,
         connect_timeout: Duration,
@@ -147,6 +162,7 @@ impl Session {
         Ok(Self {
             target: VerifiedTarget { host, port },
             injector,
+            oauth,
             connector,
             client,
         })
@@ -268,6 +284,10 @@ impl Session {
             path = parts.uri.path(),
             "intercepted request"
         );
+        let exchange = self
+            .oauth
+            .as_deref()
+            .and_then(|oauth| oauth.exchange(&target.host, target.port, &parts));
         let outcome = match inject(target, &self.injector, &mut parts) {
             Ok(Verdict::Pass) => Outcome::Pass,
             Ok(Verdict::Injected(rules)) => Outcome::Injected(rules),
@@ -288,6 +308,9 @@ impl Session {
                 );
             }
         };
+        if let Some(exchange) = exchange {
+            return self.exchange(exchange, parts, body).await;
+        }
         let response = match websocket_upgrade(&parts) {
             Some(protocol) => self.upgrade(parts, body, protocol).await,
             None => self.forward(parts, body).await,
@@ -295,36 +318,79 @@ impl Session {
         (outcome, response)
     }
 
-    async fn forward(
-        &self,
-        mut parts: http::request::Parts,
-        body: Incoming,
-    ) -> Response<ProxyBody> {
+    async fn forward(&self, parts: http::request::Parts, body: Incoming) -> Response<ProxyBody> {
         let target = &self.target;
-        strip_hop_by_hop_keeping_trailers(&mut parts.headers);
-        parts.headers.remove(header::HOST);
-        if parts.version == Version::HTTP_2 {
-            join_cookies(&mut parts.headers);
-        }
-        let Ok(uri) = absolute_uri(target, &parts.uri) else {
-            return status(StatusCode::BAD_REQUEST);
-        };
-        parts.uri = uri;
-        parts.version = Version::HTTP_11;
-        match self
-            .client
-            .request(Request::from_parts(parts, body.boxed()))
-            .await
-        {
+        match self.send(parts, body.boxed()).await {
             Ok(res) => {
                 let (mut parts, body) = res.into_parts();
                 strip_hop_by_hop_keeping_trailers(&mut parts.headers);
                 parts.version = Version::HTTP_11;
                 Response::from_parts(parts, body.boxed())
             }
+            Err(SendError::BadUri) => status(StatusCode::BAD_REQUEST),
             Err(err) => {
                 tracing::warn!(host = %target.host, port = target.port, error = %err, "intercepted request failed");
                 status(StatusCode::BAD_GATEWAY)
+            }
+        }
+    }
+
+    async fn send(
+        &self,
+        mut parts: http::request::Parts,
+        body: ProxyBody,
+    ) -> Result<Response<Incoming>, SendError> {
+        strip_hop_by_hop_keeping_trailers(&mut parts.headers);
+        parts.headers.remove(header::HOST);
+        if parts.version == Version::HTTP_2 {
+            join_cookies(&mut parts.headers);
+        }
+        parts.uri = absolute_uri(&self.target, &parts.uri).map_err(|_| SendError::BadUri)?;
+        parts.version = Version::HTTP_11;
+        Ok(self
+            .client
+            .request(Request::from_parts(parts, body))
+            .await?)
+    }
+
+    async fn exchange(
+        &self,
+        exchange: Exchange<'_>,
+        parts: http::request::Parts,
+        body: Incoming,
+    ) -> (Outcome, Response<ProxyBody>) {
+        let rule = format!("oauth.{}", exchange.provider());
+        let result = exchange
+            .run(parts, body, |req| async move {
+                let (parts, body) = req.into_parts();
+                self.send(parts, full(body)).await
+            })
+            .await;
+        match result {
+            Ok(res) => {
+                let (mut parts, body) = res.into_parts();
+                strip_hop_by_hop(&mut parts.headers);
+                parts.version = Version::HTTP_11;
+                (
+                    Outcome::Exchanged(rule),
+                    Response::from_parts(parts, full(body)),
+                )
+            }
+            Err(err) => {
+                tracing::warn!(
+                    %rule,
+                    host = %self.target.host,
+                    port = self.target.port,
+                    error = %err,
+                    "OAuth endpoint exchange failed"
+                );
+                let code = err.status();
+                let outcome = if code == StatusCode::FORBIDDEN {
+                    Outcome::Denied(rule)
+                } else {
+                    Outcome::Failed(rule)
+                };
+                (outcome, status(code))
             }
         }
     }

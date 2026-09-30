@@ -603,7 +603,9 @@ dependencies = [
  "bytes",
  "credshim-core",
  "credshim-mitm",
+ "credshim-oauth",
  "credshim-testkit",
+ "form_urlencoded",
  "futures-util",
  "hex",
  "http",
@@ -634,6 +636,26 @@ dependencies = [
 [[package]]
 name = "credshim-oauth"
 version = "0.1.0"
+dependencies = [
+ "age",
+ "base64 0.22.1",
+ "bytes",
+ "credshim-core",
+ "credshim-testkit",
+ "form_urlencoded",
+ "http",
+ "http-body",
+ "http-body-util",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "zeroize",
+]
 
 [[package]]
 name = "credshim-secrets"
@@ -658,7 +680,9 @@ dependencies = [
  "anyhow",
  "async-stream",
  "axum",
+ "base64 0.22.1",
  "bytes",
+ "form_urlencoded",
  "futures-util",
  "getrandom 0.3.4",
  "hex",
@@ -2155,6 +2179,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",

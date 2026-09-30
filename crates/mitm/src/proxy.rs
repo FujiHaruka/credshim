@@ -20,6 +20,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
 use credshim_core::Injector;
+use credshim_oauth::OAuth;
 
 use crate::audit::{self, Outcome};
 use crate::intercept::{Intercept, Session};
@@ -35,6 +36,8 @@ pub struct ProxyConfig {
     pub header_read_timeout: Duration,
     pub intercept: Option<Intercept>,
     pub injector: Arc<Injector>,
+    pub oauth: Option<Arc<OAuth>>,
+    pub purge_interval: Duration,
 }
 
 impl ProxyConfig {
@@ -46,6 +49,8 @@ impl ProxyConfig {
             header_read_timeout: Duration::from_secs(30),
             intercept: None,
             injector: Arc::new(Injector::default()),
+            oauth: None,
+            purge_interval: Duration::from_secs(60),
         }
     }
 }
@@ -56,6 +61,8 @@ pub enum BindError {
     NotLoopback(SocketAddr),
     #[error("rule host {0} is not in the intercept list, so its rule could never apply")]
     RuleHostNotIntercepted(String),
+    #[error("OAuth host {0} is not in the intercept list, so its tokens could never be swapped")]
+    OAuthHostNotIntercepted(String),
     #[error("could not listen on {addr}: {source}")]
     Io { addr: SocketAddr, source: io::Error },
 }
@@ -63,6 +70,7 @@ pub enum BindError {
 pub struct Proxy {
     addr: SocketAddr,
     accept_loop: JoinHandle<()>,
+    purge_loop: Option<JoinHandle<()>>,
 }
 
 impl Proxy {
@@ -78,6 +86,14 @@ impl Proxy {
         {
             return Err(BindError::RuleHostNotIntercepted(host.to_string()));
         }
+        if let Some(host) = config
+            .oauth
+            .iter()
+            .flat_map(|oauth| oauth.hosts())
+            .find(|host| !config.intercept.as_ref().is_some_and(|i| i.covers(host)))
+        {
+            return Err(BindError::OAuthHostNotIntercepted(host.to_string()));
+        }
         let listener = TcpListener::bind(config.listen)
             .await
             .map_err(|source| BindError::Io {
@@ -89,9 +105,17 @@ impl Proxy {
             source,
         })?;
         let handler = Arc::new(Handler::new(&config, upstream));
+        let purge_loop = config
+            .oauth
+            .clone()
+            .map(|oauth| tokio::spawn(purge_loop(oauth, config.purge_interval)));
         let accept_loop = tokio::spawn(accept_loop(listener, handler, config));
         tracing::info!(%addr, "proxy listening");
-        Ok(Self { addr, accept_loop })
+        Ok(Self {
+            addr,
+            accept_loop,
+            purge_loop,
+        })
     }
 
     pub fn local_addr(&self) -> SocketAddr {
@@ -106,6 +130,20 @@ impl Proxy {
 impl Drop for Proxy {
     fn drop(&mut self) {
         self.accept_loop.abort();
+        if let Some(purge_loop) = &self.purge_loop {
+            purge_loop.abort();
+        }
+    }
+}
+
+async fn purge_loop(oauth: Arc<OAuth>, every: Duration) {
+    let mut ticks = tokio::time::interval(every);
+    loop {
+        ticks.tick().await;
+        let purged = oauth.purge(std::time::SystemTime::now());
+        if purged > 0 {
+            tracing::debug!(purged, "removed expired OAuth tokens from the vault");
+        }
     }
 }
 
@@ -146,6 +184,7 @@ struct Handler {
     handshake_timeout: Duration,
     intercept: Option<Intercept>,
     injector: Arc<Injector>,
+    oauth: Option<Arc<OAuth>>,
 }
 
 impl Handler {
@@ -166,6 +205,7 @@ impl Handler {
             handshake_timeout: config.header_read_timeout,
             intercept: config.intercept.clone(),
             injector: config.injector.clone(),
+            oauth: config.oauth.clone(),
         }
     }
 
@@ -221,6 +261,7 @@ impl Handler {
         let session = match Session::open(
             self.upstream.clone(),
             self.injector.clone(),
+            self.oauth.clone(),
             host.clone(),
             port,
             self.connect_timeout,
@@ -265,17 +306,13 @@ impl Handler {
             method: &method,
             path: &path,
         };
-        if let Some(rule) = self.injector.rules().first_dummy_in(&parts) {
+        if let Some(rule) = self.injector.first_dummy_in(&parts) {
             tracing::warn!(
-                rule = rule.name(),
+                %rule,
                 %authority,
                 "dummy credential sent over plain HTTP; refusing to forward"
             );
-            audit::record(
-                &entry,
-                &Outcome::Denied(rule.name().to_string()),
-                StatusCode::FORBIDDEN,
-            );
+            audit::record(&entry, &Outcome::Denied(rule), StatusCode::FORBIDDEN);
             return status(StatusCode::FORBIDDEN);
         }
         strip_hop_by_hop(&mut parts.headers);

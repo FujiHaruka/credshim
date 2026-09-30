@@ -39,8 +39,17 @@ impl<'r> Edit<'r> {
 
 impl RuleSet {
     pub fn new(specs: Vec<RuleSpec>) -> Result<Self, RuleError> {
+        Self::from_rules(
+            specs
+                .into_iter()
+                .map(Rule::from_spec)
+                .collect::<Result<_, _>>()?,
+        )
+    }
+
+    pub fn from_rules(rules: Vec<Rule>) -> Result<Self, RuleError> {
         Ok(Self {
-            rules: rule::validate(specs)?,
+            rules: rule::validate(rules)?,
         })
     }
 
@@ -53,36 +62,59 @@ impl RuleSet {
     }
 
     pub fn hosts(&self) -> impl Iterator<Item = &str> {
-        self.rules.iter().map(Rule::host)
+        self.rules.iter().flat_map(Rule::hosts)
     }
 
     pub fn decide(&self, dest: Destination<'_>, parts: &Parts) -> Decision<'_> {
-        let mut edits = Vec::new();
-        for rule in &self.rules {
-            let hits = scan::hits(rule.dummy(), parts);
-            if hits.is_empty() {
-                continue;
-            }
-            if !rule.applies_to(dest.host, dest.port, parts.uri.path()) {
-                return Decision::Deny(rule);
-            }
-            edits.extend(
-                rule.locations()
-                    .iter()
-                    .filter(|location| hits.iter().any(|hit| hit.is_at(location)))
-                    .map(|location| Edit { rule, location }),
-            );
-        }
-        if edits.is_empty() {
-            Decision::Pass
-        } else {
-            Decision::Inject(edits)
-        }
+        decide(&self.rules, dest, parts)
     }
 
     pub fn first_dummy_in(&self, parts: &Parts) -> Option<&Rule> {
-        self.rules
-            .iter()
-            .find(|rule| !scan::hits(rule.dummy(), parts).is_empty())
+        first_dummy_in(&self.rules, parts)
     }
+}
+
+pub(crate) fn decide<'r>(
+    rules: impl IntoIterator<Item = &'r Rule>,
+    dest: Destination<'_>,
+    parts: &Parts,
+) -> Decision<'r> {
+    let mut edits: Vec<Edit<'r>> = Vec::new();
+    for rule in rules {
+        let hits = scan::hits(rule.dummy(), parts);
+        if hits.is_empty() {
+            continue;
+        }
+        let mut bound = rule
+            .bindings()
+            .iter()
+            .filter(|binding| binding.applies_to(dest.host, dest.port, parts.uri.path()))
+            .peekable();
+        if bound.peek().is_none() {
+            return Decision::Deny(rule);
+        }
+        for location in bound.flat_map(|binding| binding.locations()) {
+            let hit = hits.iter().any(|hit| hit.is_at(location));
+            let seen = edits
+                .iter()
+                .any(|edit| std::ptr::eq(edit.rule, rule) && edit.location == location);
+            if hit && !seen {
+                edits.push(Edit { rule, location });
+            }
+        }
+    }
+    if edits.is_empty() {
+        Decision::Pass
+    } else {
+        Decision::Inject(edits)
+    }
+}
+
+pub(crate) fn first_dummy_in<'r>(
+    rules: impl IntoIterator<Item = &'r Rule>,
+    parts: &Parts,
+) -> Option<&'r Rule> {
+    rules
+        .into_iter()
+        .find(|rule| !scan::hits(rule.dummy(), parts).is_empty())
 }

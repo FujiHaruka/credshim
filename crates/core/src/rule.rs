@@ -2,7 +2,10 @@ use std::collections::HashSet;
 
 use http::HeaderName;
 use http::header;
+use secrecy::SecretString;
 use serde::Deserialize;
+
+use crate::dummy;
 
 pub const DEFAULT_PORT: u16 = 443;
 pub const MIN_DUMMY_LEN: usize = 24;
@@ -37,19 +40,37 @@ pub enum Location {
 }
 
 #[derive(Clone, Debug)]
-pub struct Target {
+pub struct Binding {
     host: String,
     port: u16,
     path_prefix: Option<String>,
+    locations: Vec<Location>,
+}
+
+#[derive(Clone, Debug)]
+pub enum SecretRef {
+    Named(String),
+    Inline(SecretString),
 }
 
 #[derive(Clone, Debug)]
 pub struct Rule {
     name: String,
-    target: Target,
-    secret: String,
     dummy: String,
-    locations: Vec<Location>,
+    secret: SecretRef,
+    bindings: Vec<Binding>,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum BindingError {
+    #[error("host {0:?} must be a plain lowercase DNS name without port")]
+    InvalidHost(String),
+    #[error("port must not be 0")]
+    InvalidPort,
+    #[error(
+        "path_prefix {0:?} must start with '/' and contain no dot segments, '%', '?', '#' or '\\'"
+    )]
+    InvalidPathPrefix(String),
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -72,6 +93,8 @@ pub enum RuleError {
         "rule {0:?}: dummy must be {MIN_DUMMY_LEN}..={MAX_DUMMY_LEN} characters of A-Z, a-z, 0-9, '-', '.', '_' or '~'"
     )]
     InvalidDummy(String),
+    #[error("rule {0:?}: dummy must not contain the prefixes reserved for issued OAuth tokens")]
+    ReservedDummy(String),
     #[error("rules {0:?} and {1:?} have dummies where one contains the other")]
     OverlappingDummies(String, String),
     #[error("rule {0:?}: inject must name at least one of header, basic or query")]
@@ -80,27 +103,43 @@ pub enum RuleError {
     InvalidHeader { rule: String, header: String },
     #[error("rule {0:?}: query parameter name must be non-empty")]
     InvalidQueryParam(String),
+    #[error("rule {0:?}: must be bound to at least one destination")]
+    Unbound(String),
 }
 
-impl Rule {
-    pub fn name(&self) -> &str {
-        &self.name
+impl Binding {
+    pub fn new(
+        host: &str,
+        port: u16,
+        path_prefix: Option<String>,
+        locations: Vec<Location>,
+    ) -> Result<Self, BindingError> {
+        let host = host.to_ascii_lowercase();
+        if !is_dns_name(&host) {
+            return Err(BindingError::InvalidHost(host));
+        }
+        if port == 0 {
+            return Err(BindingError::InvalidPort);
+        }
+        if let Some(prefix) = &path_prefix
+            && !is_clean_path_prefix(prefix)
+        {
+            return Err(BindingError::InvalidPathPrefix(prefix.clone()));
+        }
+        Ok(Self {
+            host,
+            port,
+            path_prefix,
+            locations,
+        })
     }
 
     pub fn host(&self) -> &str {
-        &self.target.host
+        &self.host
     }
 
     pub fn port(&self) -> u16 {
-        self.target.port
-    }
-
-    pub fn secret(&self) -> &str {
-        &self.secret
-    }
-
-    pub fn dummy(&self) -> &str {
-        &self.dummy
+        self.port
     }
 
     pub fn locations(&self) -> &[Location] {
@@ -108,25 +147,130 @@ impl Rule {
     }
 
     pub(crate) fn applies_to(&self, host: &str, port: u16, path: &str) -> bool {
-        self.target.host.eq_ignore_ascii_case(host)
-            && self.target.port == port
+        self.host.eq_ignore_ascii_case(host)
+            && self.port == port
             && self
-                .target
                 .path_prefix
                 .as_deref()
                 .is_none_or(|prefix| path_is_under(path, prefix))
     }
 }
 
-pub(crate) fn validate(specs: Vec<RuleSpec>) -> Result<Vec<Rule>, RuleError> {
-    let mut names = HashSet::new();
-    let mut rules = Vec::with_capacity(specs.len());
-    for spec in specs {
-        let rule = validate_one(spec)?;
-        if !names.insert(rule.name.clone()) {
-            return Err(RuleError::DuplicateName(rule.name));
+impl Rule {
+    pub fn new(
+        name: String,
+        dummy: String,
+        secret: SecretRef,
+        bindings: Vec<Binding>,
+    ) -> Result<Self, RuleError> {
+        if !is_identifier(&name) {
+            return Err(RuleError::InvalidName(name));
         }
-        rules.push(rule);
+        if let SecretRef::Named(secret) = &secret
+            && !is_identifier(secret)
+        {
+            return Err(RuleError::InvalidSecretName {
+                rule: name,
+                secret: secret.clone(),
+            });
+        }
+        if !is_valid_dummy(&dummy) {
+            return Err(RuleError::InvalidDummy(name));
+        }
+        if dummy::ISSUED_PREFIXES
+            .iter()
+            .any(|prefix| dummy.contains(prefix))
+        {
+            return Err(RuleError::ReservedDummy(name));
+        }
+        if bindings.is_empty() {
+            return Err(RuleError::Unbound(name));
+        }
+        Ok(Self {
+            name,
+            dummy,
+            secret,
+            bindings,
+        })
+    }
+
+    pub fn issued(
+        name: String,
+        dummy: String,
+        secret: SecretString,
+        bindings: Vec<Binding>,
+    ) -> Self {
+        Self {
+            name,
+            dummy,
+            secret: SecretRef::Inline(secret),
+            bindings,
+        }
+    }
+
+    pub fn from_spec(spec: RuleSpec) -> Result<Self, RuleError> {
+        let RuleSpec {
+            name,
+            host,
+            port,
+            path_prefix,
+            secret,
+            dummy,
+            inject,
+        } = spec;
+        if !is_identifier(&name) {
+            return Err(RuleError::InvalidName(name));
+        }
+        let locations = locations(&name, inject)?;
+        let binding = Binding::new(&host, port.unwrap_or(DEFAULT_PORT), path_prefix, locations)
+            .map_err(|err| match err {
+                BindingError::InvalidHost(host) => RuleError::InvalidHost {
+                    rule: name.clone(),
+                    host,
+                },
+                BindingError::InvalidPort => RuleError::InvalidPort(name.clone()),
+                BindingError::InvalidPathPrefix(prefix) => RuleError::InvalidPathPrefix {
+                    rule: name.clone(),
+                    prefix,
+                },
+            })?;
+        Self::new(name, dummy, SecretRef::Named(secret), vec![binding])
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn dummy(&self) -> &str {
+        &self.dummy
+    }
+
+    pub fn secret(&self) -> &SecretRef {
+        &self.secret
+    }
+
+    pub fn secret_name(&self) -> Option<&str> {
+        match &self.secret {
+            SecretRef::Named(name) => Some(name),
+            SecretRef::Inline(_) => None,
+        }
+    }
+
+    pub fn bindings(&self) -> &[Binding] {
+        &self.bindings
+    }
+
+    pub fn hosts(&self) -> impl Iterator<Item = &str> {
+        self.bindings.iter().map(Binding::host)
+    }
+}
+
+pub(crate) fn validate(rules: Vec<Rule>) -> Result<Vec<Rule>, RuleError> {
+    let mut names = HashSet::new();
+    for rule in &rules {
+        if !names.insert(rule.name.as_str()) {
+            return Err(RuleError::DuplicateName(rule.name.clone()));
+        }
     }
     for (i, a) in rules.iter().enumerate() {
         for b in &rules[i + 1..] {
@@ -139,55 +283,6 @@ pub(crate) fn validate(specs: Vec<RuleSpec>) -> Result<Vec<Rule>, RuleError> {
         }
     }
     Ok(rules)
-}
-
-fn validate_one(spec: RuleSpec) -> Result<Rule, RuleError> {
-    let RuleSpec {
-        name,
-        host,
-        port,
-        path_prefix,
-        secret,
-        dummy,
-        inject,
-    } = spec;
-    if !is_identifier(&name) {
-        return Err(RuleError::InvalidName(name));
-    }
-    let host = host.to_ascii_lowercase();
-    if !is_dns_name(&host) {
-        return Err(RuleError::InvalidHost { rule: name, host });
-    }
-    let port = port.unwrap_or(DEFAULT_PORT);
-    if port == 0 {
-        return Err(RuleError::InvalidPort(name));
-    }
-    if let Some(prefix) = &path_prefix
-        && !is_clean_path_prefix(prefix)
-    {
-        return Err(RuleError::InvalidPathPrefix {
-            rule: name,
-            prefix: prefix.clone(),
-        });
-    }
-    if !is_identifier(&secret) {
-        return Err(RuleError::InvalidSecretName { rule: name, secret });
-    }
-    if !is_valid_dummy(&dummy) {
-        return Err(RuleError::InvalidDummy(name));
-    }
-    let locations = locations(&name, inject)?;
-    Ok(Rule {
-        name,
-        target: Target {
-            host,
-            port,
-            path_prefix,
-        },
-        secret,
-        dummy,
-        locations,
-    })
 }
 
 fn locations(rule: &str, inject: InjectSpec) -> Result<Vec<Location>, RuleError> {

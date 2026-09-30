@@ -607,7 +607,7 @@ fn rule_specs_parse_from_toml() {
     .unwrap();
     let rules = RuleSet::new(file.rule).unwrap();
 
-    assert_eq!(rules.rules()[0].locations().len(), 2);
+    assert_eq!(rules.rules()[0].bindings()[0].locations().len(), 2);
     assert_eq!(
         rules.hosts().collect::<Vec<_>>(),
         ["generativelanguage.googleapis.com"]

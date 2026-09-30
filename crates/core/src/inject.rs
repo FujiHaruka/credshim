@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -10,8 +11,8 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_encode};
 use secrecy::{ExposeSecret, SecretString};
 use zeroize::Zeroizing;
 
-use crate::rule::{Location, Rule};
-use crate::rules::{Decision, Destination, Edit, RuleSet};
+use crate::rule::{Location, Rule, SecretRef};
+use crate::rules::{self, Decision, Destination, Edit, RuleSet};
 use crate::scan;
 
 const QUERY_VALUE: &AsciiSet = &NON_ALPHANUMERIC
@@ -68,33 +69,66 @@ pub enum Verdict {
     Denied(String),
 }
 
+pub trait TokenResolver: Send + Sync + fmt::Debug {
+    fn resolve(&self, dummy: &str) -> Option<Rule>;
+}
+
 #[derive(Debug, Default)]
 pub struct Injector {
     rules: RuleSet,
     secrets: Secrets,
+    tokens: Option<Arc<dyn TokenResolver>>,
 }
 
 impl Injector {
     pub fn new(rules: RuleSet, secrets: Secrets) -> Result<Self, InjectorError> {
         for rule in rules.rules() {
-            let secret =
-                secrets
-                    .get(rule.secret())
-                    .ok_or_else(|| InjectorError::MissingSecret {
-                        rule: rule.name().to_string(),
-                        secret: rule.secret().to_string(),
-                    })?;
-            check_secret(rule, secret)?;
+            let Some(name) = rule.secret_name() else {
+                continue;
+            };
+            let secret = secrets
+                .get(name)
+                .ok_or_else(|| InjectorError::MissingSecret {
+                    rule: rule.name().to_string(),
+                    secret: name.to_string(),
+                })?;
+            check_secret(rule, name, secret)?;
         }
-        Ok(Self { rules, secrets })
+        Ok(Self {
+            rules,
+            secrets,
+            tokens: None,
+        })
+    }
+
+    pub fn with_tokens(mut self, tokens: Arc<dyn TokenResolver>) -> Self {
+        self.tokens = Some(tokens);
+        self
     }
 
     pub fn rules(&self) -> &RuleSet {
         &self.rules
     }
 
+    pub fn first_dummy_in(&self, parts: &Parts) -> Option<String> {
+        let issued = self.issued_in(parts);
+        rules::first_dummy_in(self.rules.rules().iter().chain(&issued), parts)
+            .map(|rule| rule.name().to_string())
+    }
+
+    fn issued_in(&self, parts: &Parts) -> Vec<Rule> {
+        let Some(tokens) = &self.tokens else {
+            return Vec::new();
+        };
+        scan::issued_tokens(parts)
+            .iter()
+            .filter_map(|dummy| tokens.resolve(dummy))
+            .collect()
+    }
+
     pub fn apply(&self, dest: Destination<'_>, parts: &mut Parts) -> Result<Verdict, InjectError> {
-        match self.rules.decide(dest, parts) {
+        let issued = self.issued_in(parts);
+        match rules::decide(self.rules.rules().iter().chain(&issued), dest, parts) {
             Decision::Pass => Ok(Verdict::Pass),
             Decision::Deny(rule) => Ok(Verdict::Denied(rule.name().to_string())),
             Decision::Inject(edits) => {
@@ -115,7 +149,12 @@ impl Injector {
 
     fn substitute(&self, edit: Edit<'_>, parts: &mut Parts) -> Option<()> {
         let rule = edit.rule();
-        let secret = self.secrets.get(rule.secret())?.expose_secret().as_bytes();
+        let secret = match rule.secret() {
+            SecretRef::Named(name) => self.secrets.get(name)?,
+            SecretRef::Inline(secret) => secret,
+        }
+        .expose_secret()
+        .as_bytes();
         let dummy = rule.dummy().as_bytes();
         match edit.location() {
             Location::Header(name) => replace_in_header(parts, name, dummy, secret),
@@ -125,21 +164,22 @@ impl Injector {
     }
 }
 
-fn check_secret(rule: &Rule, secret: &SecretString) -> Result<(), InjectorError> {
+fn check_secret(rule: &Rule, name: &str, secret: &SecretString) -> Result<(), InjectorError> {
     let value = secret.expose_secret();
     if value.is_empty() {
         return Err(InjectorError::EmptySecret {
-            secret: rule.secret().to_string(),
+            secret: name.to_string(),
         });
     }
     let needs_header_safe = rule
-        .locations()
+        .bindings()
         .iter()
+        .flat_map(|binding| binding.locations())
         .any(|location| matches!(location, Location::Header(_)));
     let header_safe = value.trim() == value && HeaderValue::from_str(value).is_ok();
     if needs_header_safe && !header_safe {
         return Err(InjectorError::NotHeaderSafe {
-            secret: rule.secret().to_string(),
+            secret: name.to_string(),
         });
     }
     Ok(())

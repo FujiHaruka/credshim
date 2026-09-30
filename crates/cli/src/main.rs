@@ -179,7 +179,11 @@ async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::
 }
 
 fn load_secrets(store: &dyn SecretStore, rules: &RuleSet) -> anyhow::Result<Secrets> {
-    let names: BTreeSet<&str> = rules.rules().iter().map(|rule| rule.secret()).collect();
+    let names: BTreeSet<&str> = rules
+        .rules()
+        .iter()
+        .filter_map(|rule| rule.secret_name())
+        .collect();
     let mut secrets = Secrets::new();
     for name in names {
         let value = store.get(name)?.with_context(|| {

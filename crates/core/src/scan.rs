@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use base64::Engine;
 use base64::alphabet::STANDARD;
 use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
@@ -6,6 +8,7 @@ use http::header::{AUTHORIZATION, HeaderValue};
 use http::request::Parts;
 use percent_encoding::percent_decode_str;
 
+use crate::dummy;
 use crate::rule::Location;
 
 const LENIENT_BASE64: GeneralPurpose = GeneralPurpose::new(
@@ -64,6 +67,30 @@ pub(crate) fn hits(dummy: &str, parts: &Parts) -> Vec<Hit> {
         }
     }
     hits
+}
+
+pub(crate) fn issued_tokens(parts: &Parts) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    let mut collect = |haystack: &[u8]| {
+        found.extend(dummy::find_issued(haystack).map(str::to_string));
+    };
+    for value in parts.headers.values() {
+        collect(value.as_bytes());
+        if let Some(decoded) = decode_basic(value) {
+            collect(&decoded);
+        }
+    }
+    let path = parts.uri.path();
+    collect(path.as_bytes());
+    collect(&decode(path));
+    if let Some(query) = parts.uri.query() {
+        collect(query.as_bytes());
+        for (name, value) in query_pairs(query) {
+            collect(&decode(name));
+            collect(&decode(value));
+        }
+    }
+    found
 }
 
 pub(crate) fn query_pairs(query: &str) -> impl Iterator<Item = (&str, &str)> {
