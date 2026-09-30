@@ -207,11 +207,20 @@ impl Session {
         tokio::spawn(async move {
             let host = self.target.host.clone();
             let port = self.target.port;
+            let stats = self.stats.clone();
             match tokio::time::timeout(handshake_timeout, self.accept(on_upgrade, &ca)).await {
-                Ok(Ok(())) => {}
+                Ok(Ok(())) => return,
                 Ok(Err(reason)) => tracing::warn!(%host, port, %reason, "MITM session rejected"),
                 Err(_) => tracing::warn!(%host, port, "downstream TLS handshake timed out"),
             }
+            audit::record_connect(
+                "https",
+                &host,
+                port,
+                &Outcome::Rejected,
+                StatusCode::OK,
+                &stats,
+            );
         });
     }
 

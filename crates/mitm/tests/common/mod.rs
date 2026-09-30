@@ -237,3 +237,17 @@ pub async fn exchange(tls: &mut TlsStream<TcpStream>, request: &str) -> String {
     let _ = tls.read_to_end(&mut response).await;
     String::from_utf8(response).unwrap()
 }
+
+pub async fn eventually<F, Fut>(what: &str, mut condition: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    for _ in 0..100 {
+        if condition().await {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("timed out waiting for {what}");
+}

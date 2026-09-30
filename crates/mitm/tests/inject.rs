@@ -246,6 +246,40 @@ async fn dummy_over_plain_http_is_403_and_nothing_reaches_upstream() {
 }
 
 #[tokio::test]
+async fn dummy_over_plain_http_to_its_own_bound_destination_is_403_and_never_injected() {
+    const PLAIN: &str = "plain.example.test";
+    install_crypto_provider();
+    let plain = MockUpstream::http().start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let dev_ca = Arc::new(CertificateAuthority::init(dir.path()).unwrap());
+    let upstream = Upstream::with_testing_hooks(TestingHooks {
+        extra_trust_anchors: Vec::new(),
+        resolve_overrides: [(PLAIN.to_string(), plain.addr())].into_iter().collect(),
+    })
+    .unwrap();
+    let mut spec = rule("plain", PLAIN, OPENAI_DUMMY, header("authorization"));
+    spec.port = Some(plain.port());
+    let mut secrets = Secrets::new();
+    secrets.insert("plain", SecretString::from(fake_secret("plain")));
+    let mut config = ProxyConfig::new("127.0.0.1:0".parse().unwrap());
+    config.intercept = Some(Intercept::new(dev_ca, [PLAIN]));
+    config.injector = Arc::new(Injector::new(RuleSet::new(vec![spec]).unwrap(), secrets).unwrap());
+    let proxy = Proxy::bind(config, upstream).await.unwrap();
+
+    let response = raw_exchange(
+        proxy.local_addr(),
+        &format!(
+            "GET {} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {OPENAI_DUMMY}\r\nConnection: close\r\n\r\n",
+            plain.url(PLAIN, "/x")
+        ),
+    )
+    .await;
+
+    assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+    assert_eq!(plain.request_count(), 0);
+}
+
+#[tokio::test]
 async fn basic_auth_and_query_parameters_are_injected() {
     for (downstream, alpn) in COMBOS {
         let fixture = Fixture::with(downstream, alpn).await;

@@ -169,6 +169,7 @@ async fn userinfo_stays_out_of_the_host_header_and_logs() {
 #[tokio::test]
 async fn forwards_plain_http_to_an_ipv6_literal() {
     if std::net::TcpListener::bind("[::1]:0").is_err() {
+        eprintln!("skipping forwards_plain_http_to_an_ipv6_literal: cannot bind [::1]");
         return;
     }
     let proxy = start_proxy().await;
@@ -259,6 +260,52 @@ async fn reqwest_reaches_https_mock_through_connect() {
         .unwrap();
 
     assert_eq!(echo.path, "/via-connect");
+}
+
+fn connect_audit_lines(logs: &credshim_testkit::LogCapture, host: &str, port: u16) -> Vec<String> {
+    let needle = format!(r#"host="{host}" port={port} method=CONNECT path="""#);
+    logs.contents()
+        .lines()
+        .filter(|line| line.contains(credshim_mitm::AUDIT_TARGET) && line.contains(&needle))
+        .map(str::to_string)
+        .collect()
+}
+
+#[tokio::test]
+async fn connect_tunnels_to_non_intercepted_hosts_are_audited() {
+    let logs = capture_logs();
+    let proxy = start_proxy().await;
+    let (ca, mock) = https_mock().await;
+    let client = client_via(proxy.local_addr(), Some(ca.cert_der().as_ref()));
+    let closed = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap()
+    };
+
+    client
+        .get(mock.url("localhost", "/audited"))
+        .send()
+        .await
+        .unwrap();
+    let mut tcp = TcpStream::connect(proxy.local_addr()).await.unwrap();
+    tcp.write_all(format!("CONNECT {closed} HTTP/1.1\r\nHost: {closed}\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    read_head(&mut tcp).await;
+
+    let opened = connect_audit_lines(&logs, "localhost", mock.port());
+    assert_eq!(opened.len(), 1, "{opened:#?}");
+    assert!(
+        opened[0].contains(r#"ingress="connect" scheme="tcp""#)
+            && opened[0].ends_with(r#"rules= decision="tunnel" status=200"#),
+        "{opened:#?}"
+    );
+    let refused = connect_audit_lines(&logs, "127.0.0.1", closed.port());
+    assert_eq!(refused.len(), 1, "{refused:#?}");
+    assert!(
+        refused[0].ends_with(r#"rules= decision="tunnel" status=502"#),
+        "{refused:#?}"
+    );
 }
 
 #[tokio::test]

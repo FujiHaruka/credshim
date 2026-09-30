@@ -605,6 +605,44 @@ fn secrets_are_checked_when_the_injector_is_built() {
 }
 
 #[test]
+fn empty_and_header_unsafe_secrets_are_named_without_their_value() {
+    let build = |value: &str| {
+        let rules = RuleSet::new(vec![spec(
+            "openai",
+            "api.openai.com",
+            OPENAI_DUMMY,
+            header("authorization"),
+        )])
+        .unwrap();
+        let mut secrets = Secrets::new();
+        secrets.insert("openai", SecretString::from(value));
+        Injector::new(rules, secrets).unwrap_err()
+    };
+
+    let empty = build("");
+    assert_eq!(
+        empty,
+        InjectorError::EmptySecret {
+            secret: "openai".into()
+        }
+    );
+    assert!(empty.to_string().contains("\"openai\""), "{empty}");
+
+    let smuggling = "abc\r\nX-Evil: 1";
+    let unsafe_header = build(smuggling);
+    assert_eq!(
+        unsafe_header,
+        InjectorError::NotHeaderSafe {
+            secret: "openai".into()
+        }
+    );
+    let rendered = format!("{unsafe_header} {unsafe_header:?}");
+    assert!(rendered.contains("\"openai\""), "{rendered}");
+    assert!(!rendered.contains("X-Evil"), "{rendered}");
+    assert!(!rendered.contains("abc"), "{rendered}");
+}
+
+#[test]
 fn debug_output_never_contains_secret_values() {
     let rendered = format!("{:?}", injector());
 

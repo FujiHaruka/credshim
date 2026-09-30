@@ -7,7 +7,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use common::{
     COMBOS, Downstream, assert_large_bodies_intact, assert_sse_unbuffered, client_for, connect,
-    exchange, h2_over_proxy, tls_over, tls_with_alpn,
+    eventually, exchange, h2_over_proxy, tls_over, tls_with_alpn,
 };
 use credshim_core::{InjectSpec, Injector, RuleSet, RuleSpec, Secrets};
 use credshim_mitm::{CertificateAuthority, Intercept, Proxy, ProxyConfig, TestingHooks, Upstream};
@@ -116,16 +116,6 @@ fn get(url: String) -> http::Request<Full<Bytes>> {
         .unwrap()
 }
 
-async fn eventually(what: &str, mut condition: impl FnMut() -> bool) {
-    for _ in 0..100 {
-        if condition() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("timed out waiting for {what}");
-}
-
 #[tokio::test]
 async fn sse_is_unbuffered_in_every_protocol_combination() {
     for (downstream, alpn) in COMBOS {
@@ -168,7 +158,7 @@ async fn client_disconnect_mid_sse_closes_the_upstream_stream() {
 
         eventually(
             &format!("upstream SSE close with {downstream:?}/{alpn:?}"),
-            || setup.mock.sse_streams_closed() == 1,
+            || std::future::ready(setup.mock.sse_streams_closed() == 1),
         )
         .await;
     }
@@ -277,7 +267,7 @@ async fn h2_streams_run_concurrently_and_only_the_misdirected_one_is_rejected() 
             })
         };
         eventually("the slow stream to reach upstream", || {
-            setup.mock.request_count() == 1
+            std::future::ready(setup.mock.request_count() == 1)
         })
         .await;
         let mut authorized = get(format!("https://{API}/v1/echo"));

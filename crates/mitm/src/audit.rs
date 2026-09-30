@@ -16,6 +16,8 @@ pub(crate) enum Outcome {
     Limited(String),
     Misdirected,
     Failed(String),
+    Tunnel,
+    Rejected,
 }
 
 impl Outcome {
@@ -29,6 +31,8 @@ impl Outcome {
             Outcome::Limited(_) => "limited",
             Outcome::Misdirected => "misdirected",
             Outcome::Failed(_) => "error",
+            Outcome::Tunnel => "tunnel",
+            Outcome::Rejected => "rejected",
         }
     }
 
@@ -40,7 +44,9 @@ impl Outcome {
             | Outcome::NotAllowed(rule)
             | Outcome::Limited(rule)
             | Outcome::Failed(rule) => rule.clone(),
-            Outcome::Pass | Outcome::Misdirected => String::new(),
+            Outcome::Pass | Outcome::Misdirected | Outcome::Tunnel | Outcome::Rejected => {
+                String::new()
+            }
         }
     }
 }
@@ -127,7 +133,7 @@ impl Stats {
             Outcome::NotAllowed(name) => bump(name, |c| &mut c.not_allowed),
             Outcome::Limited(name) => bump(name, |c| &mut c.limited),
             Outcome::Failed(name) => bump(name, |c| &mut c.failed),
-            Outcome::Pass | Outcome::Misdirected => {}
+            Outcome::Pass | Outcome::Misdirected | Outcome::Tunnel | Outcome::Rejected => {}
         }
     }
 
@@ -153,4 +159,23 @@ pub(crate) fn record(entry: &Entry<'_>, outcome: &Outcome, status: StatusCode, s
         status = status.as_u16(),
         "request"
     );
+}
+
+pub(crate) fn record_connect(
+    scheme: &'static str,
+    host: &str,
+    port: u16,
+    outcome: &Outcome,
+    status: StatusCode,
+    stats: &Stats,
+) {
+    let entry = Entry {
+        ingress: "connect",
+        scheme,
+        host,
+        port,
+        method: &Method::CONNECT,
+        path: "",
+    };
+    record(&entry, outcome, status, stats);
 }
