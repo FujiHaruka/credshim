@@ -76,12 +76,12 @@ impl OAuth {
     pub fn exchange(&self, host: &str, port: u16, parts: &Parts) -> Option<Exchange<'_>> {
         let path = parts.uri.path();
         self.providers.iter().find_map(|provider| {
-            let kind = if provider.token.is(host, port, path) {
+            let kind = if provider.token.covers(host, port, path) {
                 EndpointKind::Token
             } else if provider
                 .revoke
                 .as_ref()
-                .is_some_and(|revoke| revoke.is(host, port, path))
+                .is_some_and(|revoke| revoke.covers(host, port, path))
             {
                 EndpointKind::Revoke
             } else {

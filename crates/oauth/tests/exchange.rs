@@ -411,3 +411,107 @@ fn provider_specs_parse_from_toml() {
         ]
     );
 }
+
+#[tokio::test]
+async fn endpoint_variants_the_upstream_may_route_alike_are_still_exchanged() {
+    let oauth = oauth();
+    for path in [
+        "/token/",
+        "/TOKEN",
+        "/token.json",
+        "/token;x",
+        "/%74oken",
+        "/token/extra",
+    ] {
+        let (result, _) = run(
+            &oauth,
+            "a.example.test",
+            path,
+            CLIENT_CREDENTIALS,
+            json(StatusCode::OK, "{\"access_token\":\"real-variant\"}"),
+        )
+        .await;
+        let body = result.unwrap().into_body();
+        assert!(
+            !String::from_utf8_lossy(&body).contains("real-variant"),
+            "{path}"
+        );
+    }
+    let parts = parts("/tokeninfo", "application/json");
+    assert!(oauth.exchange("a.example.test", 443, &parts).is_none());
+}
+
+#[tokio::test]
+async fn nested_tokens_are_swapped_too() {
+    let oauth = oauth();
+    let body = r#"{"ok":true,"access_token":"real-bot","authed_user":{"access_token":"real-user","refresh_token":"real-user-refresh","expires_in":18446744073709551615},"expires_in":1e300}"#;
+
+    let (result, _) = run(
+        &oauth,
+        "a.example.test",
+        "/token",
+        CLIENT_CREDENTIALS,
+        json(StatusCode::OK, body),
+    )
+    .await;
+
+    let reply = String::from_utf8(result.unwrap().into_body().to_vec()).unwrap();
+    assert!(!reply.contains("real-"), "{reply}");
+    let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    assert!(
+        reply["authed_user"]["refresh_token"]
+            .as_str()
+            .unwrap()
+            .starts_with("csh_rt_")
+    );
+    assert_eq!(oauth.vault().len(), 3);
+}
+
+#[tokio::test]
+async fn successful_error_responses_without_tokens_pass_through() {
+    let oauth = oauth();
+    for (content_type, body) in [
+        ("application/json", "{\"error\":\"bad_verification_code\"}"),
+        (
+            "application/x-www-form-urlencoded",
+            "error=incorrect_client_credentials&error_description=x",
+        ),
+    ] {
+        let response = Response::builder()
+            .header("content-type", content_type)
+            .body(Full::new(Bytes::from(body)))
+            .unwrap();
+        let (result, _) = run(
+            &oauth,
+            "a.example.test",
+            "/token",
+            CLIENT_CREDENTIALS,
+            response,
+        )
+        .await;
+        assert_eq!(result.unwrap().body(), body);
+    }
+}
+
+#[tokio::test]
+async fn every_revoked_query_token_is_forgotten() {
+    let oauth = oauth();
+    let a = oauth
+        .vault()
+        .issue("a", TokenKind::Access, &SecretString::from("real-1"), None);
+    let b = oauth
+        .vault()
+        .issue("a", TokenKind::Access, &SecretString::from("real-2"), None);
+
+    let (result, _) = run(
+        &oauth,
+        "a.example.test",
+        &format!("/revoke?token=junk&token={a}&token={b}"),
+        "",
+        json(StatusCode::OK, ""),
+    )
+    .await;
+
+    assert_eq!(result.unwrap().status(), StatusCode::OK);
+    assert!(oauth.vault().is_empty());
+}

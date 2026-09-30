@@ -646,6 +646,7 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "percent-encoding",
  "secrecy",
  "serde",
  "serde_json",

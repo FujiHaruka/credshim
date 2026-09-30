@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use credshim_core::{Binding, BindingError, DEFAULT_PORT, Location, Rule, RuleError, SecretRef};
 use http::Uri;
 use http::header::AUTHORIZATION;
+use percent_encoding::percent_decode_str;
 use secrecy::SecretString;
 use serde::Deserialize;
 
@@ -116,8 +117,14 @@ impl Endpoint {
         })
     }
 
-    pub(crate) fn is(&self, host: &str, port: u16, path: &str) -> bool {
-        self.host.eq_ignore_ascii_case(host) && self.port == port && self.path == path
+    pub(crate) fn covers(&self, host: &str, port: u16, path: &str) -> bool {
+        if !self.host.eq_ignore_ascii_case(host) || self.port != port {
+            return false;
+        }
+        let path = percent_decode_str(path).decode_utf8_lossy().to_lowercase();
+        let own = self.path.to_lowercase();
+        path.strip_prefix(own.trim_end_matches('/'))
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '.', ';']))
     }
 }
 

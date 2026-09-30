@@ -87,7 +87,7 @@ pub struct Exchange<'a> {
     provider: &'a Provider,
     kind: EndpointKind,
     basic_client_id: Option<String>,
-    query_token: Option<String>,
+    query_tokens: Vec<String>,
 }
 
 impl<'a> Exchange<'a> {
@@ -102,7 +102,7 @@ impl<'a> Exchange<'a> {
             provider,
             kind,
             basic_client_id: basic_client_id(&parts.headers),
-            query_token: query_token(parts),
+            query_tokens: query_tokens(parts),
         }
     }
 
@@ -201,15 +201,15 @@ impl<'a> Exchange<'a> {
             }
             None => None,
         };
-        let revoked = match (self.kind, doc.get("token").map(str::to_string)) {
-            (EndpointKind::Token, _) => None,
-            (EndpointKind::Revoke, Some(dummy))
-                if self.substitute(&mut doc, "token", &dummy, None)?.is_some() =>
+        let mut revoked = Vec::new();
+        if self.kind == EndpointKind::Revoke {
+            revoked.clone_from(&self.query_tokens);
+            if let Some(dummy) = doc.get("token").map(str::to_string)
+                && self.substitute(&mut doc, "token", &dummy, None)?.is_some()
             {
-                Some(dummy)
+                revoked.push(dummy);
             }
-            (EndpointKind::Revoke, _) => self.query_token.clone(),
-        };
+        }
         let body = if doc.touched {
             Bytes::from(doc.to_bytes().to_vec())
         } else {
@@ -247,8 +247,8 @@ impl<'a> Exchange<'a> {
                     self.rewrite_tokens(&head.headers, &body, refresh_dummy.zip(sent_refresh))?
                 }
                 EndpointKind::Revoke => {
-                    if let Some(dummy) = revoked {
-                        self.oauth.vault.remove(&dummy);
+                    for dummy in &revoked {
+                        self.oauth.vault.remove(dummy);
                     }
                     body
                 }
@@ -316,25 +316,42 @@ impl<'a> Exchange<'a> {
         }
         let mut doc = Document::parse(headers.get(header::CONTENT_TYPE), body)
             .ok_or(ExchangeError::Unreadable)?;
-        let access = SecretString::from(doc.get("access_token").ok_or(ExchangeError::Unreadable)?);
-        let expires_at = doc
-            .expires_in()
-            .map(|seconds| SystemTime::now() + Duration::from_secs(seconds));
+        if !doc.has_access_token() {
+            return if doc.get("error").is_some() && !doc.has_token() {
+                Ok(Bytes::copy_from_slice(body))
+            } else {
+                Err(ExchangeError::Unreadable)
+            };
+        }
         let vault = &self.oauth.vault;
         let provider = self.provider.name();
-        let access_dummy = vault.issue(provider, TokenKind::Access, &access, expires_at);
-        doc.set("access_token", &access_dummy);
-        if let Some(returned) = doc.get("refresh_token").map(SecretString::from) {
-            let dummy = match sent_refresh {
-                Some((dummy, sent)) if sent.expose_secret() == returned.expose_secret() => dummy,
-                rotated => {
-                    if let Some((old, _)) = rotated {
-                        vault.remove(&old);
-                    }
-                    vault.issue(provider, TokenKind::Refresh, &returned, None)
+        let (mut kept, mut rotated) = (false, false);
+        doc.rewrite_tokens(&mut |kind, real, expires_in| {
+            let real = SecretString::from(real);
+            match (kind, &sent_refresh) {
+                (TokenKind::Refresh, Some((dummy, sent)))
+                    if sent.expose_secret() == real.expose_secret() =>
+                {
+                    kept = true;
+                    dummy.clone()
                 }
-            };
-            doc.set("refresh_token", &dummy);
+                (TokenKind::Refresh, _) => {
+                    rotated = true;
+                    vault.issue(provider, kind, &real, None)
+                }
+                (TokenKind::Access, _) => {
+                    let expires_at = expires_in.and_then(|seconds| {
+                        SystemTime::now().checked_add(Duration::from_secs(seconds))
+                    });
+                    vault.issue(provider, kind, &real, expires_at)
+                }
+            }
+        });
+        if let Some((old, _)) = &sent_refresh
+            && rotated
+            && !kept
+        {
+            vault.remove(old);
         }
         Ok(Bytes::from(doc.to_bytes().to_vec()))
     }
@@ -354,10 +371,63 @@ fn basic_client_id(headers: &HeaderMap) -> Option<String> {
     Some(user)
 }
 
-fn query_token(parts: &Parts) -> Option<String> {
-    form_urlencoded::parse(parts.uri.query()?.as_bytes())
-        .find(|(name, _)| name == "token")
+fn query_tokens(parts: &Parts) -> Vec<String> {
+    let query = parts.uri.query().unwrap_or_default();
+    form_urlencoded::parse(query.as_bytes())
+        .filter(|(name, _)| name == "token")
         .map(|(_, value)| value.into_owned())
+        .collect()
+}
+
+const TOKEN_FIELDS: [(&str, TokenKind); 2] = [
+    ("access_token", TokenKind::Access),
+    ("refresh_token", TokenKind::Refresh),
+];
+
+type Swap<'a> = dyn FnMut(TokenKind, &str, Option<u64>) -> String + 'a;
+
+fn has_json_token(value: &Value, fields: &[&str]) -> bool {
+    match value {
+        Value::Object(map) => map.iter().any(|(key, value)| {
+            (fields.contains(&key.as_str()) && value.is_string()) || has_json_token(value, fields)
+        }),
+        Value::Array(items) => items.iter().any(|item| has_json_token(item, fields)),
+        _ => false,
+    }
+}
+
+fn rewrite_json(map: &mut Map<String, Value>, swap: &mut Swap<'_>) {
+    let expires_in = map.get("expires_in").and_then(json_seconds);
+    for (field, kind) in TOKEN_FIELDS {
+        if let Some(Value::String(real)) = map.get_mut(field) {
+            let dummy = swap(kind, real, expires_in);
+            real.zeroize();
+            *real = dummy;
+        }
+    }
+    for value in map.values_mut() {
+        rewrite_json_value(value, swap);
+    }
+}
+
+fn rewrite_json_value(value: &mut Value, swap: &mut Swap<'_>) {
+    match value {
+        Value::Object(map) => rewrite_json(map, swap),
+        Value::Array(items) => items
+            .iter_mut()
+            .for_each(|item| rewrite_json_value(item, swap)),
+        _ => {}
+    }
+}
+
+fn json_seconds(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(number) => number
+            .as_u64()
+            .or_else(|| number.as_f64().filter(|n| *n >= 0.0).map(|n| n as u64)),
+        Value::String(text) => text.trim().parse().ok(),
+        _ => None,
+    }
 }
 
 enum Format {
@@ -446,16 +516,43 @@ impl Document {
         }
     }
 
-    fn expires_in(&self) -> Option<u64> {
+    fn has_access_token(&self) -> bool {
+        self.has_any(&["access_token"])
+    }
+
+    fn has_token(&self) -> bool {
+        self.has_any(&TOKEN_FIELDS.map(|(field, _)| field))
+    }
+
+    fn has_any(&self, fields: &[&str]) -> bool {
         match &self.format {
-            Format::Form(_) => self.get("expires_in")?.trim().parse().ok(),
-            Format::Json(map) => match map.get("expires_in")? {
-                Value::Number(number) => number
-                    .as_u64()
-                    .or_else(|| number.as_f64().filter(|n| *n >= 0.0).map(|n| n as u64)),
-                Value::String(text) => text.trim().parse().ok(),
-                _ => None,
-            },
+            Format::Form(pairs) => pairs
+                .iter()
+                .any(|(name, _)| fields.contains(&name.as_str())),
+            Format::Json(map) => map.iter().any(|(key, value)| {
+                (fields.contains(&key.as_str()) && value.is_string())
+                    || has_json_token(value, fields)
+            }),
+        }
+    }
+
+    fn rewrite_tokens(&mut self, swap: &mut Swap<'_>) {
+        self.touched = true;
+        match &mut self.format {
+            Format::Form(pairs) => {
+                let expires_in = pairs
+                    .iter()
+                    .find(|(name, _)| name == "expires_in")
+                    .and_then(|(_, value)| value.trim().parse().ok());
+                for (name, value) in pairs.iter_mut() {
+                    if let Some((_, kind)) = TOKEN_FIELDS.iter().find(|(field, _)| field == name) {
+                        let dummy = swap(*kind, value, expires_in);
+                        value.zeroize();
+                        *value = dummy;
+                    }
+                }
+            }
+            Format::Json(map) => rewrite_json(map, swap),
         }
     }
 
