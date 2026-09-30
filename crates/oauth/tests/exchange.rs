@@ -248,6 +248,39 @@ async fn post_client_secret_and_refresh_token_are_swapped_in_the_body() {
 }
 
 #[tokio::test]
+async fn failed_refreshes_are_not_replayed_to_retries() {
+    let oauth = oauth();
+    let refresh = oauth.vault().issue(
+        "a",
+        TokenKind::Refresh,
+        &SecretString::from("real-a-refresh"),
+        None,
+    );
+    let body = format!("grant_type=refresh_token&refresh_token={refresh}");
+
+    let (first, _) = run(
+        &oauth,
+        "a.example.test",
+        "/token",
+        &body,
+        json(StatusCode::SERVICE_UNAVAILABLE, "{\"error\":\"unavailable\"}"),
+    )
+    .await;
+    assert_eq!(first.unwrap().status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let (retry, sent) = run(
+        &oauth,
+        "a.example.test",
+        "/token",
+        &body,
+        json(StatusCode::OK, "{\"access_token\":\"real-a-access\"}"),
+    )
+    .await;
+    assert!(sent.lock().unwrap().is_some());
+    assert_eq!(retry.unwrap().status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn requests_without_dummies_are_forwarded_byte_for_byte() {
     let oauth = oauth();
     let body = "grant_type=client_credentials&client_id=client-a&scope=a+b%20c";
