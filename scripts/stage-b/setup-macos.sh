@@ -80,7 +80,7 @@ socket = "$state/status.sock"
 
 # Add rules with: credshim preset openai | sudo -u $user tee -a $state/config.toml
 # then register the secret: sudo -u $user $bin secret set openai --config $state/config.toml
-# then rerun `sudo $bin service install` so $public/env carries the new dummies
+# then rerun "sudo $bin service install" so $public/env carries the new dummies
 TOML
   install -m 0600 -o "$user" -g "$user" "$tmp/config.toml" "$state/config.toml"
 fi
