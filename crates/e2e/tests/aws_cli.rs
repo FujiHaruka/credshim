@@ -74,6 +74,8 @@ impl Fixture {
             secret_access_key: "aws-secret-access-key".into(),
             services: None,
             regions: None,
+            operations: None,
+            limits: Default::default(),
         }])
         .unwrap();
         let mut signer = Signer::default();

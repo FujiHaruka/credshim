@@ -46,6 +46,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_rule(|_| {}).await
+    }
+
+    async fn with_rule(tweak: impl FnOnce(&mut AwsKeySpec)) -> Self {
         install_crypto_provider();
         let upstream_ca = TestCa::new();
         let real = AwsKeys {
@@ -73,7 +77,7 @@ impl Fixture {
         })
         .unwrap();
 
-        let rules = AwsRule::from_specs(&[AwsKeySpec {
+        let mut spec = AwsKeySpec {
             name: "aws-dev".into(),
             dummy_access_key_id: DUMMY.into(),
             access_key_id: "aws-dev-akid".into(),
@@ -85,8 +89,11 @@ impl Fixture {
                 "iam".into(),
             ]),
             regions: None,
-        }])
-        .unwrap();
+            operations: None,
+            limits: Default::default(),
+        };
+        tweak(&mut spec);
+        let rules = AwsRule::from_specs(&[spec]).unwrap();
         let mut signer = Signer::default();
         signer.insert(
             "aws-dev",
@@ -698,4 +705,115 @@ async fn aws_hosts_without_a_dummy_pass_through_untouched() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let requests = f.mock.requests();
     assert_eq!(requests[0].headers["authorization"], sent);
+}
+
+#[tokio::test]
+async fn operations_outside_the_allow_list_are_refused_with_an_aws_error() {
+    let logs = capture_logs();
+    let f = Fixture::with_rule(|spec| {
+        spec.operations = Some(vec![
+            "sts:GetCallerIdentity".into(),
+            "s3:GetObject".into(),
+            "s3:ListObjects*".into(),
+        ]);
+    })
+    .await;
+    let (status, body) = f
+        .query(STS, "sts", "Action=GetCallerIdentity&Version=2011-06-15")
+        .await;
+    assert_eq!(status, StatusCode::OK, "{}", text(&body));
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-amz-target",
+        HeaderValue::from_static("DynamoDB_20120810.ListTables"),
+    );
+    let (status, response_headers, body) = f
+        .send(
+            "POST",
+            DYNAMODB,
+            "/",
+            "dynamodb",
+            headers,
+            Body::Hashed(b"{}".to_vec()),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        response_headers["x-amzn-errortype"],
+        "CredShimOperationNotAllowed"
+    );
+    assert!(text(&body).contains("ListTables"), "{}", text(&body));
+
+    f.mock.put_object(BUCKET, "kept.txt", b"kept".to_vec());
+    let get = |path: &'static str| {
+        f.send(
+            "GET",
+            S3,
+            path,
+            "s3",
+            HeaderMap::new(),
+            Body::Hashed(Vec::new()),
+        )
+    };
+    assert_eq!(get("/kept.txt").await.0, StatusCode::OK);
+    assert_eq!(get("/?list-type=2&prefix=").await.0, StatusCode::OK);
+    let (status, _, body) = get("/kept.txt?acl").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(text(&body).contains("<Code>CredShimOperationNotAllowed</Code>"));
+    let (status, _, _) = f
+        .send(
+            "PUT",
+            S3,
+            "/new.txt",
+            "s3",
+            HeaderMap::new(),
+            Body::Hashed(b"new".to_vec()),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(f.mock.object(BUCKET, "new.txt"), None);
+    let (status, _) = f
+        .query(
+            STS,
+            "sts",
+            "Action=GetCallerIdentity&Action=GetAccessKeyInfo",
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    assert_eq!(f.verified(), 3);
+    let contents = logs.contents();
+    assert!(
+        contents.contains("reason=\"operation_not_allowed\""),
+        "{contents}"
+    );
+    assert!(contents.contains("operation=PutObject"), "{contents}");
+    assert!(contents.contains("operation=GetObjectAcl"), "{contents}");
+    assert!(contents.contains("decision=\"not_allowed\""), "{contents}");
+    logs.assert_absent(&f.secrets());
+}
+
+#[tokio::test]
+async fn requests_over_a_rule_limit_get_429_and_never_reach_aws() {
+    let logs = capture_logs();
+    let f = Fixture::with_rule(|spec| {
+        spec.limits.per_minute = Some(2);
+    })
+    .await;
+    for _ in 0..2 {
+        let (status, body) = f.query(STS, "sts", "Action=GetCallerIdentity").await;
+        assert_eq!(status, StatusCode::OK, "{}", text(&body));
+    }
+    let (status, body) = f.query(STS, "sts", "Action=GetCallerIdentity").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+        text(&body).contains("CredShimLimitExceeded"),
+        "{}",
+        text(&body)
+    );
+    assert_eq!(f.mock.requests().len(), 2);
+    let contents = logs.contents();
+    assert!(contents.contains("decision=\"limited\""), "{contents}");
+    assert!(contents.contains("reason=\"limited\""), "{contents}");
 }

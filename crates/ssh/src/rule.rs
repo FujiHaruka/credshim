@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::str::FromStr;
 
+use credshim_core::Limits;
 use serde::Deserialize;
 use ssh_key::{Fingerprint, HashAlg};
 
@@ -11,6 +12,8 @@ pub struct SshKeySpec {
     pub secret: String,
     pub host_keys: Vec<String>,
     pub users: Vec<String>,
+    #[serde(default)]
+    pub limits: Limits,
 }
 
 #[derive(Clone, Debug)]
@@ -19,6 +22,7 @@ pub struct SshRule {
     secret: String,
     host_keys: Vec<Fingerprint>,
     users: Vec<String>,
+    limits: Limits,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -49,6 +53,12 @@ pub enum SshRuleError {
         "ssh_key {rule:?}: user {user:?} must be non-empty and use only letters, digits, '.', '_' or '-'"
     )]
     InvalidUser { rule: String, user: String },
+    #[error("ssh_key {0:?}: limits must be positive")]
+    ZeroLimit(String),
+    #[error(
+        "ssh_key {0:?}: limits.concurrent does not apply to signatures; use per_minute or per_day"
+    )]
+    ConcurrentLimit(String),
 }
 
 impl SshRule {
@@ -84,11 +94,18 @@ impl SshRule {
                 rule: spec.name,
             });
         }
+        if spec.limits.concurrent.is_some() {
+            return Err(SshRuleError::ConcurrentLimit(spec.name));
+        }
+        if [spec.limits.per_minute, spec.limits.per_day].contains(&Some(0)) {
+            return Err(SshRuleError::ZeroLimit(spec.name));
+        }
         Ok(Self {
             name: spec.name,
             secret: spec.secret,
             host_keys,
             users: spec.users,
+            limits: spec.limits,
         })
     }
 
@@ -126,6 +143,10 @@ impl SshRule {
 
     pub fn binds_host_key(&self, fingerprint: &Fingerprint) -> bool {
         self.host_keys.contains(fingerprint)
+    }
+
+    pub fn limits(&self) -> Limits {
+        self.limits
     }
 
     pub fn allows_user(&self, user: &str) -> bool {

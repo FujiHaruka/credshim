@@ -77,6 +77,8 @@ impl Fixture {
                 role_name: "Developer".into(),
                 services: None,
                 regions: None,
+                operations: None,
+                limits: Default::default(),
             }],
             &sessions,
         )

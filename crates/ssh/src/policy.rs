@@ -55,6 +55,7 @@ pub enum Refusal {
     HostKeyMismatch,
     KeyMismatch,
     UnsupportedFlags,
+    Limited,
 }
 
 impl Refusal {
@@ -71,6 +72,7 @@ impl Refusal {
             Refusal::HostKeyMismatch => "hostbound_key_mismatch",
             Refusal::KeyMismatch => "key_mismatch",
             Refusal::UnsupportedFlags => "unsupported_flags",
+            Refusal::Limited => "limited",
         }
     }
 }

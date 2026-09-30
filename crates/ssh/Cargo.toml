@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 credshim-core.workspace = true
 getrandom.workspace = true
+rustix.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 signature = "2"
@@ -19,6 +20,8 @@ tracing.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+credshim-core.workspace = true
+rustix.workspace = true
 credshim-testkit.workspace = true
 getrandom.workspace = true
 serde_json.workspace = true

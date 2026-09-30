@@ -27,6 +27,8 @@ pub enum Reason {
     BadAuthorization,
     ServiceNotAllowed,
     RegionNotAllowed,
+    OperationNotAllowed,
+    Limited,
     CredentialOperation,
     UnsignedCredentialOperation,
     SignedChunks,
@@ -49,6 +51,8 @@ impl Reason {
             Reason::BadAuthorization => "bad_authorization",
             Reason::ServiceNotAllowed => "service_not_allowed",
             Reason::RegionNotAllowed => "region_not_allowed",
+            Reason::OperationNotAllowed => "operation_not_allowed",
+            Reason::Limited => "limited",
             Reason::CredentialOperation => "credential_operation",
             Reason::UnsignedCredentialOperation => "unsigned_credential_operation",
             Reason::SignedChunks => "signed_chunks",
@@ -179,6 +183,26 @@ pub fn decide<'r>(
     }
     if !hosts::is_endpoint_of(host, &auth.scope.service, &auth.scope.region) {
         return deny(Some(rule), Reason::EndpointMismatch, labels);
+    }
+    let candidates = operation::identify(&auth.scope, host, parts, &names);
+    let service = operation::signing_name(&auth.scope.service);
+    let refused = rule.refuses_operation(service, &candidates);
+    let shown = if refused {
+        candidates
+            .iter()
+            .find(|candidate| rule.refuses_operation(service, std::slice::from_ref(candidate)))
+    } else {
+        candidates.first()
+    };
+    let labels = Labels {
+        operation: shown
+            .and_then(|name| operation::label(std::slice::from_ref(name)))
+            .map(str::to_string)
+            .or(labels.operation),
+        ..labels
+    };
+    if refused {
+        return deny(Some(rule), Reason::OperationNotAllowed, labels);
     }
     let payload = if auth.scope.service == S3 {
         match s3_payload(parts) {

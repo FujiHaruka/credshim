@@ -33,6 +33,7 @@ impl World {
                 || vec![login_user()],
                 |users| users.iter().map(|u| u.to_string()).collect(),
             ),
+            limits: Default::default(),
         })
         .unwrap();
         let signer = SigningKey::from_secret(&key.secret).unwrap();

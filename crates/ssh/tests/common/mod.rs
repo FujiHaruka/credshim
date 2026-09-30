@@ -74,6 +74,7 @@ pub fn rule(name: &str, host_keys: &[String], users: &[&str]) -> SshRule {
         secret: format!("ssh-{name}"),
         host_keys: host_keys.to_vec(),
         users: users.iter().map(|user| user.to_string()).collect(),
+        limits: Default::default(),
     })
     .unwrap()
 }

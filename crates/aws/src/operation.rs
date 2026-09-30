@@ -2,8 +2,10 @@ use http::request::Parts;
 use http::{HeaderName, Method};
 use percent_encoding::percent_decode_str;
 
+use crate::auth::Scope;
 use crate::credential_operations::CREDENTIAL_OPERATIONS;
 use crate::hosts;
+use crate::rest_operations::REST_OPERATIONS;
 
 const X_AMZ_TARGET: HeaderName = HeaderName::from_static("x-amz-target");
 const MAX_NAME_LEN: usize = 128;
@@ -30,11 +32,8 @@ impl CredentialOperation {
     }
 
     fn serves(&self, scope_service: Option<&str>, host: &str) -> bool {
-        let signing_name = scope_service.map(|service| match service {
-            "s3express" => "s3",
-            other => other,
-        });
-        signing_name == Some(self.signing_name) || hosts::has_prefix(host, self.endpoint_prefix)
+        scope_service.map(signing_name) == Some(self.signing_name)
+            || hosts::has_prefix(host, self.endpoint_prefix)
     }
 
     fn matches(&self, request: &Request<'_>) -> bool {
@@ -56,16 +55,7 @@ impl CredentialOperation {
         let query_matches = query
             .split('&')
             .filter(|required| !required.is_empty())
-            .all(|required| {
-                let (key, value) = match required.split_once('=') {
-                    Some((key, value)) => (key, Some(value)),
-                    None => (required, None),
-                };
-                request
-                    .query
-                    .iter()
-                    .any(|(k, v)| k == key && value.is_none_or(|value| v == value))
-            });
+            .all(|required| request.has_query(required));
         let path_matches = path_matches(path, &request.segments)
             || path
                 .strip_prefix("/{Bucket}")
@@ -74,11 +64,149 @@ impl CredentialOperation {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct RestOperation {
+    pub signing_name: &'static str,
+    pub endpoint_prefix: &'static str,
+    pub name: &'static str,
+    pub method: &'static str,
+    pub path: &'static str,
+    pub query: &'static [&'static str],
+    pub headers: &'static [&'static str],
+}
+
+impl RestOperation {
+    fn served_by(&self, host: &str, s3_host: Option<S3Host>) -> bool {
+        if self.endpoint_prefix == S3_PREFIX {
+            s3_host.is_some()
+        } else {
+            hosts::has_prefix(host, self.endpoint_prefix)
+        }
+    }
+
+    fn matches(&self, request: &Request<'_>, s3_host: Option<S3Host>) -> bool {
+        let path = if self.endpoint_prefix == S3_PREFIX && s3_host == Some(S3Host::BucketInHost) {
+            match self.path.strip_prefix("/{Bucket}") {
+                Some(rest) => rest,
+                None => return false,
+            }
+        } else {
+            self.path
+        };
+        request.method.as_str().eq_ignore_ascii_case(self.method)
+            && self
+                .query
+                .iter()
+                .all(|required| request.has_query(required))
+            && self
+                .headers
+                .iter()
+                .all(|name| request.headers.contains_key(*name))
+            && path_matches(path, &request.segments)
+    }
+
+    fn specificity(&self) -> (usize, usize) {
+        let literals = self
+            .path
+            .split('/')
+            .filter(|part| !part.is_empty() && !part.starts_with('{'))
+            .count();
+        (self.query.len() + self.headers.len(), literals)
+    }
+}
+
+const S3_PREFIX: &str = "s3";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum S3Host {
+    BucketInHost,
+    BucketInPath,
+}
+
+fn s3_host(host: &str, region: &str) -> Option<S3Host> {
+    let host = host.to_ascii_lowercase();
+    let rest = host.strip_suffix(&format!(".{}", hosts::AWS_DOMAIN))?;
+    let legacy = format!("s3-{region}");
+    let labels: Vec<&str> = rest.split('.').collect();
+    let index = labels.iter().position(|label| {
+        [
+            "s3",
+            "s3-fips",
+            "s3-accesspoint",
+            "s3-accesspoint-fips",
+            "s3-external-1",
+            legacy.as_str(),
+        ]
+        .contains(label)
+    })?;
+    Some(if index == 0 {
+        S3Host::BucketInPath
+    } else {
+        S3Host::BucketInHost
+    })
+}
+
 struct Request<'a> {
     method: &'a Method,
+    headers: &'a http::HeaderMap,
     segments: Vec<String>,
     query: Vec<(String, String)>,
     names: &'a [String],
+}
+
+impl<'a> Request<'a> {
+    fn new(parts: &'a Parts, names: &'a [String]) -> Self {
+        Self {
+            method: &parts.method,
+            headers: &parts.headers,
+            segments: segments(parts.uri.path()),
+            query: form_urlencoded::parse(parts.uri.query().unwrap_or_default().as_bytes())
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect(),
+            names,
+        }
+    }
+
+    fn has_query(&self, required: &str) -> bool {
+        let (key, value) = match required.split_once('=') {
+            Some((key, value)) => (key, Some(value)),
+            None => (required, None),
+        };
+        self.query
+            .iter()
+            .any(|(k, v)| k == key && value.is_none_or(|value| v == value))
+    }
+}
+
+pub fn signing_name(scope_service: &str) -> &str {
+    match scope_service {
+        "s3express" => "s3",
+        other => other,
+    }
+}
+
+pub fn identify(scope: &Scope, host: &str, parts: &Parts, names: &[String]) -> Vec<String> {
+    let service = signing_name(&scope.service);
+    let request = Request::new(parts, names);
+    let s3_host = s3_host(host, &scope.region);
+    let start = REST_OPERATIONS.partition_point(|op| op.signing_name < service);
+    let matched: Vec<&RestOperation> = REST_OPERATIONS[start..]
+        .iter()
+        .take_while(|op| op.signing_name == service)
+        .filter(|op| op.served_by(host, s3_host) && op.matches(&request, s3_host))
+        .collect();
+    let best = matched.iter().map(|op| op.specificity()).max();
+    let mut found: Vec<String> = Vec::new();
+    let most_specific = matched
+        .iter()
+        .filter(|op| Some(op.specificity()) == best)
+        .map(|op| op.name.to_string());
+    for name in names.iter().cloned().chain(most_specific) {
+        if !found.iter().any(|seen| seen.eq_ignore_ascii_case(&name)) {
+            found.push(name);
+        }
+    }
+    found
 }
 
 pub fn names(parts: &Parts, body: Option<&[u8]>) -> Vec<String> {
@@ -132,14 +260,7 @@ pub fn credential_operation(
     parts: &Parts,
     names: &[String],
 ) -> Option<&'static CredentialOperation> {
-    let request = Request {
-        method: &parts.method,
-        segments: segments(parts.uri.path()),
-        query: form_urlencoded::parse(parts.uri.query().unwrap_or_default().as_bytes())
-            .map(|(key, value)| (key.into_owned(), value.into_owned()))
-            .collect(),
-        names,
-    };
+    let request = Request::new(parts, names);
     CREDENTIAL_OPERATIONS
         .iter()
         .find(|op| op.serves(scope_service, host) && op.matches(&request))

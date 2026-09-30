@@ -2,9 +2,9 @@ use std::io;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
-use credshim_core::AUDIT_TARGET;
+use credshim_core::{AUDIT_TARGET, Limiter};
 use ssh_agent_lib::proto::extension::SessionBind;
 use ssh_agent_lib::proto::{Identity, PublicCredential, Request, Response, SignRequest};
 use ssh_agent_lib::ssh_encoding::{Decode, Encode};
@@ -14,7 +14,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
 use crate::key::SigningKey;
-use crate::policy::{AgentKey, Connection, Decision};
+use crate::policy::{AgentKey, Connection, Decision, Refusal};
 use crate::rule::SshRule;
 
 pub const MAX_MESSAGE_LEN: usize = 256 * 1024;
@@ -26,6 +26,8 @@ const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 pub struct Agent {
     keys: Vec<AgentKey>,
     signers: Vec<SigningKey>,
+    clients: Vec<u32>,
+    limiter: Limiter,
 }
 
 impl Agent {
@@ -37,13 +39,29 @@ impl Agent {
                 (AgentKey { rule, public }, signer)
             })
             .unzip();
-        Self { keys, signers }
+        Self {
+            keys,
+            signers,
+            clients: vec![rustix::process::geteuid().as_raw()],
+            limiter: Limiter::default(),
+        }
+    }
+
+    pub fn with_clients(mut self, uids: Vec<u32>) -> Self {
+        self.clients = uids;
+        self
     }
 
     pub fn bind(self: Arc<Self>, path: &Path) -> io::Result<JoinHandle<()>> {
         remove_stale_socket(path)?;
         let listener = UnixListener::bind(path)?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        let own = rustix::process::geteuid().as_raw();
+        let mode = if self.clients.iter().all(|uid| *uid == own) {
+            0o600
+        } else {
+            0o666
+        };
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
         tracing::info!(socket = %path.display(), keys = self.keys.len(), "ssh agent listening");
         Ok(tokio::spawn(self.serve(listener)))
     }
@@ -55,6 +73,20 @@ impl Agent {
                 tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
                 continue;
             };
+            match stream.peer_cred() {
+                Ok(peer) if self.clients.contains(&peer.uid()) => {}
+                Ok(peer) => {
+                    tracing::warn!(
+                        uid = peer.uid(),
+                        "ssh agent connection refused: uid is not in [ssh] client_uids"
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "ssh agent connection refused: peer credentials unavailable");
+                    continue;
+                }
+            }
             let Ok(slot) = slots.clone().try_acquire_owned() else {
                 tracing::warn!("ssh agent connection refused: {MAX_CONNECTIONS} already open");
                 continue;
@@ -128,7 +160,18 @@ impl Agent {
     }
 
     fn sign(&self, connection: &Connection, request: &SignRequest) -> Response {
-        let decision = connection.decide(&self.keys, request);
+        let mut decision = connection.decide(&self.keys, request);
+        if let Some(index) = decision.approved() {
+            let rule = &self.keys[index].rule;
+            let admitted = self.limiter.admit(
+                [(rule.name(), rule.limits())],
+                Instant::now(),
+                SystemTime::now(),
+            );
+            if admitted.is_err() {
+                decision.refusal = Some(Refusal::Limited);
+            }
+        }
         let (response, outcome) = match decision.approved() {
             Some(index) => match self.signers[index].sign(&request.data) {
                 Ok(signature) => (Response::SignResponse(signature), "sign"),

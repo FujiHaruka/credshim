@@ -5,12 +5,16 @@ pub mod operation;
 pub mod policy;
 pub mod refusal;
 pub mod resign;
+#[rustfmt::skip]
+mod rest_operations;
 pub mod rule;
 mod service_endpoints;
 pub mod sso;
 
 use std::sync::Arc;
+use std::time::{Instant, SystemTime};
 
+use credshim_core::{Limiter, Permit};
 use http::request::Parts;
 
 pub use auth::{AuthError, Scope, SigV4Auth};
@@ -28,6 +32,7 @@ pub struct Aws {
     signer: Signer,
     sso: Option<Arc<SsoProvider>>,
     max_body: usize,
+    limiter: Limiter,
 }
 
 impl Aws {
@@ -37,6 +42,7 @@ impl Aws {
             signer,
             sso: None,
             max_body: DEFAULT_MAX_BODY,
+            limiter: Limiter::default(),
         }
     }
 
@@ -60,6 +66,16 @@ impl Aws {
                     .await
             }
         }
+    }
+
+    pub fn admit(&self, rule: &AwsRule) -> Option<Permit> {
+        self.limiter
+            .admit(
+                [(rule.name(), rule.limits())],
+                Instant::now(),
+                SystemTime::now(),
+            )
+            .ok()
     }
 
     pub fn with_max_body(mut self, max_body: usize) -> Self {

@@ -22,6 +22,8 @@ fn role(name: &str, dummy: &str) -> AwsSsoRoleSpec {
         role_name: "Developer".into(),
         services: None,
         regions: None,
+        operations: None,
+        limits: Default::default(),
     }
 }
 
@@ -124,6 +126,8 @@ fn static_keys_and_sso_roles_share_one_namespace_and_never_overlap() {
         secret_access_key: "secret".into(),
         services: None,
         regions: None,
+        operations: None,
+        limits: Default::default(),
     };
     assert_eq!(
         AwsRule::from_config(

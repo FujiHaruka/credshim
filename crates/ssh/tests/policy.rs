@@ -261,6 +261,7 @@ fn ssh_key_rules_are_validated() {
         secret: "ssh-github".into(),
         host_keys: host_keys.iter().map(|s| s.to_string()).collect(),
         users: users.iter().map(|s| s.to_string()).collect(),
+        limits: Default::default(),
     };
     let github = "SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU";
     assert!(SshRule::from_spec(spec(&[github], &["git"])).is_ok());

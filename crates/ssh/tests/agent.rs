@@ -218,3 +218,107 @@ async fn connections_beyond_the_cap_are_closed_and_slots_are_reused() {
     }
     assert!(matches!(reply, Some(Response::IdentitiesAnswer(_))));
 }
+
+fn limited_setup(limits: credshim_core::Limits) -> Setup {
+    let dir = tempfile::Builder::new().prefix("cs").tempdir().unwrap();
+    let host = HostKey::generate();
+    let user = UserKey::generate();
+    let signer = SigningKey::from_secret(&user.secret).unwrap();
+    let rule = credshim_ssh::SshRule::from_spec(credshim_ssh::SshKeySpec {
+        name: "agent".into(),
+        secret: "ssh-agent".into(),
+        host_keys: vec![host.fingerprint()],
+        users: vec!["git".into()],
+        limits,
+    })
+    .unwrap();
+    let agent = Arc::new(Agent::new(vec![(rule, signer)]))
+        .bind(&dir.path().join("agent.sock"))
+        .unwrap();
+    Setup {
+        dir,
+        host,
+        user,
+        _agent: agent,
+    }
+}
+
+async fn sign_once(setup: &Setup) -> Response {
+    let mut client = setup.client().await;
+    let id = session_id(32);
+    assert_eq!(
+        client.bind(setup.host.bind(&id, false)).await,
+        Response::Success
+    );
+    let data = Auth::hostbound(&id, "git", &setup.user, &setup.host).to_bytes();
+    client
+        .send(Request::SignRequest(sign_request(&setup.user, data)))
+        .await
+}
+
+#[tokio::test]
+async fn signatures_beyond_a_rule_limit_are_refused_and_audited() {
+    let logs = credshim_testkit::capture_logs();
+    let setup = limited_setup(credshim_core::Limits {
+        per_minute: Some(2),
+        ..Default::default()
+    });
+    for _ in 0..2 {
+        assert!(matches!(sign_once(&setup).await, Response::SignResponse(_)));
+    }
+    assert_eq!(sign_once(&setup).await, Response::Failure);
+    let contents = logs.contents();
+    assert!(
+        contents.contains("decision=\"deny\" reason=\"limited\""),
+        "{contents}"
+    );
+}
+
+#[test]
+fn concurrent_and_zero_limits_are_rejected_for_ssh_keys() {
+    let spec = |limits| credshim_ssh::SshKeySpec {
+        name: "agent".into(),
+        secret: "ssh-agent".into(),
+        host_keys: vec!["SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU".into()],
+        users: vec!["git".into()],
+        limits,
+    };
+    assert!(matches!(
+        credshim_ssh::SshRule::from_spec(spec(credshim_core::Limits {
+            concurrent: Some(1),
+            ..Default::default()
+        })),
+        Err(credshim_ssh::SshRuleError::ConcurrentLimit(_))
+    ));
+    assert!(matches!(
+        credshim_ssh::SshRule::from_spec(spec(credshim_core::Limits {
+            per_day: Some(0),
+            ..Default::default()
+        })),
+        Err(credshim_ssh::SshRuleError::ZeroLimit(_))
+    ));
+}
+
+#[tokio::test]
+async fn connections_from_uids_outside_the_client_list_are_closed() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::Builder::new().prefix("cs").tempdir().unwrap();
+    let user = UserKey::generate();
+    let own = rustix::process::geteuid().as_raw();
+    let path = dir.path().join("agent.sock");
+    let _agent = Arc::new(
+        Agent::new(vec![(
+            rule("agent", &[HostKey::generate().fingerprint()], &["git"]),
+            SigningKey::from_secret(&user.secret).unwrap(),
+        )])
+        .with_clients(vec![own.wrapping_add(1)]),
+    )
+    .bind(&path)
+    .unwrap();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o666
+    );
+    let mut client = Client::connect(&path).await;
+    assert_eq!(client.raw(&encode(&Request::RequestIdentities)).await, None);
+}

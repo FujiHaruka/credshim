@@ -16,6 +16,8 @@ fn spec(name: &str, dummy: &str) -> AwsKeySpec {
         secret_access_key: format!("{name}-secret"),
         services: None,
         regions: None,
+        operations: None,
+        limits: Default::default(),
     }
 }
 
@@ -783,4 +785,235 @@ fn the_host_must_be_an_endpoint_of_the_scope_service_and_region() {
         ),
         Decision::Resign(_)
     ));
+}
+
+fn identified(
+    method: &str,
+    host: &str,
+    uri: &str,
+    service: &str,
+    extra: &[(&str, &str)],
+) -> Vec<String> {
+    let parts = signed(method, uri, service, extra);
+    let scope = SigV4Auth::from_headers(&parts.headers)
+        .unwrap()
+        .unwrap()
+        .scope;
+    let names = credshim_aws::operation::names(&parts, None);
+    credshim_aws::operation::identify(&scope, host, &parts, &names)
+}
+
+type RouteCase<'a> = (
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a [(&'a str, &'a str)],
+    &'a [&'a str],
+);
+
+#[test]
+fn rest_operations_are_identified_by_their_most_specific_route() {
+    let virtual_host = "bucket.s3.ap-northeast-1.amazonaws.com";
+    let path_style = "s3.ap-northeast-1.amazonaws.com";
+    let cases: &[RouteCase<'_>] = &[
+        ("GET", virtual_host, "/a/b.txt", &[], &["GetObject"]),
+        ("GET", path_style, "/bucket/a/b.txt", &[], &["GetObject"]),
+        (
+            "GET",
+            virtual_host,
+            "/?list-type=2&prefix=",
+            &[],
+            &["ListObjectsV2"],
+        ),
+        ("GET", virtual_host, "/", &[], &["ListObjects"]),
+        ("GET", path_style, "/bucket", &[], &["ListObjects"]),
+        (
+            "GET",
+            virtual_host,
+            "/a.txt?uploadId=1",
+            &[],
+            &["ListParts"],
+        ),
+        ("GET", virtual_host, "/a.txt?acl", &[], &["GetObjectAcl"]),
+        ("GET", virtual_host, "/?acl", &[], &["GetBucketAcl"]),
+        ("PUT", virtual_host, "/a.txt", &[], &["PutObject"]),
+        (
+            "PUT",
+            virtual_host,
+            "/a.txt?partNumber=1&uploadId=1",
+            &[],
+            &["UploadPart"],
+        ),
+        (
+            "PUT",
+            virtual_host,
+            "/a.txt",
+            &[("x-amz-copy-source", "other/b.txt")],
+            &["CopyObject"],
+        ),
+        (
+            "GET",
+            virtual_host,
+            "/?lifecycle",
+            &[],
+            &["GetBucketLifecycle", "GetBucketLifecycleConfiguration"],
+        ),
+        ("GET", virtual_host, "/a/../b.txt", &[], &["GetObject"]),
+    ];
+    for (method, host, uri, headers, expected) in cases {
+        assert_eq!(
+            identified(method, host, uri, "s3", headers),
+            *expected,
+            "{method} {host}{uri}"
+        );
+    }
+    assert_eq!(
+        identified(
+            "GET",
+            "lambda.ap-northeast-1.amazonaws.com",
+            "/2015-03-31/functions/",
+            "lambda",
+            &[]
+        ),
+        ["ListFunctions"]
+    );
+    assert_eq!(
+        identified(
+            "GET",
+            "lambda.ap-northeast-1.amazonaws.com",
+            "/2015-03-31/functions/fn/configuration",
+            "lambda",
+            &[]
+        ),
+        ["GetFunctionConfiguration"]
+    );
+    assert!(
+        identified(
+            "GET",
+            "lambda.ap-northeast-1.amazonaws.com",
+            "/not-an-operation",
+            "lambda",
+            &[]
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        identified(
+            "POST",
+            "sts.ap-northeast-1.amazonaws.com",
+            "/?Action=GetCallerIdentity",
+            "sts",
+            &[]
+        ),
+        ["GetCallerIdentity"]
+    );
+}
+
+fn with_operations(operations: &[&str]) -> Vec<AwsRule> {
+    let mut rule = spec("dev", DUMMY);
+    rule.operations = Some(operations.iter().map(|op| op.to_string()).collect());
+    AwsRule::from_specs(&[rule]).unwrap()
+}
+
+#[test]
+fn every_identified_operation_must_be_on_the_allow_list() {
+    let rules = with_operations(&["sts:GetCallerIdentity", "s3:Get*", "s3:ListObjects*"]);
+    let s3 = "bucket.s3.ap-northeast-1.amazonaws.com";
+    let decide = |method: &str, host: &str, uri: &str, service: &str| {
+        let parts = signed(
+            method,
+            uri,
+            service,
+            &[("x-amz-content-sha256", "UNSIGNED-PAYLOAD")],
+        );
+        credshim_aws::policy::decide(&rules, host, &parts, Some(b""))
+    };
+    assert!(matches!(
+        decide("GET", s3, "/a.txt", "s3"),
+        Decision::Resign(_)
+    ));
+    assert!(matches!(
+        decide("GET", s3, "/a.txt?acl", "s3"),
+        Decision::Resign(_)
+    ));
+    assert!(matches!(
+        decide("GET", s3, "/?list-type=2", "s3"),
+        Decision::Resign(_)
+    ));
+    assert_eq!(
+        reason(decide("PUT", s3, "/a.txt", "s3")),
+        Reason::OperationNotAllowed
+    );
+    assert_eq!(
+        reason(decide("DELETE", s3, "/a.txt", "s3")),
+        Reason::OperationNotAllowed
+    );
+    let sts = "sts.ap-northeast-1.amazonaws.com";
+    assert!(matches!(
+        decide("POST", sts, "/?Action=getcalleridentity", "sts"),
+        Decision::Resign(_)
+    ));
+    assert_eq!(
+        reason(decide(
+            "POST",
+            sts,
+            "/?Action=GetCallerIdentity&Action=GetAccessKeyInfo",
+            "sts"
+        )),
+        Reason::OperationNotAllowed
+    );
+    assert_eq!(
+        reason(decide("POST", sts, "/", "sts")),
+        Reason::OperationNotAllowed
+    );
+    let other_service = with_operations(&["s3:GetCallerIdentity"]);
+    let parts = signed("POST", "/?Action=GetCallerIdentity", "sts", &[]);
+    assert_eq!(
+        reason(credshim_aws::policy::decide(
+            &other_service,
+            sts,
+            &parts,
+            Some(b"")
+        )),
+        Reason::OperationNotAllowed
+    );
+}
+
+#[test]
+fn operation_patterns_and_limits_are_validated() {
+    for bad in [
+        "GetObject",
+        "S3:GetObject",
+        "s3:",
+        "s3:Get*Object",
+        "s3:Get-Object",
+        ":GetObject",
+    ] {
+        let mut rule = spec("dev", DUMMY);
+        rule.operations = Some(vec![bad.to_string()]);
+        assert!(
+            matches!(
+                AwsRule::from_specs(&[rule]),
+                Err(AwsRuleError::InvalidOperation { .. })
+            ),
+            "{bad}"
+        );
+    }
+    let mut rule = spec("dev", DUMMY);
+    rule.operations = Some(Vec::new());
+    assert_eq!(
+        AwsRule::from_specs(&[rule]).unwrap_err(),
+        AwsRuleError::NoOperations("dev".into())
+    );
+    for wildcard in ["s3:*", "ec2:Describe*"] {
+        let mut rule = spec("dev", DUMMY);
+        rule.operations = Some(vec![wildcard.to_string()]);
+        assert!(AwsRule::from_specs(&[rule]).is_ok(), "{wildcard}");
+    }
+    let mut rule = spec("dev", DUMMY);
+    rule.limits.per_day = Some(0);
+    assert_eq!(
+        AwsRule::from_specs(&[rule]).unwrap_err(),
+        AwsRuleError::ZeroLimit("dev".into())
+    );
 }

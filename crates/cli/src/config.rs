@@ -58,6 +58,7 @@ pub struct AwsConfig {
 #[serde(deny_unknown_fields)]
 pub struct SshConfig {
     pub socket: Option<PathBuf>,
+    pub client_uids: Option<Vec<u32>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -130,6 +131,17 @@ pub fn load(explicit: Option<&Path>) -> anyhow::Result<Loaded> {
     config
         .check_env_names()
         .and_then(|()| Ok(SshRule::from_specs(&config.ssh_keys).map(drop)?))
+        .and_then(|()| {
+            anyhow::ensure!(
+                config
+                    .ssh
+                    .client_uids
+                    .as_ref()
+                    .is_none_or(|uids| !uids.is_empty()),
+                "[ssh] client_uids must list at least one uid"
+            );
+            Ok(())
+        })
         .and_then(|()| config.check_aws_keys())
         .with_context(|| format!("invalid config {}", path.display()))?;
     Ok(Loaded {

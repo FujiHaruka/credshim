@@ -649,7 +649,11 @@ fn start_ssh_agent(
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     let path = config.ssh_socket()?;
-    Arc::new(Agent::new(entries))
+    let mut agent = Agent::new(entries);
+    if let Some(uids) = &config.ssh.client_uids {
+        agent = agent.with_clients(uids.clone());
+    }
+    Arc::new(agent)
         .bind(&path)
         .with_context(|| format!("could not open ssh agent socket {}", path.display()))
 }
@@ -686,8 +690,10 @@ fn check_state_paths(config: &config::Config) -> anyhow::Result<()> {
     if let Some(path) = &config.audit.path {
         harden::check_private(path, "audit log")?;
     }
-    if !config.ssh_keys.is_empty() {
-        harden::check_private(&config.ssh_socket()?, "ssh agent socket")?;
+    if !config.ssh_keys.is_empty()
+        && let Some(dir) = config.ssh_socket()?.parent()
+    {
+        harden::check_private(dir, "directory holding the ssh agent socket")?;
     }
     Ok(())
 }

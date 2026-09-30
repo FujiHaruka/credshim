@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, HashSet};
 
+use credshim_core::Limits;
 use credshim_core::dummy::ISSUED_PREFIXES;
 use credshim_core::rule::{MAX_DUMMY_LEN, MIN_DUMMY_LEN, is_identifier, is_valid_dummy};
 use serde::Deserialize;
@@ -17,6 +18,9 @@ pub struct AwsKeySpec {
     pub secret_access_key: String,
     pub services: Option<Vec<String>>,
     pub regions: Option<Vec<String>>,
+    pub operations: Option<Vec<String>>,
+    #[serde(default)]
+    pub limits: Limits,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -29,6 +33,9 @@ pub struct AwsSsoRoleSpec {
     pub role_name: String,
     pub services: Option<Vec<String>>,
     pub regions: Option<Vec<String>>,
+    pub operations: Option<Vec<String>>,
+    #[serde(default)]
+    pub limits: Limits,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,6 +61,53 @@ pub struct AwsRule {
     source: Source,
     services: Option<BTreeSet<String>>,
     regions: Option<BTreeSet<String>>,
+    operations: Option<Vec<OperationPattern>>,
+    limits: Limits,
+}
+
+struct Filters<'a> {
+    services: Option<&'a [String]>,
+    regions: Option<&'a [String]>,
+    operations: Option<&'a [String]>,
+    limits: Limits,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OperationPattern {
+    service: String,
+    name: String,
+    any_suffix: bool,
+}
+
+impl OperationPattern {
+    fn parse(value: &str) -> Option<Self> {
+        let (service, name) = value.split_once(':')?;
+        let (name, any_suffix) = match name.strip_suffix('*') {
+            Some(prefix) => (prefix, true),
+            None => (name, false),
+        };
+        let service_ok = !service.is_empty()
+            && service
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        let name_ok =
+            (any_suffix || !name.is_empty()) && name.bytes().all(|b| b.is_ascii_alphanumeric());
+        (service_ok && name_ok).then(|| Self {
+            service: service.to_string(),
+            name: name.to_ascii_lowercase(),
+            any_suffix,
+        })
+    }
+
+    fn allows(&self, service: &str, operation: &str) -> bool {
+        let operation = operation.to_ascii_lowercase();
+        self.service == service
+            && if self.any_suffix {
+                operation.starts_with(&self.name)
+            } else {
+                operation == self.name
+            }
+    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -88,6 +142,14 @@ pub enum AwsRuleError {
         "aws_sso_role {0:?}: role_name must be 1..=64 characters of letters, digits or '+=,.@_-'"
     )]
     InvalidRoleName(String),
+    #[error(
+        "aws_key {rule:?}: operation {value:?} must look like \"s3:GetObject\" or \"ec2:Describe*\" (lowercase service signing name, ':', letters and digits, optional trailing '*')"
+    )]
+    InvalidOperation { rule: String, value: String },
+    #[error("aws_key {0:?}: operations must list at least one operation")]
+    NoOperations(String),
+    #[error("aws_key {0:?}: limits must be positive")]
+    ZeroLimit(String),
     #[error(transparent)]
     Session(#[from] SsoSessionError),
 }
@@ -150,8 +212,12 @@ impl AwsRule {
                 access_key_id: spec.access_key_id.clone(),
                 secret_access_key: spec.secret_access_key.clone(),
             },
-            spec.services.as_deref(),
-            spec.regions.as_deref(),
+            Filters {
+                services: spec.services.as_deref(),
+                regions: spec.regions.as_deref(),
+                operations: spec.operations.as_deref(),
+                limits: spec.limits,
+            },
         )
     }
 
@@ -188,8 +254,12 @@ impl AwsRule {
                 account_id: spec.account_id.clone(),
                 role_name: spec.role_name.clone(),
             }),
-            spec.services.as_deref(),
-            spec.regions.as_deref(),
+            Filters {
+                services: spec.services.as_deref(),
+                regions: spec.regions.as_deref(),
+                operations: spec.operations.as_deref(),
+                limits: spec.limits,
+            },
         )
     }
 
@@ -197,8 +267,7 @@ impl AwsRule {
         name: String,
         dummy: &str,
         source: Source,
-        services: Option<&[String]>,
-        regions: Option<&[String]>,
+        filters: Filters<'_>,
     ) -> Result<Self, AwsRuleError> {
         if !is_valid_dummy(dummy) {
             return Err(AwsRuleError::InvalidDummy(name));
@@ -206,15 +275,38 @@ impl AwsRule {
         if ISSUED_PREFIXES.iter().any(|prefix| dummy.contains(prefix)) {
             return Err(AwsRuleError::ReservedDummy(name));
         }
-        let services = filter(&name, "services", services)?;
-        let regions = filter(&name, "regions", regions)?;
+        let services = filter(&name, "services", filters.services)?;
+        let regions = filter(&name, "regions", filters.regions)?;
+        let operations = operations(&name, filters.operations)?;
+        let limits = filters.limits;
+        if [limits.per_minute, limits.per_day, limits.concurrent].contains(&Some(0)) {
+            return Err(AwsRuleError::ZeroLimit(name));
+        }
         Ok(Self {
             name,
             dummy: dummy.to_string(),
             source,
             services,
             regions,
+            operations,
+            limits,
         })
+    }
+
+    pub fn limits(&self) -> Limits {
+        self.limits
+    }
+
+    pub fn refuses_operation(&self, service: &str, candidates: &[String]) -> bool {
+        let Some(patterns) = &self.operations else {
+            return false;
+        };
+        candidates.is_empty()
+            || candidates.iter().any(|candidate| {
+                !patterns
+                    .iter()
+                    .any(|pattern| pattern.allows(service, candidate))
+            })
     }
 
     pub fn name(&self) -> &str {
@@ -251,6 +343,28 @@ impl AwsRule {
 
 pub fn overlaps(a: &str, b: &str) -> bool {
     a.contains(b) || b.contains(a)
+}
+
+fn operations(
+    rule: &str,
+    values: Option<&[String]>,
+) -> Result<Option<Vec<OperationPattern>>, AwsRuleError> {
+    let Some(values) = values else {
+        return Ok(None);
+    };
+    if values.is_empty() {
+        return Err(AwsRuleError::NoOperations(rule.to_string()));
+    }
+    values
+        .iter()
+        .map(|value| {
+            OperationPattern::parse(value).ok_or_else(|| AwsRuleError::InvalidOperation {
+                rule: rule.to_string(),
+                value: value.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
 }
 
 fn filter(

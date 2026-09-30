@@ -16,7 +16,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_rustls::LazyConfigAcceptor;
 
 use credshim_aws::{Aws, CredentialError, Decision, Reason};
-use credshim_core::{Destination, InjectError, Injector, Verdict};
+use credshim_core::{Destination, InjectError, Injector, Permit, Verdict};
 use credshim_oauth::{Exchange, OAuth};
 
 use crate::audit::{self, AwsLabels, Outcome, Stats};
@@ -446,12 +446,12 @@ impl Session {
             let (outcome, response) = self.exchange(exchange, parts, body).await;
             return Relayed::new(outcome, response, None);
         }
-        let (outcome, body, aws) = match &self.aws {
+        let (outcome, body, aws, aws_permit) = match &self.aws {
             Some(aws) => match self.through_aws(aws, &mut parts, body, outcome).await {
                 Ok(forward) => forward,
                 Err(refused) => return *refused,
             },
-            None => (outcome, body.boxed(), None),
+            None => (outcome, body.boxed(), None, None),
         };
         if self.scrub {
             parts.headers.insert(
@@ -465,15 +465,9 @@ impl Session {
             None => self.forward(parts, body).await,
         };
         let response = self.scrubbed(&method, response);
-        let response = match permit {
-            Some(permit) => response.map(|body| {
-                Holding {
-                    body,
-                    _guard: permit,
-                }
-                .boxed()
-            }),
-            None => response,
+        let response = match (permit, aws_permit) {
+            (None, None) => response,
+            held => response.map(|body| Holding { body, _guard: held }.boxed()),
         };
         Relayed::new(outcome, response, aws)
     }
@@ -505,7 +499,7 @@ impl Session {
         parts: &mut http::request::Parts,
         body: Incoming,
         outcome: Outcome,
-    ) -> Result<(Outcome, ProxyBody, Option<AwsLabels>), Box<Relayed>> {
+    ) -> Result<(Outcome, ProxyBody, Option<AwsLabels>, Option<Permit>), Box<Relayed>> {
         let target = &self.target;
         let rule_in = |parts: &http::request::Parts| aws.first_dummy_in(parts).map(str::to_string);
         let (buffered, body) = if aws.needs_body(&target.host, parts) {
@@ -550,7 +544,7 @@ impl Session {
         match aws.decide(&target.host, parts, buffered.as_deref()) {
             Decision::Pass(labels) => {
                 let labels = aws_host.then(|| AwsLabels::new(&labels, None));
-                Ok((outcome, body, labels))
+                Ok((outcome, body, labels, None))
             }
             Decision::Deny(denial) => {
                 let rule = denial.rule.map(|rule| rule.name().to_string());
@@ -561,6 +555,30 @@ impl Session {
                     reason = denial.reason.name(),
                     "AWS request refused"
                 );
+                let labels = Some(AwsLabels::new(&denial.labels, Some(denial.reason)));
+                if denial.reason == Reason::OperationNotAllowed {
+                    let rule = rule.unwrap_or_default();
+                    let operation = denial
+                        .labels
+                        .operation
+                        .as_deref()
+                        .unwrap_or("this operation");
+                    let scope = denial.labels.scope.as_ref();
+                    let response = credshim_aws::refusal::error_response(
+                        parts,
+                        scope.map(|scope| scope.service.as_str()),
+                        StatusCode::FORBIDDEN,
+                        "CredShimOperationNotAllowed",
+                        &format!(
+                            "credshim: {operation} is not in the operations of AWS rule {rule}"
+                        ),
+                    );
+                    return Err(Box::new(Relayed::new(
+                        Outcome::NotAllowed(rule),
+                        response.map(full),
+                        labels,
+                    )));
+                }
                 let code = match denial.reason {
                     Reason::BadAuthorization | Reason::BadPayloadHash | Reason::SignedChunks => {
                         StatusCode::BAD_REQUEST
@@ -570,12 +588,27 @@ impl Session {
                 Err(Box::new(Relayed::new(
                     rule.map_or(Outcome::Blocked, Outcome::Denied),
                     status(code),
-                    Some(AwsLabels::new(&denial.labels, Some(denial.reason))),
+                    labels,
                 )))
             }
             Decision::Resign(plan) => {
                 let rule = plan.rule.name().to_string();
                 let labels = AwsLabels::new(&plan.labels, None);
+                let Some(permit) = aws.admit(plan.rule) else {
+                    tracing::warn!(%rule, host = %target.host, "AWS request exceeds the rule's limits");
+                    let response = credshim_aws::refusal::error_response(
+                        parts,
+                        Some(plan.auth.scope.service.as_str()),
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "CredShimLimitExceeded",
+                        &format!("credshim: AWS rule {rule} is over its limits"),
+                    );
+                    return Err(Box::new(Relayed::new(
+                        Outcome::Limited(rule),
+                        response.map(full),
+                        Some(AwsLabels::new(&plan.labels, Some(Reason::Limited))),
+                    )));
+                };
                 let credentials = match aws.credentials(plan.rule).await {
                     Ok(credentials) => credentials,
                     Err(err) => {
@@ -619,7 +652,7 @@ impl Session {
                     buffered.as_deref().unwrap_or_default(),
                 );
                 match signed {
-                    Ok(()) => Ok((Outcome::Resigned(rule), body, Some(labels))),
+                    Ok(()) => Ok((Outcome::Resigned(rule), body, Some(labels), Some(permit))),
                     Err(err) => {
                         tracing::warn!(%rule, host = %target.host, error = %err, "AWS request could not be re-signed");
                         let code = match err {
