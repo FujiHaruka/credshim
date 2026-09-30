@@ -146,6 +146,12 @@ credshim/
 - [ ] SSEモックの各イベントが、プロキシ経由でも溜められずに届く（送出から到着までの遅延に上限を決めてテストする）。
 - [ ] 数十MBのアップロード／ダウンロードがバイト単位で一致する。
 
+**実装メモ（Phase 1）**
+
+- `credshim_mitm::Proxy` が下流を hyper の http1 サーバーで受ける（CONNECT と絶対形式URIのプロキシ要求はどちらも h1）。listen 先がループバック以外なら `BindError::NotLoopback` で起動しない。
+- 絶対形式の転送は hyper-util の legacy `Client` に絶対URIのまま渡す。プールは scheme＋authority 単位、接続は `Upstream::connect_tcp` 経由なので `testing` の名前解決上書きも効く。Host はクライアントの値ではなくリクエスト先の authority で上書きする。
+- ログに出すのはメソッド、authority、パスまで。クエリは出さない（Phase 3 以降 `?key=` に秘密が載るため）。
+
 ## Phase 2: TLS MITM（HTTP/1.1）
 
 登録済みホストへのCONNECTだけTLSを終端し、中身を読める状態にする。このフェーズの本当の成果物は、後で差し替え判定に使う「検証済み接続コンテキスト」である。
