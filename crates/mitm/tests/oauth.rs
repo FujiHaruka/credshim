@@ -30,6 +30,7 @@ struct Options {
     vault: Option<(PathBuf, SecretString)>,
     replay_window: Duration,
     max_body: usize,
+    downstream: Downstream,
 }
 
 impl Options {
@@ -42,6 +43,7 @@ impl Options {
             vault: None,
             replay_window: Duration::from_secs(30),
             max_body: 64 * 1024,
+            downstream: Downstream::Http1,
         }
     }
 }
@@ -173,7 +175,7 @@ impl Fixture {
         client_for(
             self.proxy.local_addr(),
             self.dev_ca.cert_der().as_ref(),
-            Downstream::Http1,
+            self.options.downstream,
         )
     }
 
@@ -532,4 +534,18 @@ async fn client_secret_dummy_is_refused_away_from_the_token_endpoint() {
 
     assert_eq!(response.status(), 403);
     assert!(f.mock.bearers().is_empty());
+}
+
+#[tokio::test]
+async fn token_exchange_and_api_calls_work_over_http2() {
+    let mut options = Options::new(ClientAuthMethod::Basic, TokenFormat::Json);
+    options.downstream = Downstream::Http2;
+    let f = Fixture::new(options).await;
+
+    let first = f.exchange_code().await;
+    f.assert_app_sees_only_dummies(&first);
+    let refreshed = tokens(f.refresh(first.refresh()).await).await;
+
+    f.assert_app_sees_only_dummies(&refreshed);
+    assert_eq!(f.call_api(API_HOST, refreshed.access()).await, 200);
 }

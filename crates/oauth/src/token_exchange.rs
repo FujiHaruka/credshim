@@ -400,7 +400,7 @@ impl Document {
                 _ => return None,
             }
         } else {
-            let text = std::str::from_utf8(body).ok()?;
+            let text = std::str::from_utf8(body).ok()?.trim_ascii();
             if !text.contains('=') || text.contains(char::is_whitespace) {
                 return None;
             }

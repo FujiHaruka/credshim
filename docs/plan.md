@@ -292,6 +292,20 @@ credshim/
 - [ ] ダミーのアクセストークンをリソースホスト以外へ送ると403になる。
 - [ ] 人間が実プロバイダー（例：Google、GitHub）で一連のフローを確認する（手動マイルストーン）。
 
+**実装メモ（Phase 5）**
+
+- core のルールは「ダミー＋秘密（名前参照か値そのもの）＋束縛先の一覧」になった。束縛先は (host、port、任意の path prefix、差し替え場所) で、差し替え場所が空の束縛先は「ここに現れてよいが core は差し替えない（ボディは oauth が扱う）」を意味する。どの束縛先にも一致しない宛先にダミーがあれば従来どおり403。設定ファイルの `[[rule]]` は束縛先1つのルールになる。
+- 発行済みトークンのダミーは `csh_at_`／`csh_rt_` に英数字40文字。`Injector` は要求のヘッダー（Basic のデコード後を含む）、パス、クエリからこの形の文字列を拾い、`TokenResolver`（oauth の `OAuth`）に問い合わせて得たルールを静的ルールと同じ判定に流す。差し替え箇所は `Injector::apply` のまま1か所。保管庫に無いダミーは素通し（届くのはダミーだけ）。静的ルールのダミーにこれらの接頭辞を含めることは禁止。平文HTTPの転送路も発行済みダミーを検出して403にする。
+- 束縛：アクセストークンはリソースホスト（443、Authorization ヘッダー）と失効エンドポイント（クエリ `token`）。リフレッシュトークンはトークンエンドポイント（差し替え場所なし）と失効エンドポイント（クエリ `token`）。client_secret は静的ルール `oauth.<name>` としてトークン・失効エンドポイントに束縛し、`client_secret_basic` なら Basic 認証を core が差し替え、`client_secret_post` ならボディを oauth が差し替える。
+- トークン・失効エンドポイント（host、port、path の完全一致）への要求は `Session::relay` で `inject()` のあと `Exchange::run` に回す。ボディは `[limits] max_token_body_bytes`（既定 64KiB）まで読み、超えたら413。form と JSON の両方を解析し、ダミーがあったときだけ書き換えて送り直す（無ければ元のバイト列のまま）。上流へは `Accept-Encoding: identity` と付け直した Content-Length で送る。
+- 応答：2xx のトークン応答は JSON オブジェクトか form で `access_token` を含み、Content-Encoding が無いか identity でなければ502にして下流へ何も渡さない（fail closed）。応答の上限超過も502。access_token と refresh_token だけをダミーにし、それ以外（expires_in、scope、token_type、id_token）は変えない。2xx 以外は変更せずに返す。
+- リフレッシュ：送った本物と同じ refresh_token が返るか返らなければ既存のダミーを維持し、違えば新しいダミーを発行して古いダミーを保管庫から消す。同じダミーでのリフレッシュはダミー文字列ごとの非同期ロックで直列化し、書き換え後の応答（ダミーだけを含む）を30秒間そのまま再生する。
+- 失効：ボディの `token` は oauth が、クエリの `token` は core が差し替え、2xx なら保管庫から消す。別プロバイダーのトークンや、設定した client_id と違う client_id（ボディか Basic のユーザー部）を送る要求は上流に送らず403。
+- 保管庫は age（X25519）で暗号化した JSON を `[vault] path`（既定 `$XDG_CONFIG_HOME/credshim/oauth-vault.age`）に 0600 で原子的に置き換えて保存する。鍵は秘密ストア（macOS ではキーチェーン）の `credshim-oauth-vault-key` で、無ければ起動時に生成して保存する（外部コマンドのストアは書けないので事前登録が要る）。期限切れのアクセストークンは期限の5分後に1分ごとの掃除で消す。リフレッシュトークンは失効かローテーションまで残る。
+- id_token は `passthrough` だけ実装した。ブロック設定は必要になったら足す。
+- 監査ログはトークン・失効エンドポイントの往復を decision `oauth`、rules `oauth.<name>` で記録する。
+- モックOAuthサーバーは `credshim_testkit::MockOAuth`（認可コード＋PKCE S256、client_secret_post／basic、JSON／form 応答、ローテーションあり／なし、client credentials、失効、Bearer を検査する `/api/me`）。
+
 ## Phase 6: ハードニングとプロセス分離
 
 ここまでで機能は揃うが、同じOSユーザーでエージェントとプロキシが動く限り、原理的な保証にはならない。このフェーズで「エージェントには原理的に読めない」状態に持っていく。
@@ -397,6 +411,9 @@ client_secret = { secret = "google-client-secret", dummy = "credshim-google-secr
 client_auth = "client_secret_post"
 resource_hosts = ["www.googleapis.com", "gmail.googleapis.com"]
 id_token = "passthrough"
+
+[vault]
+path = "/var/lib/credshim/oauth-vault.age"
 
 [scrub]
 enabled = true

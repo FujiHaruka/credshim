@@ -275,12 +275,8 @@ async fn run_rejects_invalid_oauth_providers() {
         (format!("{valid}bogus = 1\n"), "invalid config"),
         (
             format!(
-                "{valid}\n{}",
-                valid
-                    .split("[[oauth]]")
-                    .nth(1)
-                    .map(|p| format!("[[oauth]]{p}"))
-                    .unwrap()
+                "{valid}\n[[oauth]]{}",
+                valid.split_once("[[oauth]]").unwrap().1
             ),
             "defined more than once",
         ),
