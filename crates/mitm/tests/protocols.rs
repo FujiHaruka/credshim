@@ -382,3 +382,26 @@ async fn websocket_to_an_h2_only_upstream_is_502() {
         other => panic!("unexpected error {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn non_websocket_upgrades_are_forwarded_as_plain_requests() {
+    let setup = Setup::new(Downstream::Http1, Alpn::H1Only).await;
+    let mut tls = setup.tls().await;
+
+    let response = exchange(
+        &mut tls,
+        &format!(
+            "GET /h2c HTTP/1.1\r\nHost: {API}\r\nConnection: upgrade, close\r\nUpgrade: h2c\r\nAuthorization: Bearer {DUMMY}\r\n\r\n"
+        ),
+    )
+    .await;
+
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    let echo: Echo =
+        serde_json::from_str(&response[response.find("\r\n\r\n").unwrap() + 4..]).unwrap();
+    assert_eq!(echo.header("upgrade"), None);
+    assert_eq!(
+        echo.header("authorization"),
+        Some(format!("Bearer {}", setup.secret).as_str())
+    );
+}

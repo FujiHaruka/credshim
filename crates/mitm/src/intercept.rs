@@ -440,20 +440,23 @@ fn websocket_upgrade(parts: &http::request::Parts) -> Option<HeaderValue> {
         .flat_map(|value| value.split(','))
         .any(|token| token.trim().eq_ignore_ascii_case("upgrade"));
     let protocol = parts.headers.get(header::UPGRADE)?;
-    connection_upgrade.then(|| protocol.clone())
+    let websocket = protocol.as_bytes().eq_ignore_ascii_case(b"websocket");
+    (connection_upgrade && websocket).then(|| protocol.clone())
 }
 
 fn join_cookies(headers: &mut http::HeaderMap) {
-    let cookies: Vec<&[u8]> = headers
-        .get_all(header::COOKIE)
-        .iter()
-        .map(HeaderValue::as_bytes)
-        .collect();
+    let cookies: Vec<&HeaderValue> = headers.get_all(header::COOKIE).iter().collect();
     if cookies.len() < 2 {
         return;
     }
-    let joined = cookies.join(&b"; "[..]);
-    if let Ok(value) = HeaderValue::from_bytes(&joined) {
+    let sensitive = cookies.iter().any(|value| value.is_sensitive());
+    let joined = cookies
+        .iter()
+        .map(|value| value.as_bytes())
+        .collect::<Vec<_>>()
+        .join(&b"; "[..]);
+    if let Ok(mut value) = HeaderValue::from_bytes(&joined) {
+        value.set_sensitive(sensitive);
         headers.insert(header::COOKIE, value);
     }
 }
@@ -476,4 +479,25 @@ fn origin_form(uri: &Uri) -> Uri {
         .cloned()
         .unwrap_or_else(|| PathAndQuery::from_static("/"));
     Uri::from(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn joined_cookie_stays_sensitive_when_any_crumb_was() {
+        let mut headers = http::HeaderMap::new();
+        let mut secret = HeaderValue::from_static("token=abc");
+        secret.set_sensitive(true);
+        headers.append(header::COOKIE, HeaderValue::from_static("a=1"));
+        headers.append(header::COOKIE, secret);
+
+        join_cookies(&mut headers);
+
+        let joined = headers.get(header::COOKIE).unwrap();
+        assert_eq!(joined, "a=1; token=abc");
+        assert!(joined.is_sensitive());
+        assert_eq!(headers.get_all(header::COOKIE).iter().count(), 1);
+    }
 }

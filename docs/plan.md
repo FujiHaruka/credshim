@@ -257,7 +257,7 @@ credshim/
 - 正規化：内側リクエストは Host を外し、URI を `https://<CONNECT先>/<path>` にして HTTP/1.1 として Client に渡す。Client が上流 h1 なら URI から Host を付け（443 は省略）、h2 なら :authority にする。接続固有ヘッダーは除去するが、`te: trailers` と `Trailer` は残す（gRPC 用）。下流 h2 で分割された Cookie は `; ` で連結する。レスポンスも接続固有ヘッダーを除去し、バージョンを HTTP/1.1 に揃える。
 - 宛先検査：URI の authority があれば一致必須、Host があれば一致必須、どちらも無ければ拒否。h1 は Host 必須のまま、h2 は :authority だけでよい。不一致は RST_STREAM ではなくそのストリームにだけ 421 を返す（クライアントが別接続で再試行できる意味のある応答で、h1 とも揃う）。
 - トレーラー：下流 h2 へは常に中継する。下流 h1 へは hyper の制約で、クライアントが `TE: trailers` を送り、かつ上流が `Trailer` ヘッダーで名前を宣言したときだけ届く（宣言の無い h2 上流のトレーラーを h1 クライアントへは渡せない）。
-- WebSocket：下流 h1 で `Connection: upgrade` と `Upgrade` があるリクエストは、差し替え（同じ `inject()`）のあと、プールを使わず ALPN `http/1.1` だけで上流へ新しく接続して送る。101 なら両側の Upgraded を `copy_bidirectional` でつなぐ。h1 を話せない上流（h2 のみ）は 502。
+- WebSocket：下流 h1 で `Connection: upgrade` と `Upgrade: websocket` があるリクエストは、差し替え（同じ `inject()`）のあと、プールを使わず ALPN `http/1.1` だけで上流へ新しく接続して送る。101 なら両側の Upgraded を `copy_bidirectional` でつなぐ。h1 を話せない上流（h2 のみ）は 502。`h2c` など websocket 以外の Upgrade は素通しのトンネルにせず、`Upgrade` を外して通常のリクエストとして中継する（トンネル内の後続リクエストが差し替えと宛先検査を通らなくなるため）。
 - バックプレッシャーとクライアント切断は hyper のボディ転送（h1 のソケット、h2 のフロー制御）に任せ、テストで確認している（遅い読み手で上流からの読み込みが止まり、SSE 途中の切断で上流のストリームが閉じる）。
 - SDK E2E の HTTP/2 は Python（httpx の `http2=True`）で確認する。Node の fetch で h2 を使うには `undici` パッケージの追加が要るため、Node は HTTP/1.1 のまま。
 
