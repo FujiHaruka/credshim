@@ -80,6 +80,7 @@ pub enum VaultError {
 struct VaultFile {
     path: PathBuf,
     identity: age::x25519::Identity,
+    written: Mutex<u64>,
 }
 
 pub struct Vault {
@@ -135,7 +136,11 @@ impl Vault {
         };
         Ok(Self {
             tokens: Mutex::new(tokens),
-            file: Some(VaultFile { path, identity }),
+            file: Some(VaultFile {
+                path,
+                identity,
+                written: Mutex::new(0),
+            }),
             generation: AtomicU64::new(0),
         })
     }
@@ -178,7 +183,7 @@ impl Vault {
                 created_at: unix_seconds(SystemTime::now()),
             },
         );
-        self.persist(&tokens);
+        self.persist(tokens);
         dummy
     }
 
@@ -194,7 +199,7 @@ impl Vault {
         let mut tokens = self.lock();
         let removed = tokens.remove(dummy).is_some();
         if removed {
-            self.persist(&tokens);
+            self.persist(tokens);
         }
         removed
     }
@@ -206,7 +211,7 @@ impl Vault {
         tokens.retain(|_, entry| entry.expires_at.is_none_or(|at| at > cutoff));
         let purged = before - tokens.len();
         if purged > 0 {
-            self.persist(&tokens);
+            self.persist(tokens);
         }
         purged
     }
@@ -217,24 +222,39 @@ impl Vault {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn persist(&self, tokens: &BTreeMap<String, Entry>) {
-        self.generation.fetch_add(1, Ordering::AcqRel);
+    fn persist(&self, tokens: MutexGuard<'_, BTreeMap<String, Entry>>) {
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let Some(file) = &self.file else {
             return;
         };
-        if let Err(err) = file.write(tokens) {
-            tracing::error!(error = %err, "could not save the OAuth token vault");
+        let snapshot = file.serialize(&tokens);
+        drop(tokens);
+        let mut written = file
+            .written
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *written > generation {
+            return;
+        }
+        match snapshot.and_then(|plaintext| file.write(&plaintext)) {
+            Ok(()) => *written = generation,
+            Err(err) => tracing::error!(error = %err, "could not save the OAuth token vault"),
         }
     }
 }
 
 impl VaultFile {
-    fn write(&self, tokens: &BTreeMap<String, Entry>) -> Result<(), VaultError> {
-        let plaintext = Zeroizing::new(
-            serde_json::to_vec(&ContentsRef { tokens })
-                .map_err(|_| corrupt(&self.path, "could not serialize"))?,
-        );
-        let ciphertext = age::encrypt(&self.identity.to_public(), &plaintext)
+    fn serialize(
+        &self,
+        tokens: &BTreeMap<String, Entry>,
+    ) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+        serde_json::to_vec(&ContentsRef { tokens })
+            .map(Zeroizing::new)
+            .map_err(|_| corrupt(&self.path, "could not serialize"))
+    }
+
+    fn write(&self, plaintext: &[u8]) -> Result<(), VaultError> {
+        let ciphertext = age::encrypt(&self.identity.to_public(), plaintext)
             .map_err(|err| corrupt(&self.path, err))?;
         let dir = match self.path.parent() {
             Some(dir) if !dir.as_os_str().is_empty() => dir,
