@@ -11,6 +11,7 @@ testing = []
 [dependencies]
 anyhow.workspace = true
 credshim-core.workspace = true
+credshim-aws.workspace = true
 credshim-oauth.workspace = true
 bytes.workspace = true
 http.workspace = true
@@ -46,6 +47,8 @@ serde_json.workspace = true
 tokio.workspace = true
 tokio-tungstenite = "0.30"
 form_urlencoded = "1"
+percent-encoding.workspace = true
+http.workspace = true
 
 [lints]
 workspace = true

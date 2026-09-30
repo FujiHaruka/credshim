@@ -10,6 +10,7 @@ use aws_sigv4::sign::v4;
 use http::header::{AUTHORIZATION, HeaderName, HeaderValue};
 use http::request::Parts;
 use secrecy::{ExposeSecret, SecretString};
+use tracing::subscriber::NoSubscriber;
 
 use crate::auth::{AuthError, X_AMZ_DATE};
 use crate::policy::{Payload, Resign, S3};
@@ -162,9 +163,9 @@ impl Signer {
             .build()
             .map_err(|_| ResignError::Signing)?
             .into();
-        let (instructions, _) = sign(request, &params)
-            .map_err(|_| ResignError::Signing)?
-            .into_parts();
+        let signed =
+            tracing::subscriber::with_default(NoSubscriber::default(), || sign(request, &params));
+        let (instructions, _) = signed.map_err(|_| ResignError::Signing)?.into_parts();
         parts.headers.remove(AUTHORIZATION);
         parts.headers.remove(X_AMZ_SECURITY_TOKEN);
         let (headers, _) = instructions.into_parts();

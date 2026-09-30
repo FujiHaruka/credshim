@@ -89,6 +89,7 @@ pub struct Injector {
     rules: RuleSet,
     secrets: Secrets,
     tokens: Option<Arc<dyn TokenResolver>>,
+    also_scrub: Vec<(SecretString, String)>,
     scrubber: Mutex<Option<(u64, Arc<Scrubber>)>>,
     limiter: Limiter,
 }
@@ -111,6 +112,7 @@ impl Injector {
             rules,
             secrets,
             tokens: None,
+            also_scrub: Vec::new(),
             scrubber: Mutex::default(),
             limiter: Limiter::default(),
         })
@@ -118,6 +120,11 @@ impl Injector {
 
     pub fn with_tokens(mut self, tokens: Arc<dyn TokenResolver>) -> Self {
         self.tokens = Some(tokens);
+        self
+    }
+
+    pub fn also_scrub(mut self, pairs: Vec<(SecretString, String)>) -> Self {
+        self.also_scrub = pairs;
         self
     }
 
@@ -177,9 +184,14 @@ impl Injector {
             };
             Some((secret, rule.dummy()))
         });
-        let scrubber = Arc::new(Scrubber::new(
-            statics.chain(issued.iter().map(|(dummy, real)| (real, dummy.as_str()))),
-        ));
+        let extra = self
+            .also_scrub
+            .iter()
+            .map(|(real, replacement)| (real, replacement.as_str()));
+        let scrubber =
+            Arc::new(Scrubber::new(statics.chain(extra).chain(
+                issued.iter().map(|(dummy, real)| (real, dummy.as_str())),
+            )));
         *cached = Some((generation, scrubber.clone()));
         scrubber
     }

@@ -752,6 +752,7 @@ dependencies = [
  "thiserror 2.0.21",
  "time",
  "toml 0.9.12+spec-1.1.0",
+ "tracing",
 ]
 
 [[package]]
@@ -790,6 +791,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "bytes",
+ "credshim-aws",
  "credshim-core",
  "credshim-mitm",
  "credshim-oauth",
@@ -804,6 +806,7 @@ dependencies = [
  "hyper-util",
  "moka",
  "pem",
+ "percent-encoding",
  "rcgen",
  "reqwest",
  "rustls",
@@ -890,6 +893,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
+ "aws-credential-types",
+ "aws-sigv4",
  "axum",
  "base64 0.22.1",
  "bytes",
@@ -901,6 +906,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "percent-encoding",
  "rcgen",
  "reqwest",
  "rustls",

@@ -12,6 +12,8 @@ pub(crate) enum Outcome {
     Injected(Vec<String>),
     Exchanged(String),
     Denied(String),
+    Blocked,
+    Resigned(String),
     NotAllowed(String),
     Limited(String),
     Misdirected,
@@ -26,7 +28,8 @@ impl Outcome {
             Outcome::Pass => "pass",
             Outcome::Injected(_) => "inject",
             Outcome::Exchanged(_) => "oauth",
-            Outcome::Denied(_) => "deny",
+            Outcome::Denied(_) | Outcome::Blocked => "deny",
+            Outcome::Resigned(_) => "resign",
             Outcome::NotAllowed(_) => "not_allowed",
             Outcome::Limited(_) => "limited",
             Outcome::Misdirected => "misdirected",
@@ -41,12 +44,15 @@ impl Outcome {
             Outcome::Injected(rules) => rules.join(","),
             Outcome::Exchanged(rule)
             | Outcome::Denied(rule)
+            | Outcome::Resigned(rule)
             | Outcome::NotAllowed(rule)
             | Outcome::Limited(rule)
             | Outcome::Failed(rule) => rule.clone(),
-            Outcome::Pass | Outcome::Misdirected | Outcome::Tunnel | Outcome::Rejected => {
-                String::new()
-            }
+            Outcome::Pass
+            | Outcome::Blocked
+            | Outcome::Misdirected
+            | Outcome::Tunnel
+            | Outcome::Rejected => String::new(),
         }
     }
 }
@@ -58,6 +64,33 @@ pub(crate) struct Entry<'a> {
     pub port: u16,
     pub method: &'a Method,
     pub path: &'a str,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AwsLabels {
+    pub service: String,
+    pub region: String,
+    pub operation: String,
+    pub reason: &'static str,
+}
+
+impl AwsLabels {
+    pub(crate) fn new(labels: &credshim_aws::Labels, reason: Option<credshim_aws::Reason>) -> Self {
+        let scope = labels.scope.as_ref();
+        Self {
+            service: scope.map(|s| s.service.clone()).unwrap_or_default(),
+            region: scope.map(|s| s.region.clone()).unwrap_or_default(),
+            operation: labels.operation.clone().unwrap_or_default(),
+            reason: reason.map_or("", credshim_aws::Reason::name),
+        }
+    }
+
+    pub(crate) fn reason(reason: credshim_aws::Reason) -> Self {
+        Self {
+            reason: reason.name(),
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -128,12 +161,17 @@ impl Stats {
                     bump(name, |c| &mut c.injected);
                 }
             }
+            Outcome::Resigned(name) => bump(name, |c| &mut c.injected),
             Outcome::Exchanged(name) => bump(name, |c| &mut c.exchanged),
             Outcome::Denied(name) => bump(name, |c| &mut c.denied),
             Outcome::NotAllowed(name) => bump(name, |c| &mut c.not_allowed),
             Outcome::Limited(name) => bump(name, |c| &mut c.limited),
             Outcome::Failed(name) => bump(name, |c| &mut c.failed),
-            Outcome::Pass | Outcome::Misdirected | Outcome::Tunnel | Outcome::Rejected => {}
+            Outcome::Pass
+            | Outcome::Blocked
+            | Outcome::Misdirected
+            | Outcome::Tunnel
+            | Outcome::Rejected => {}
         }
     }
 
@@ -145,7 +183,37 @@ impl Stats {
 }
 
 pub(crate) fn record(entry: &Entry<'_>, outcome: &Outcome, status: StatusCode, stats: &Stats) {
+    record_labelled(entry, None, outcome, status, stats);
+}
+
+pub(crate) fn record_labelled(
+    entry: &Entry<'_>,
+    aws: Option<&AwsLabels>,
+    outcome: &Outcome,
+    status: StatusCode,
+    stats: &Stats,
+) {
     stats.record(outcome);
+    if let Some(aws) = aws {
+        tracing::info!(
+            target: AUDIT_TARGET,
+            ingress = entry.ingress,
+            scheme = entry.scheme,
+            host = entry.host,
+            port = entry.port,
+            method = %entry.method,
+            path = entry.path,
+            rules = %outcome.rules(),
+            decision = outcome.decision(),
+            status = status.as_u16(),
+            service = %aws.service,
+            region = %aws.region,
+            operation = %aws.operation,
+            reason = aws.reason,
+            "request"
+        );
+        return;
+    }
     tracing::info!(
         target: AUDIT_TARGET,
         ingress = entry.ingress,
@@ -169,6 +237,18 @@ pub(crate) fn record_connect(
     status: StatusCode,
     stats: &Stats,
 ) {
+    record_connect_labelled(scheme, host, port, None, outcome, status, stats);
+}
+
+pub(crate) fn record_connect_labelled(
+    scheme: &'static str,
+    host: &str,
+    port: u16,
+    aws: Option<&AwsLabels>,
+    outcome: &Outcome,
+    status: StatusCode,
+    stats: &Stats,
+) {
     let entry = Entry {
         ingress: "connect",
         scheme,
@@ -177,5 +257,5 @@ pub(crate) fn record_connect(
         method: &Method::CONNECT,
         path: "",
     };
-    record(&entry, outcome, status, stats);
+    record_labelled(&entry, aws, outcome, status, stats);
 }
