@@ -24,18 +24,40 @@ pub struct AwsCredentials {
     session_token: Option<SecretString>,
 }
 
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum CredentialsError {
+    #[error("the {0} is empty or contains characters other than visible ASCII")]
+    NotVisibleAscii(&'static str),
+}
+
 impl AwsCredentials {
     pub fn new(
         access_key_id: SecretString,
         secret_access_key: SecretString,
         session_token: Option<SecretString>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, CredentialsError> {
+        let fields = [
+            ("access key ID", Some(&access_key_id)),
+            ("secret access key", Some(&secret_access_key)),
+            ("session token", session_token.as_ref()),
+        ];
+        for (field, value) in fields {
+            if let Some(value) = value
+                && !is_visible_ascii(value.expose_secret())
+            {
+                return Err(CredentialsError::NotVisibleAscii(field));
+            }
+        }
+        Ok(Self {
             access_key_id,
             secret_access_key,
             session_token,
-        }
+        })
     }
+}
+
+fn is_visible_ascii(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|b| b.is_ascii_graphic())
 }
 
 #[derive(Default)]

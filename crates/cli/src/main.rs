@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
+use credshim_aws::{Aws, AwsCredentials, AwsRule, Signer};
 use credshim_core::{BaseUrls, Injector, Rule, RuleSet, Secrets};
 use credshim_mitm::{
     AUDIT_TARGET, CertificateAuthority, Intercept, Proxy, ProxyConfig, Stats, Upstream,
@@ -384,7 +385,7 @@ async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::
     if !proxy_config.scrub {
         tracing::warn!("response scrubbing is disabled");
     }
-    let intercepts = !rules.is_empty() || !config.oauth.is_empty();
+    let intercepts = !rules.is_empty() || !config.oauth.is_empty() || !config.aws_keys.is_empty();
     let store = if intercepts || !config.ssh_keys.is_empty() {
         Some(config.secrets()?.open()?)
     } else {
@@ -407,7 +408,12 @@ async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::
         }
         let rules = RuleSet::from_rules(rules)?;
         let secrets = load_secrets(store.as_ref(), &rules)?;
-        let mut injector = Injector::new(rules, secrets)?;
+        let aws = load_aws(&config, store.as_ref())?;
+        let mut injector = Injector::new(rules, secrets)?.also_scrub(
+            aws.iter()
+                .flat_map(|aws| aws.signer().scrub_pairs())
+                .collect(),
+        );
         for rule in injector.unscrubbable_rules() {
             tracing::warn!(
                 %rule,
@@ -423,17 +429,28 @@ async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::
             .rules()
             .hosts()
             .chain(oauth.iter().flat_map(|oauth| oauth.hosts()));
-        proxy_config.intercept = Some(Intercept::new(ca, hosts));
+        let mut intercept = Intercept::new(ca, hosts);
+        if aws.is_some() {
+            intercept = intercept.with_domains([credshim_aws::AWS_DOMAIN]);
+        }
+        proxy_config.intercept = Some(intercept);
         proxy_config.injector = Arc::new(injector);
         proxy_config.oauth = oauth;
+        proxy_config.aws = aws.map(Arc::new);
     }
+    let aws_rules = proxy_config
+        .aws
+        .iter()
+        .flat_map(|aws| aws.rules())
+        .map(|rule| rule.name().to_string());
     proxy_config.stats = Arc::new(Stats::new(
         proxy_config
             .injector
             .rules()
             .rules()
             .iter()
-            .map(|rule| rule.name().to_string()),
+            .map(|rule| rule.name().to_string())
+            .chain(aws_rules),
     ));
     let _status = config
         .status
@@ -451,6 +468,28 @@ async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::
         _ = tokio::signal::ctrl_c() => tracing::info!("shutting down"),
     }
     Ok(())
+}
+
+fn load_aws(config: &config::Config, store: &dyn SecretStore) -> anyhow::Result<Option<Aws>> {
+    if config.aws_keys.is_empty() {
+        return Ok(None);
+    }
+    let rules = AwsRule::from_specs(&config.aws_keys)?;
+    let mut signer = Signer::default();
+    for rule in &rules {
+        let credentials = AwsCredentials::new(
+            required_secret(store, rule.access_key_id_secret())?,
+            required_secret(store, rule.secret_access_key_secret())?,
+            None,
+        )
+        .with_context(|| format!("aws_key {:?} cannot be used", rule.name()))?;
+        signer.insert(rule.name(), rule.dummy(), credentials);
+    }
+    let max_body = config
+        .aws
+        .max_body_bytes
+        .unwrap_or(credshim_aws::DEFAULT_MAX_BODY);
+    Ok(Some(Aws::new(rules, signer).with_max_body(max_body)))
 }
 
 fn start_ssh_agent(

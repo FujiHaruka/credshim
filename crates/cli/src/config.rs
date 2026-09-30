@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
+use credshim_aws::{AwsKeySpec, AwsRule};
 use credshim_core::RuleSpec;
 use credshim_oauth::ProviderSpec;
 use credshim_secrets::BackendConfig;
@@ -37,6 +38,16 @@ pub struct Config {
     pub ssh: SshConfig,
     #[serde(default, rename = "ssh_key")]
     pub ssh_keys: Vec<SshKeySpec>,
+    #[serde(default)]
+    pub aws: AwsConfig,
+    #[serde(default, rename = "aws_key")]
+    pub aws_keys: Vec<AwsKeySpec>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AwsConfig {
+    pub max_body_bytes: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -115,6 +126,7 @@ pub fn load(explicit: Option<&Path>) -> anyhow::Result<Loaded> {
     config
         .check_env_names()
         .and_then(|()| Ok(SshRule::from_specs(&config.ssh_keys).map(drop)?))
+        .and_then(|()| config.check_aws_keys())
         .with_context(|| format!("invalid config {}", path.display()))?;
     Ok(Loaded {
         config,
@@ -144,6 +156,24 @@ impl Config {
                         rule.name
                     );
                 }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_aws_keys(&self) -> anyhow::Result<()> {
+        let aws = AwsRule::from_specs(&self.aws_keys)?;
+        for key in &aws {
+            if let Some(rule) = self
+                .rules
+                .iter()
+                .find(|rule| credshim_aws::rule::overlaps(&rule.dummy, key.dummy()))
+            {
+                anyhow::bail!(
+                    "aws_key {:?} and rule {:?} have dummies where one contains the other",
+                    key.name(),
+                    rule.name
+                );
             }
         }
         Ok(())

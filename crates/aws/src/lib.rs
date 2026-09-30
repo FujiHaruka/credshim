@@ -11,7 +11,7 @@ use http::request::Parts;
 pub use auth::{AuthError, Scope, SigV4Auth};
 pub use hosts::{AWS_DOMAIN, BlockedHost, blocked, is_aws_host};
 pub use policy::{Decision, Denial, Labels, Payload, Reason, Resign};
-pub use resign::{AwsCredentials, ResignError, Signer};
+pub use resign::{AwsCredentials, CredentialsError, ResignError, Signer};
 pub use rule::{AwsKeySpec, AwsRule, AwsRuleError};
 
 pub const DEFAULT_MAX_BODY: usize = 16 * 1024 * 1024;

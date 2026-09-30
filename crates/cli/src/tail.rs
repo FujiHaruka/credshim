@@ -80,8 +80,23 @@ fn render(line: &str) -> String {
     } else {
         format!(" [{rules}]")
     };
+    let service = text("service");
+    let operation = text("operation");
+    let aws = match (service.is_empty(), operation.is_empty()) {
+        (true, true) => String::new(),
+        _ => format!(
+            " aws:{service}/{region}:{operation}",
+            region = text("region")
+        ),
+    };
+    let reason = text("reason");
+    let reason = if reason.is_empty() {
+        String::new()
+    } else {
+        format!(" ({reason})")
+    };
     format!(
-        "{time} {decision:<11} {status} {method} {scheme}://{host}:{port}{path}{rules} via {ingress}",
+        "{time} {decision:<11} {status} {method} {scheme}://{host}:{port}{path}{rules}{aws}{reason} via {ingress}",
         decision = text("decision"),
         status = text("status"),
         method = text("method"),
@@ -130,5 +145,32 @@ mod tests {
             "{rendered}"
         );
         assert!(rendered.contains(r"x\n2026"), "{rendered}");
+    }
+
+    #[test]
+    fn aws_requests_show_service_region_operation_and_reason() {
+        let line = serde_json::json!({
+            "timestamp": "t",
+            "fields": {
+                "ingress": "connect",
+                "decision": "deny",
+                "status": 403,
+                "method": "POST",
+                "scheme": "https",
+                "host": "sts.ap-northeast-1.amazonaws.com",
+                "port": 443,
+                "path": "/",
+                "rules": "aws-dev",
+                "service": "sts",
+                "region": "ap-northeast-1",
+                "operation": "AssumeRole",
+                "reason": "credential_operation",
+            }
+        })
+        .to_string();
+        assert_eq!(
+            render(&line),
+            "t deny        403 POST https://sts.ap-northeast-1.amazonaws.com:443/ [aws-dev] aws:sts/ap-northeast-1:AssumeRole (credential_operation) via connect"
+        );
     }
 }

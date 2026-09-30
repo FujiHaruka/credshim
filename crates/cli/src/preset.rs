@@ -58,14 +58,20 @@ pub const SSH_PRESETS: &[SshPreset] = &[SshPreset {
     ],
 }];
 
+pub const AWS_PRESET: &str = "aws";
+
 pub fn names() -> impl Iterator<Item = &'static str> {
     PRESETS
         .iter()
         .map(|preset| preset.name)
         .chain(SSH_PRESETS.iter().map(|preset| preset.name))
+        .chain([AWS_PRESET])
 }
 
 pub fn render(name: &str) -> Option<String> {
+    if name == AWS_PRESET {
+        return Some(render_aws());
+    }
     PRESETS
         .iter()
         .find(|preset| preset.name == name)
@@ -76,6 +82,13 @@ pub fn render(name: &str) -> Option<String> {
                 .find(|preset| preset.name == name)
                 .map(SshPreset::render)
         })
+}
+
+fn render_aws() -> String {
+    format!(
+        "[[aws_key]]\nname = \"aws\"\ndummy_access_key_id = \"{dummy}\"\naccess_key_id = \"aws-access-key-id\"\nsecret_access_key = \"aws-secret-access-key\"\n",
+        dummy = dummy::generate("CREDSHIMAWS"),
+    )
 }
 
 impl SshPreset {

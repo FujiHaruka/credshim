@@ -714,6 +714,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "credshim-aws",
  "credshim-core",
  "credshim-mitm",
  "credshim-oauth",

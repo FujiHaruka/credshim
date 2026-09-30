@@ -95,7 +95,8 @@ impl Fixture {
                 SecretString::from(real.access_key_id.as_str()),
                 SecretString::from(real.secret_access_key.as_str()),
                 None,
-            ),
+            )
+            .unwrap(),
         );
         let scrub = signer.scrub_pairs();
         let aws = Arc::new(Aws::new(rules, signer).with_max_body(MAX_BODY));
