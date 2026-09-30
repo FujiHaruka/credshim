@@ -2,7 +2,7 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{Downstream, client_for};
+use common::{Downstream, client_for, eventually};
 use credshim_core::{InjectSpec, Injector, Limits, RuleSet, RuleSpec, Secrets};
 use credshim_mitm::{CertificateAuthority, Intercept, Proxy, ProxyConfig, TestingHooks, Upstream};
 use credshim_testkit::{MockUpstream, TestCa, capture_logs, fake_secret, install_crypto_provider};
@@ -190,11 +190,10 @@ async fn concurrency_limit_holds_for_the_whole_streamed_response() {
     );
 
     stream.bytes().await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert_eq!(
-        setup.call(reqwest::Method::GET, "/echo").await.status(),
-        200
-    );
+    eventually("the streamed response to release its permit", || async {
+        setup.call(reqwest::Method::GET, "/echo").await.status() == 200
+    })
+    .await;
 }
 
 #[tokio::test]

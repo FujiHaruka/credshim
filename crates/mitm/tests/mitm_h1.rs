@@ -5,7 +5,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use common::{
-    assert_large_bodies_intact, assert_sse_unbuffered, client_via, connect, exchange, tls_over,
+    assert_large_bodies_intact, assert_sse_unbuffered, client_via, connect, eventually, exchange,
+    tls_over,
 };
 use credshim_mitm::{CertificateAuthority, Intercept, Proxy, ProxyConfig, TestingHooks, Upstream};
 use credshim_testkit::{
@@ -260,7 +261,8 @@ async fn upstream_certificate_from_an_unknown_ca_is_502() {
 }
 
 #[tokio::test]
-async fn sni_for_another_host_is_rejected() {
+async fn sni_for_another_host_is_rejected_and_audited() {
+    let logs = capture_logs();
     let setup = Setup::new().await;
 
     let (tcp, head) = connect(setup.addr(), &setup.target(API)).await;
@@ -269,6 +271,18 @@ async fn sni_for_another_host_is_rejected() {
 
     assert!(result.is_err());
     assert_eq!(setup.mock.request_count(), 0);
+    let expected = format!(
+        r#"ingress="connect" scheme="https" host="{API}" port={} method=CONNECT path="" rules= decision="rejected" status=200"#,
+        setup.mock.port()
+    );
+    eventually("the rejected session to be audited", || {
+        std::future::ready(
+            logs.contents().lines().any(|line| {
+                line.contains(credshim_mitm::AUDIT_TARGET) && line.ends_with(&expected)
+            }),
+        )
+    })
+    .await;
 }
 
 #[tokio::test]

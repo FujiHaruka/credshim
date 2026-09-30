@@ -309,9 +309,17 @@ impl Handler {
             Ok(tcp) => tcp,
             Err(err) => {
                 tracing::warn!(%host, port, error = %err, "CONNECT upstream failed");
+                self.audit_connect(
+                    "tcp",
+                    &host,
+                    port,
+                    &Outcome::Tunnel,
+                    StatusCode::BAD_GATEWAY,
+                );
                 return status(StatusCode::BAD_GATEWAY);
             }
         };
+        self.audit_connect("tcp", &host, port, &Outcome::Tunnel, StatusCode::OK);
         let on_upgrade = hyper::upgrade::on(&mut req);
         tokio::spawn(async move {
             let mut upstream = upstream;
@@ -351,6 +359,13 @@ impl Handler {
             Ok(session) => session,
             Err(err) => {
                 tracing::warn!(%host, port, error = %err, "intercepted upstream failed");
+                self.audit_connect(
+                    "https",
+                    &host,
+                    port,
+                    &Outcome::Rejected,
+                    StatusCode::BAD_GATEWAY,
+                );
                 return status(StatusCode::BAD_GATEWAY);
             }
         };
@@ -360,6 +375,17 @@ impl Handler {
             self.handshake_timeout,
         );
         Response::new(empty())
+    }
+
+    fn audit_connect(
+        &self,
+        scheme: &'static str,
+        host: &str,
+        port: u16,
+        outcome: &Outcome,
+        status: StatusCode,
+    ) {
+        audit::record_connect(scheme, host, port, outcome, status, &self.services.stats);
     }
 
     async fn connect_with_timeout(&self, host: &str, port: u16) -> Result<TcpStream, TunnelError> {

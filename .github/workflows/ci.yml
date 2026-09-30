@@ -26,6 +26,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - run: ./scripts/check-secret-exposure.sh
+      - run: ./scripts/check-secret-exposure-selftest.sh
       - run: ./scripts/check-release-excludes-testing.sh
 
   sdk-e2e:

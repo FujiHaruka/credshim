@@ -118,6 +118,23 @@ fn header_values_are_scrubbed() {
 
     assert_eq!(s.scrub_headers(&mut headers), 1);
     assert_eq!(headers["x-echo"], "Bearer DUMMY");
+    assert!(headers["x-echo"].is_sensitive());
+    assert_eq!(headers["x-other"], "fine");
+    assert!(!headers["x-other"].is_sensitive());
+}
+
+#[test]
+fn header_whose_scrubbed_value_is_not_a_valid_header_is_removed() {
+    let s = scrubber(&[("sk-real-secret-1234", "BAD\nDUMMY")]);
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-echo",
+        HeaderValue::from_static("Bearer sk-real-secret-1234"),
+    );
+    headers.insert("x-other", HeaderValue::from_static("fine"));
+
+    assert_eq!(s.scrub_headers(&mut headers), 1);
+    assert!(!headers.contains_key("x-echo"));
     assert_eq!(headers["x-other"], "fine");
 }
 

@@ -199,7 +199,7 @@ async fn main() -> anyhow::Result<()> {
             lines,
             no_follow,
         } => {
-            let config = config::load(config.as_deref())?.config;
+            let config = load_config(config.as_deref())?.config;
             let path = config.audit.path.context("no [audit] path is configured")?;
             tail::run(&path, lines, !no_follow).await
         }
@@ -214,10 +214,7 @@ fn print_env(
     ca_cert: Option<PathBuf>,
     bundle: Option<PathBuf>,
 ) -> anyhow::Result<()> {
-    let loaded = config::load(config_path)?;
-    if let Some(path) = &loaded.source {
-        harden::check_private(path, "config file")?;
-    }
+    let loaded = load_config(config_path)?;
     let config = loaded.config;
     for spec in &config.rules {
         Rule::from_spec(spec.clone())?;
@@ -283,6 +280,14 @@ async fn run_doctor(
     Ok(())
 }
 
+fn load_config(path: Option<&Path>) -> anyhow::Result<config::Loaded> {
+    let loaded = config::load(path)?;
+    if let Some(source) = &loaded.source {
+        harden::check_private(source, "config file")?;
+    }
+    Ok(loaded)
+}
+
 fn init_logging(audit: Option<File>) -> anyhow::Result<()> {
     let stderr = fmt::layer()
         .with_writer(std::io::stderr)
@@ -304,10 +309,7 @@ fn init_logging(audit: Option<File>) -> anyhow::Result<()> {
 }
 
 async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::Result<()> {
-    let loaded = config::load(config_path)?;
-    if let Some(path) = &loaded.source {
-        harden::check_private(path, "config file")?;
-    }
+    let loaded = load_config(config_path)?;
     let config = loaded.config;
     check_state_paths(&config)?;
     let audit = config
@@ -438,7 +440,7 @@ fn check_state_paths(config: &config::Config) -> anyhow::Result<()> {
 }
 
 async fn status(config_path: Option<&Path>) -> anyhow::Result<()> {
-    let config = config::load(config_path)?.config;
+    let config = load_config(config_path)?.config;
     let socket = config
         .status
         .socket
@@ -514,21 +516,30 @@ fn open_audit_log(path: &Path) -> anyhow::Result<File> {
 
 fn secret_set(config_path: Option<&Path>, name: &str) -> anyhow::Result<()> {
     credshim_secrets::check_name(name)?;
+    let backend = load_config(config_path)?.config.secrets()?;
     if !std::io::stdin().is_terminal() {
         bail!("`credshim secret set` reads the value from a terminal; stdin is not a TTY");
     }
-    let store = config::load(config_path)?.config.secrets()?.open()?;
-    let value = SecretString::from(
+    let store = backend.open()?;
+    let value = non_empty_value(
+        name,
         rpassword::prompt_password(format!("value for {name}: "))
             .context("could not read the value from the terminal")?,
-    );
+    )?;
     store.set(name, value)?;
     writeln!(std::io::stderr(), "stored {name}")?;
     Ok(())
 }
 
+fn non_empty_value(name: &str, value: String) -> anyhow::Result<SecretString> {
+    if value.is_empty() {
+        bail!("the value for {name} is empty; nothing was stored");
+    }
+    Ok(SecretString::from(value))
+}
+
 fn secret_list(config_path: Option<&Path>) -> anyhow::Result<()> {
-    let store = config::load(config_path)?.config.secrets()?.open()?;
+    let store = load_config(config_path)?.config.secrets()?.open()?;
     let mut stdout = std::io::stdout();
     for info in store.list()? {
         let updated = time::OffsetDateTime::from(info.updated_at)
@@ -562,5 +573,20 @@ fn ca_dir_or_default(dir: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     match dir {
         Some(dir) => Ok(dir),
         None => config::default_ca_dir(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_set_rejects_an_empty_value() {
+        assert!(non_empty_value("openai", credshim_testkit::fake_secret("set")).is_ok());
+        let err = non_empty_value("openai", String::new()).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "the value for openai is empty; nothing was stored"
+        );
     }
 }

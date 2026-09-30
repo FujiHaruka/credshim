@@ -52,6 +52,30 @@ async fn run_refuses_a_config_others_could_rewrite() {
 }
 
 #[tokio::test]
+async fn every_config_reading_command_refuses_a_config_others_could_rewrite() {
+    let (home, config) = ready_home().await;
+    chmod(Path::new(&config), 0o664);
+    let run_error = run_refused(home.path(), &config).await;
+
+    for args in [
+        vec!["secret", "set", "openai", "--config", &config],
+        vec!["secret", "list", "--config", &config],
+        vec!["env", "--config", &config],
+        vec!["status", "--config", &config],
+        vec!["tail", "--no-follow", "--config", &config],
+    ] {
+        let output = output(home.path(), &args).await;
+
+        assert!(!output.status.success(), "{args:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            run_error,
+            "{args:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn run_refuses_a_config_directory_others_could_write() {
     let (home, config) = ready_home().await;
     chmod(home.path(), 0o777);

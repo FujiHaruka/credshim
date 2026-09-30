@@ -33,6 +33,8 @@ pub enum ExchangeError {
     RequestBody,
     #[error("token endpoint request body is neither form-encoded nor a JSON object")]
     MalformedRequest,
+    #[error("request path reaches an OAuth endpoint only after normalization")]
+    DisguisedPath,
     #[error("request names a client_id that does not belong to this provider")]
     ClientMismatch,
     #[error("request carries a token issued for a different provider")]
@@ -51,7 +53,9 @@ impl ExchangeError {
     pub fn status(&self) -> StatusCode {
         match self {
             ExchangeError::RequestTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
-            ExchangeError::RequestBody | ExchangeError::MalformedRequest => StatusCode::BAD_REQUEST,
+            ExchangeError::RequestBody
+            | ExchangeError::MalformedRequest
+            | ExchangeError::DisguisedPath => StatusCode::BAD_REQUEST,
             ExchangeError::ClientMismatch | ExchangeError::ForeignToken => StatusCode::FORBIDDEN,
             ExchangeError::Upstream(_)
             | ExchangeError::ResponseTooLarge(_)
@@ -64,6 +68,7 @@ impl ExchangeError {
 #[derive(Clone)]
 pub(crate) struct Replay {
     at: Instant,
+    refresh_held: String,
     status: StatusCode,
     headers: HeaderMap,
     body: Bytes,
@@ -72,6 +77,10 @@ pub(crate) struct Replay {
 impl Replay {
     pub(crate) fn is_fresh(&self, window: Duration) -> bool {
         self.at.elapsed() < window
+    }
+
+    fn is_live(&self, oauth: &OAuth) -> bool {
+        self.is_fresh(oauth.replay_window) && oauth.vault.get(&self.refresh_held).is_some()
     }
 
     fn response(&self) -> Response<Bytes> {
@@ -86,6 +95,7 @@ pub struct Exchange<'a> {
     oauth: &'a OAuth,
     provider: &'a Provider,
     kind: EndpointKind,
+    disguised: bool,
     basic_client_id: Option<String>,
     query_tokens: Vec<String>,
 }
@@ -96,11 +106,13 @@ impl<'a> Exchange<'a> {
         provider: &'a Provider,
         kind: EndpointKind,
         parts: &Parts,
+        disguised: bool,
     ) -> Self {
         Self {
             oauth,
             provider,
             kind,
+            disguised,
             basic_client_id: basic_client_id(&parts.headers),
             query_tokens: query_tokens(parts),
         }
@@ -129,6 +141,9 @@ impl<'a> Exchange<'a> {
         RB::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
         E: Display,
     {
+        if self.disguised {
+            return Err(ExchangeError::DisguisedPath);
+        }
         let max = self.oauth.max_body;
         let raw = Limited::new(body, max)
             .collect()
@@ -155,26 +170,31 @@ impl<'a> Exchange<'a> {
             _ => None,
         };
         let Some(dummy) = refresh_dummy else {
-            return self.exchange(parts, raw, doc, None, send).await;
+            return Ok(self.exchange(parts, raw, doc, None, send).await?.0);
         };
-        let gate = self.oauth.gate(&dummy);
+        let issued_here = self.oauth.vault.get(&dummy).is_some_and(|issued| {
+            issued.kind == TokenKind::Refresh && issued.provider == self.provider.name()
+        });
+        let Some(gate) = self.oauth.gate(self.provider.name(), &dummy, issued_here) else {
+            return Ok(self.exchange(parts, raw, doc, Some(dummy), send).await?.0);
+        };
         let mut slot = gate.lock().await;
-        if let Some(replay) = slot
-            .as_ref()
-            .filter(|replay| replay.is_fresh(self.oauth.replay_window))
-        {
+        if let Some(replay) = slot.as_ref().filter(|replay| replay.is_live(self.oauth)) {
             tracing::debug!(
                 provider = self.provider.name(),
                 "replaying a concurrent refresh result"
             );
             return Ok(replay.response());
         }
-        let response = self.exchange(parts, raw, doc, Some(dummy), send).await?;
+        let (response, rotated_to) = self
+            .exchange(parts, raw, doc, Some(dummy.clone()), send)
+            .await?;
         if !response.status().is_success() {
             return Ok(response);
         }
         *slot = Some(Replay {
             at: Instant::now(),
+            refresh_held: rotated_to.unwrap_or(dummy),
             status: response.status(),
             headers: response.headers().clone(),
             body: response.body().clone(),
@@ -189,7 +209,7 @@ impl<'a> Exchange<'a> {
         mut doc: Document,
         refresh_dummy: Option<String>,
         send: F,
-    ) -> Result<Response<Bytes>, ExchangeError>
+    ) -> Result<(Response<Bytes>, Option<String>), ExchangeError>
     where
         F: FnOnce(Request<Bytes>) -> Fut,
         Fut: Future<Output = Result<Response<RB>, E>>,
@@ -206,7 +226,7 @@ impl<'a> Exchange<'a> {
         };
         let mut revoked = Vec::new();
         if self.kind == EndpointKind::Revoke {
-            revoked.clone_from(&self.query_tokens);
+            revoked = self.own_query_tokens()?;
             if let Some(dummy) = doc.get("token").map(str::to_string)
                 && self.substitute(&mut doc, "token", &dummy, None)?.is_some()
             {
@@ -242,8 +262,8 @@ impl<'a> Exchange<'a> {
                 }
             })?
             .to_bytes();
-        let body = if !head.status.is_success() {
-            body
+        let (body, rotated_to) = if !head.status.is_success() {
+            (body, None)
         } else {
             match self.kind {
                 EndpointKind::Token => {
@@ -253,14 +273,28 @@ impl<'a> Exchange<'a> {
                     for dummy in &revoked {
                         self.oauth.vault.remove(dummy);
                     }
-                    body
+                    (body, None)
                 }
             }
         };
         head.headers.remove(header::TRANSFER_ENCODING);
         head.headers
             .insert(header::CONTENT_LENGTH, HeaderValue::from(body.len()));
-        Ok(Response::from_parts(head, body))
+        Ok((Response::from_parts(head, body), rotated_to))
+    }
+
+    fn own_query_tokens(&self) -> Result<Vec<String>, ExchangeError> {
+        let mut own = Vec::new();
+        for dummy in &self.query_tokens {
+            match self.oauth.vault.get(dummy) {
+                Some(issued) if issued.provider != self.provider.name() => {
+                    return Err(ExchangeError::ForeignToken);
+                }
+                Some(_) => own.push(dummy.clone()),
+                None => {}
+            }
+        }
+        Ok(own)
     }
 
     fn check_client_id(&self, doc: &Document) -> Result<(), ExchangeError> {
@@ -310,7 +344,7 @@ impl<'a> Exchange<'a> {
         headers: &HeaderMap,
         body: &[u8],
         sent_refresh: Option<(String, SecretString)>,
-    ) -> Result<Bytes, ExchangeError> {
+    ) -> Result<(Bytes, Option<String>), ExchangeError> {
         let identity = headers
             .get(header::CONTENT_ENCODING)
             .is_none_or(|value| value.as_bytes().eq_ignore_ascii_case(b"identity"));
@@ -321,14 +355,14 @@ impl<'a> Exchange<'a> {
             .ok_or(ExchangeError::Unreadable)?;
         if !doc.has_access_token() {
             return if doc.get("error").is_some() && !doc.has_token() {
-                Ok(Bytes::copy_from_slice(body))
+                Ok((Bytes::copy_from_slice(body), None))
             } else {
                 Err(ExchangeError::Unreadable)
             };
         }
         let vault = &self.oauth.vault;
         let provider = self.provider.name();
-        let (mut kept, mut rotated) = (false, false);
+        let (mut kept, mut rotated) = (false, None);
         doc.rewrite_tokens(&mut |kind, real, expires_in| {
             let real = SecretString::from(real);
             match (kind, &sent_refresh) {
@@ -339,8 +373,9 @@ impl<'a> Exchange<'a> {
                     dummy.clone()
                 }
                 (TokenKind::Refresh, _) => {
-                    rotated = true;
-                    vault.issue(provider, kind, &real, None)
+                    let dummy = vault.issue(provider, kind, &real, None);
+                    rotated = Some(dummy.clone());
+                    dummy
                 }
                 (TokenKind::Access, _) => {
                     let expires_at = expires_in.and_then(|seconds| {
@@ -350,13 +385,14 @@ impl<'a> Exchange<'a> {
                 }
             }
         });
-        if let Some((old, _)) = &sent_refresh
-            && rotated
-            && !kept
-        {
-            vault.remove(old);
-        }
-        Ok(Bytes::from(doc.to_bytes().to_vec()))
+        let rotated_to = match &sent_refresh {
+            Some((old, _)) if rotated.is_some() && !kept => {
+                vault.remove(old);
+                rotated
+            }
+            _ => None,
+        };
+        Ok((Bytes::from(doc.to_bytes().to_vec()), rotated_to))
     }
 }
 

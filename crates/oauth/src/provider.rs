@@ -7,6 +7,8 @@ use percent_encoding::percent_decode_str;
 use secrecy::SecretString;
 use serde::Deserialize;
 
+use crate::token_exchange::EndpointKind;
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderSpec {
@@ -117,15 +119,58 @@ impl Endpoint {
         })
     }
 
-    pub(crate) fn covers(&self, host: &str, port: u16, path: &str) -> bool {
+    pub(crate) fn covers(&self, host: &str, port: u16, path: &RequestPath) -> PathMatch {
         if !self.host.eq_ignore_ascii_case(host) || self.port != port {
-            return false;
+            return PathMatch::default();
         }
-        let path = percent_decode_str(path).decode_utf8_lossy().to_lowercase();
-        let own = self.path.to_lowercase();
-        path.strip_prefix(own.trim_end_matches('/'))
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '.', ';']))
+        PathMatch {
+            raw: under(&path.decoded, &self.path.to_lowercase()),
+            normalized: under(&path.normalized, &normalize(&self.path)),
+        }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PathMatch {
+    pub raw: bool,
+    pub normalized: bool,
+}
+
+pub(crate) struct RequestPath {
+    decoded: String,
+    normalized: String,
+}
+
+impl RequestPath {
+    pub(crate) fn new(path: &str) -> Self {
+        Self {
+            decoded: percent_decode_str(path).decode_utf8_lossy().to_lowercase(),
+            normalized: normalize(path),
+        }
+    }
+}
+
+fn under(path: &str, own: &str) -> bool {
+    path.strip_prefix(own.trim_end_matches('/'))
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '.', ';']))
+}
+
+fn normalize(path: &str) -> String {
+    let decoded = percent_decode_str(path)
+        .decode_utf8_lossy()
+        .to_lowercase()
+        .replace('\\', "/");
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in decoded.split('/') {
+        match segment.split(';').next().unwrap_or_default() {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            segment => segments.push(segment),
+        }
+    }
+    format!("/{}", segments.join("/"))
 }
 
 pub(crate) struct ClientSecret {
@@ -241,6 +286,14 @@ impl Provider {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub(crate) fn endpoint_kinds(&self) -> impl Iterator<Item = (EndpointKind, &Endpoint)> {
+        std::iter::once((EndpointKind::Token, &self.token)).chain(
+            self.revoke
+                .iter()
+                .map(|revoke| (EndpointKind::Revoke, revoke)),
+        )
     }
 
     pub(crate) fn endpoints(&self) -> impl Iterator<Item = &Endpoint> {

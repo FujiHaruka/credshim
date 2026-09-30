@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
@@ -111,6 +112,7 @@ pub fn load(explicit: Option<&Path>) -> anyhow::Result<Loaded> {
 
 impl Config {
     fn check_env_names(&self) -> anyhow::Result<()> {
+        let mut owners = BTreeMap::new();
         for rule in &self.rules {
             if let Some(name) = &rule.env {
                 anyhow::ensure!(
@@ -124,6 +126,12 @@ impl Config {
                     rule.name,
                     CREDENTIAL_SUFFIXES.join(", ")
                 );
+                if let Some(first) = owners.insert(name.as_str(), rule.name.as_str()) {
+                    anyhow::bail!(
+                        "rules {first:?} and {:?} both set env {name:?}; each variable can hold only one dummy",
+                        rule.name
+                    );
+                }
             }
         }
         Ok(())

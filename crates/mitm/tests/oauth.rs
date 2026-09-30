@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use common::{Downstream, client_for};
-use credshim_core::{Injector, RuleSet, Secrets};
+use common::{Downstream, client_for, connect, exchange, raw_exchange, tls_over};
+use credshim_core::{BaseUrls, InjectSpec, Injector, Rule, RuleSet, RuleSpec, Secrets};
 use credshim_mitm::{CertificateAuthority, Intercept, Proxy, ProxyConfig, TestingHooks, Upstream};
 use credshim_oauth::{ClientAuth, ClientSecretSpec, OAuth, Provider, ProviderSpec, Vault};
 use credshim_testkit::oauth::{
@@ -17,6 +17,7 @@ use credshim_testkit::oauth::{
 use credshim_testkit::{
     MockOAuth, MockOAuthConfig, TestCa, capture_logs, fake_secret, install_crypto_provider,
 };
+use rustls::RootCertStore;
 use secrecy::SecretString;
 
 const AUTH_HOST: &str = "oauth.example.test";
@@ -24,6 +25,7 @@ const API_HOST: &str = "api.example.test";
 const CLIENT_DUMMY: &str = "credshim-oauth-client-secret-0123456789";
 const REDIRECT: &str = "http://localhost:8080/callback";
 const VERIFIER: &str = "test-code-verifier-0123456789-0123456789-0123456789";
+const BASE_URL_PREFIX: &str = "/auth";
 
 struct Options {
     mock: MockOAuthConfig,
@@ -31,6 +33,7 @@ struct Options {
     replay_window: Duration,
     max_body: usize,
     downstream: Downstream,
+    base_url: bool,
 }
 
 impl Options {
@@ -44,6 +47,7 @@ impl Options {
             replay_window: Duration::from_secs(30),
             max_body: 64 * 1024,
             downstream: Downstream::Http1,
+            base_url: false,
         }
     }
 }
@@ -117,11 +121,23 @@ async fn start_proxy(
             .with_replay_window(options.replay_window)
             .with_max_body(options.max_body),
     );
-    let rules = RuleSet::from_rules(oauth.client_secret_rules().unwrap()).unwrap();
-    let injector = Injector::new(rules, Secrets::new())
+    let mut rules = oauth.client_secret_rules().unwrap();
+    let mut secrets = Secrets::new();
+    let mut config = ProxyConfig::new("127.0.0.1:0".parse().unwrap());
+    if options.base_url {
+        let spec = base_url_spec();
+        secrets.insert(
+            &spec.secret,
+            SecretString::from(fake_secret("base-url").as_str()),
+        );
+        config.base_url_listen = Some("127.0.0.1:0".parse().unwrap());
+        config.base_urls = BaseUrls::from_specs([&spec]).unwrap();
+        rules.push(Rule::from_spec(spec).unwrap());
+    }
+    let rules = RuleSet::from_rules(rules).unwrap();
+    let injector = Injector::new(rules, secrets)
         .unwrap()
         .with_tokens(oauth.clone());
-    let mut config = ProxyConfig::new("127.0.0.1:0".parse().unwrap());
     config.intercept = Some(Intercept::new(
         dev_ca,
         injector.rules().hosts().chain(oauth.hosts()),
@@ -129,6 +145,26 @@ async fn start_proxy(
     config.injector = Arc::new(injector);
     config.oauth = Some(oauth.clone());
     (Proxy::bind(config, upstream).await.unwrap(), oauth)
+}
+
+fn base_url_spec() -> RuleSpec {
+    RuleSpec {
+        name: "auth".into(),
+        host: AUTH_HOST.into(),
+        port: None,
+        path_prefix: None,
+        allow_methods: None,
+        allow_paths: None,
+        limits: Default::default(),
+        base_url_prefix: Some(BASE_URL_PREFIX.into()),
+        env: None,
+        secret: "auth".into(),
+        dummy: "credshim-oauth-base-url-dummy-0123456789".into(),
+        inject: InjectSpec {
+            header: Some("x-unused".into()),
+            ..InjectSpec::default()
+        },
+    }
 }
 
 impl Fixture {
@@ -197,6 +233,38 @@ impl Fixture {
                 )
                 .form(&form),
         }
+    }
+
+    fn code_exchange_form(code: &str) -> String {
+        form_urlencoded::Serializer::new(String::new())
+            .append_pair("grant_type", "authorization_code")
+            .append_pair("code", code)
+            .append_pair("redirect_uri", REDIRECT)
+            .append_pair("code_verifier", VERIFIER)
+            .append_pair("client_id", MOCK_CLIENT_ID)
+            .append_pair("client_secret", CLIENT_DUMMY)
+            .finish()
+    }
+
+    fn raw_post(path: &str, host: &str, body: &str) -> String {
+        format!(
+            "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    async fn raw_token_request(&self, path: &str, body: &str) -> String {
+        let (tcp, head) = connect(self.proxy.local_addr(), &format!("{AUTH_HOST}:443")).await;
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        let mut roots = RootCertStore::empty();
+        roots.add(self.dev_ca.cert_der().clone()).unwrap();
+        let mut tls = tls_over(tcp, roots, AUTH_HOST, true).await.unwrap();
+        exchange(&mut tls, &Self::raw_post(path, AUTH_HOST, body)).await
+    }
+
+    async fn base_url_request(&self, path: &str, body: &str) -> String {
+        let addr = self.proxy.base_url_addr().unwrap();
+        raw_exchange(addr, &Self::raw_post(path, &addr.to_string(), body)).await
     }
 
     async fn authorization_code(&self) -> String {
@@ -607,4 +675,79 @@ async fn token_endpoint_errors_echoing_the_client_secret_are_scrubbed() {
             .iter()
             .any(|request| request.body.contains(&f.options.mock.client_secret))
     );
+}
+
+#[tokio::test]
+async fn token_requests_on_disguised_paths_never_reach_upstream() {
+    let f = Fixture::new(Options::new(ClientAuthMethod::Post, TokenFormat::Json)).await;
+
+    for path in ["//token", "/x/../token", "/%2e%2e/token"] {
+        let code = f.authorization_code().await;
+        let response = f
+            .raw_token_request(path, &Fixture::code_exchange_form(&code))
+            .await;
+        assert!(response.starts_with("HTTP/1.1 400"), "{path}: {response}");
+        assert!(!response.contains("real-"), "{path}: {response}");
+    }
+    assert!(f.mock.requests().is_empty());
+    assert!(f.oauth.vault().is_empty());
+}
+
+#[tokio::test]
+async fn base_url_token_requests_on_disguised_paths_never_reach_upstream() {
+    let mut options = Options::new(ClientAuthMethod::Post, TokenFormat::Json);
+    options.base_url = true;
+    let f = Fixture::new(options).await;
+
+    let code = f.authorization_code().await;
+    let response = f
+        .base_url_request(
+            &format!("{BASE_URL_PREFIX}//token"),
+            &Fixture::code_exchange_form(&code),
+        )
+        .await;
+    assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+    assert!(f.mock.requests().is_empty());
+
+    let response = f
+        .base_url_request(
+            &format!("{BASE_URL_PREFIX}/token"),
+            &Fixture::code_exchange_form(&code),
+        )
+        .await;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.contains("csh_at_"), "{response}");
+    assert_eq!(f.mock.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn revoked_refresh_dummies_are_not_replayed() {
+    for rotate in [false, true] {
+        let mut options = Options::new(ClientAuthMethod::Post, TokenFormat::Json);
+        options.mock.rotate_refresh = rotate;
+        let f = Fixture::new(options).await;
+        let first = f.exchange_code().await;
+        let second = tokens(f.refresh(first.refresh()).await).await;
+        let held = second
+            .get("refresh_token")
+            .unwrap_or(first.refresh())
+            .to_string();
+
+        let retry = tokens(f.refresh(first.refresh()).await).await;
+        assert_eq!(retry.raw, second.raw, "rotate={rotate}");
+        assert_eq!(f.mock.refreshes(), 1);
+
+        let revoked = f
+            .client()
+            .post(format!("https://{AUTH_HOST}/revoke"))
+            .form(&[("token", held.as_str())])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(revoked.status(), 200);
+
+        let after = f.refresh(first.refresh()).await;
+        assert_eq!(after.status(), 400, "rotate={rotate}");
+        assert_eq!(f.mock.refreshes(), 2, "rotate={rotate}");
+    }
 }

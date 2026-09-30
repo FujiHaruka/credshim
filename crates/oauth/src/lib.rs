@@ -13,6 +13,7 @@ pub use provider::{ClientAuth, ClientSecretSpec, IdToken, Provider, ProviderErro
 pub use token_exchange::{EndpointKind, Exchange, ExchangeError};
 pub use vault::{EXPIRY_GRACE, Issued, TokenKind, Vault, VaultError};
 
+use provider::RequestPath;
 use token_exchange::Gate;
 
 pub const DEFAULT_MAX_BODY: usize = 64 * 1024;
@@ -23,7 +24,7 @@ pub struct OAuth {
     vault: Vault,
     max_body: usize,
     replay_window: Duration,
-    gates: Mutex<HashMap<String, Gate>>,
+    gates: Mutex<HashMap<(String, String), Gate>>,
 }
 
 impl std::fmt::Debug for OAuth {
@@ -74,21 +75,26 @@ impl OAuth {
     }
 
     pub fn exchange(&self, host: &str, port: u16, parts: &Parts) -> Option<Exchange<'_>> {
-        let path = parts.uri.path();
-        self.providers.iter().find_map(|provider| {
-            let kind = if provider.token.covers(host, port, path) {
-                EndpointKind::Token
-            } else if provider
-                .revoke
-                .as_ref()
-                .is_some_and(|revoke| revoke.covers(host, port, path))
-            {
-                EndpointKind::Revoke
-            } else {
-                return None;
-            };
-            Some(Exchange::new(self, provider, kind, parts))
-        })
+        let path = RequestPath::new(parts.uri.path());
+        let mut raw = None;
+        let mut normalized = None;
+        for provider in &self.providers {
+            for (kind, endpoint) in provider.endpoint_kinds() {
+                let matched = endpoint.covers(host, port, &path);
+                if matched.raw && raw.is_none() {
+                    raw = Some((provider, kind));
+                }
+                if matched.normalized && normalized.is_none() {
+                    normalized = Some((provider, kind));
+                }
+            }
+        }
+        let (provider, kind) = raw.or(normalized)?;
+        let disguised = match (raw, normalized) {
+            (Some((a, x)), Some((b, y))) => !std::ptr::eq(a, b) || x != y,
+            _ => true,
+        };
+        Some(Exchange::new(self, provider, kind, parts, disguised))
     }
 
     pub fn purge(&self, now: SystemTime) -> usize {
@@ -103,14 +109,17 @@ impl OAuth {
         self.vault.purge_expired(now)
     }
 
-    fn gate(&self, dummy: &str) -> Gate {
-        self.lock_gates()
-            .entry(dummy.to_string())
-            .or_default()
-            .clone()
+    fn gate(&self, provider: &str, dummy: &str, create: bool) -> Option<Gate> {
+        let key = (provider.to_string(), dummy.to_string());
+        let mut gates = self.lock_gates();
+        match gates.get(&key) {
+            Some(gate) => Some(gate.clone()),
+            None if create => Some(gates.entry(key).or_default().clone()),
+            None => None,
+        }
     }
 
-    fn lock_gates(&self) -> std::sync::MutexGuard<'_, HashMap<String, Gate>> {
+    fn lock_gates(&self) -> std::sync::MutexGuard<'_, HashMap<(String, String), Gate>> {
         self.gates
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -142,5 +151,81 @@ impl TokenResolver for OAuth {
 
     fn issued(&self) -> Vec<(String, secrecy::SecretString)> {
         self.vault.issued()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::convert::Infallible;
+
+    use bytes::Bytes;
+    use http::{Request, Response};
+    use http_body_util::Full;
+    use secrecy::SecretString;
+
+    use super::*;
+
+    fn oauth() -> OAuth {
+        let spec = ProviderSpec {
+            name: "a".to_string(),
+            token_endpoint: "https://a.example.test/token".to_string(),
+            revoke_endpoint: None,
+            client_id: None,
+            client_secret: None,
+            client_auth: ClientAuth::default(),
+            resource_hosts: Vec::new(),
+            id_token: IdToken::default(),
+        };
+        OAuth::new(vec![Provider::new(spec, None).unwrap()], Vault::in_memory()).unwrap()
+    }
+
+    async fn refresh(oauth: &OAuth, refresh_token: &str) -> Result<(), ExchangeError> {
+        let (parts, ()) = Request::post("/token")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(())
+            .unwrap()
+            .into_parts();
+        let body = format!("grant_type=refresh_token&refresh_token={refresh_token}");
+        oauth
+            .exchange("a.example.test", 443, &parts)
+            .unwrap()
+            .run(parts, Full::new(Bytes::from(body)), |_| async {
+                Ok::<_, Infallible>(
+                    Response::builder()
+                        .header("content-type", "application/json")
+                        .body(Full::new(Bytes::from_static(
+                            b"{\"access_token\":\"real\"}",
+                        )))
+                        .unwrap(),
+                )
+            })
+            .await
+            .map(drop)
+    }
+
+    #[tokio::test]
+    async fn only_issued_refresh_dummies_take_a_replay_gate() {
+        let oauth = oauth();
+        let access =
+            oauth
+                .vault
+                .issue("a", TokenKind::Access, &SecretString::from("real-at"), None);
+        let foreign =
+            oauth
+                .vault
+                .issue("b", TokenKind::Refresh, &SecretString::from("real-b"), None);
+        for junk in ["junk-1", "junk-2", &access, &foreign] {
+            let _ = refresh(&oauth, junk).await;
+        }
+        assert!(oauth.lock_gates().is_empty());
+
+        let issued = oauth.vault.issue(
+            "a",
+            TokenKind::Refresh,
+            &SecretString::from("real-rt"),
+            None,
+        );
+        refresh(&oauth, &issued).await.unwrap();
+        assert_eq!(oauth.lock_gates().len(), 1);
     }
 }

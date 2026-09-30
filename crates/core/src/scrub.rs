@@ -89,14 +89,22 @@ impl Scrubber {
 
     pub fn scrub_headers(&self, headers: &mut HeaderMap) -> usize {
         let mut replaced = 0;
-        for value in headers.values_mut() {
-            if let Some(clean) = self
-                .scrub(value.as_bytes())
-                .and_then(|clean| HeaderValue::from_bytes(&clean).ok())
-            {
-                *value = clean;
-                replaced += 1;
+        let mut unrepresentable = Vec::new();
+        for (name, value) in headers.iter_mut() {
+            let Some(clean) = self.scrub(value.as_bytes()) else {
+                continue;
+            };
+            replaced += 1;
+            match HeaderValue::from_bytes(&clean) {
+                Ok(mut clean) => {
+                    clean.set_sensitive(true);
+                    *value = clean;
+                }
+                Err(_) => unrepresentable.push(name.clone()),
             }
+        }
+        for name in unrepresentable {
+            headers.remove(name);
         }
         replaced
     }
