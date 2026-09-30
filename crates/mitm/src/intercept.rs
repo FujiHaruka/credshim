@@ -15,7 +15,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_rustls::LazyConfigAcceptor;
 
-use credshim_aws::{Aws, Decision, Reason};
+use credshim_aws::{Aws, CredentialError, Decision, Reason};
 use credshim_core::{Destination, InjectError, Injector, Verdict};
 use credshim_oauth::{Exchange, OAuth};
 
@@ -576,8 +576,44 @@ impl Session {
             Decision::Resign(plan) => {
                 let rule = plan.rule.name().to_string();
                 let labels = AwsLabels::new(&plan.labels, None);
-                let signed = aws.signer().resign(
+                let credentials = match aws.credentials(plan.rule).await {
+                    Ok(credentials) => credentials,
+                    Err(err) => {
+                        tracing::warn!(%rule, host = %target.host, error = %err, "no usable AWS credentials for the request");
+                        let (reason, code, outcome) = match &err {
+                            CredentialError::LoginRequired(_) => (
+                                Reason::SsoLoginRequired,
+                                StatusCode::FORBIDDEN,
+                                Outcome::Denied(rule),
+                            ),
+                            CredentialError::Refused { .. } => (
+                                Reason::SsoRefused,
+                                StatusCode::FORBIDDEN,
+                                Outcome::Denied(rule),
+                            ),
+                            _ => (
+                                Reason::SsoUnavailable,
+                                StatusCode::BAD_GATEWAY,
+                                Outcome::Failed(rule),
+                            ),
+                        };
+                        let response = credshim_aws::refusal::error_response(
+                            parts,
+                            Some(plan.auth.scope.service.as_str()),
+                            code,
+                            refusal_code(reason),
+                            &format!("credshim: {err}"),
+                        );
+                        return Err(Box::new(Relayed::new(
+                            outcome,
+                            response.map(full),
+                            Some(AwsLabels::new(&plan.labels, Some(reason))),
+                        )));
+                    }
+                };
+                let signed = credshim_aws::resign(
                     &plan,
+                    &credentials,
                     parts,
                     &target.authority(),
                     buffered.as_deref().unwrap_or_default(),
@@ -866,6 +902,14 @@ impl<G: Unpin> http_body::Body for Holding<G> {
 
     fn size_hint(&self) -> http_body::SizeHint {
         self.body.size_hint()
+    }
+}
+
+fn refusal_code(reason: Reason) -> &'static str {
+    match reason {
+        Reason::SsoLoginRequired => "CredShimSsoLoginRequired",
+        Reason::SsoRefused => "CredShimSsoRoleRefused",
+        _ => "CredShimSsoUnavailable",
     }
 }
 

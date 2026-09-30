@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use credshim_aws::{AwsKeySpec, AwsRule};
+use credshim_aws::{AwsKeySpec, AwsRule, AwsSsoRoleSpec, SsoSession, SsoSessionSpec};
 use credshim_core::RuleSpec;
 use credshim_oauth::ProviderSpec;
 use credshim_secrets::BackendConfig;
@@ -42,6 +42,10 @@ pub struct Config {
     pub aws: AwsConfig,
     #[serde(default, rename = "aws_key")]
     pub aws_keys: Vec<AwsKeySpec>,
+    #[serde(default, rename = "aws_sso_session")]
+    pub aws_sso_sessions: Vec<SsoSessionSpec>,
+    #[serde(default, rename = "aws_sso_role")]
+    pub aws_sso_roles: Vec<AwsSsoRoleSpec>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -161,8 +165,18 @@ impl Config {
         Ok(())
     }
 
+    pub fn aws_rules(&self) -> anyhow::Result<(Vec<SsoSession>, Vec<AwsRule>)> {
+        let sessions = SsoSession::from_specs(&self.aws_sso_sessions)?;
+        let rules = AwsRule::from_config(&self.aws_keys, &self.aws_sso_roles, &sessions)?;
+        Ok((sessions, rules))
+    }
+
+    pub fn has_aws(&self) -> bool {
+        !self.aws_keys.is_empty() || !self.aws_sso_roles.is_empty()
+    }
+
     fn check_aws_keys(&self) -> anyhow::Result<()> {
-        let aws = AwsRule::from_specs(&self.aws_keys)?;
+        let (_, aws) = self.aws_rules()?;
         for key in &aws {
             if let Some(rule) = self
                 .rules

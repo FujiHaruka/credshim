@@ -38,6 +38,41 @@ pub struct AwsKeys {
     pub secret_access_key: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct KeyringEntry {
+    pub keys: AwsKeys,
+    pub session_token: Option<String>,
+    pub expires_at: Option<SystemTime>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Keyring(Arc<Mutex<Vec<KeyringEntry>>>);
+
+impl Keyring {
+    pub fn with(keys: AwsKeys) -> Self {
+        let keyring = Self::default();
+        keyring.add(KeyringEntry {
+            keys,
+            session_token: None,
+            expires_at: None,
+        });
+        keyring
+    }
+
+    pub fn add(&self, entry: KeyringEntry) {
+        self.0.lock().unwrap().push(entry);
+    }
+
+    pub fn find(&self, access_key_id: &str) -> Option<KeyringEntry> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|entry| entry.keys.access_key_id == access_key_id)
+            .cloned()
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum ClientPayload<'a> {
     Bytes(&'a [u8]),
@@ -180,12 +215,33 @@ pub fn verify(
     uri: &Uri,
     headers: &HeaderMap,
     payload_hash: &str,
-    keys: &AwsKeys,
+    keyring: &Keyring,
 ) -> Result<(), String> {
     let auth = parse_authorization(headers)?;
-    if auth.access_key_id != keys.access_key_id {
-        return Err("InvalidAccessKeyId".into());
+    let entry = keyring
+        .find(&auth.access_key_id)
+        .ok_or("InvalidAccessKeyId")?;
+    if entry
+        .expires_at
+        .is_some_and(|expires_at| expires_at <= SystemTime::now())
+    {
+        return Err("ExpiredToken".into());
     }
+    let sent_token = headers
+        .get("x-amz-security-token")
+        .and_then(|value| value.to_str().ok());
+    if sent_token != entry.session_token.as_deref() {
+        return Err("InvalidToken".into());
+    }
+    if entry.session_token.is_some()
+        && !auth
+            .signed_headers
+            .iter()
+            .any(|name| name == "x-amz-security-token")
+    {
+        return Err("SignatureDoesNotMatch: the security token is not signed".into());
+    }
+    let keys = &entry.keys;
     let expected_service = host_service(host);
     if auth.service != expected_service {
         return Err(format!(
@@ -205,7 +261,12 @@ pub fn verify(
     let signed: Vec<(String, String)> =
         auth.signed_headers
             .iter()
-            .filter(|name| !matches!(name.as_str(), "host" | "x-amz-date"))
+            .filter(|name| {
+                !matches!(
+                    name.as_str(),
+                    "host" | "x-amz-date" | "x-amz-security-token"
+                )
+            })
             .flat_map(|name| {
                 headers.get_all(name.as_str()).iter().map(move |value| {
                     (name.clone(), value.to_str().unwrap_or_default().to_string())
@@ -232,7 +293,7 @@ pub fn verify(
     let identity = Credentials::new(
         &keys.access_key_id,
         &keys.secret_access_key,
-        None,
+        entry.session_token.clone(),
         None,
         "testkit",
     )
@@ -314,7 +375,7 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 struct Shared {
-    keys: AwsKeys,
+    keyring: Keyring,
     requests: Mutex<Vec<AwsRequest>>,
     objects: Mutex<BTreeMap<String, Vec<u8>>>,
 }
@@ -333,10 +394,14 @@ impl Drop for MockAws {
 
 impl MockAws {
     pub async fn start(leaf: LeafCert, keys: AwsKeys) -> Self {
+        Self::start_with(leaf, Keyring::with(keys)).await
+    }
+
+    pub async fn start_with(leaf: LeafCert, keyring: Keyring) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
         let addr = listener.local_addr().unwrap();
         let shared = Arc::new(Shared {
-            keys,
+            keyring,
             requests: Mutex::default(),
             objects: Mutex::default(),
         });
@@ -422,7 +487,7 @@ async fn handle(State(shared): State<Arc<Shared>>, request: Request) -> Response
             &parts.uri,
             &parts.headers,
             hash,
-            &shared.keys,
+            &shared.keyring,
         ),
         Err(err) => Err(err.clone()),
     };
@@ -439,7 +504,7 @@ async fn handle(State(shared): State<Arc<Shared>>, request: Request) -> Response
     }
     let (_, decoded) = checked.expect("verified payload");
     match host_service(&host).as_str() {
-        "sts" => sts(&shared, &decoded),
+        "sts" => sts(&parts.headers, &decoded),
         "dynamodb" => dynamodb(&parts.headers),
         "s3" => s3(&shared, &host, &parts.method, &parts.uri, decoded),
         service => (
@@ -489,7 +554,7 @@ fn payload(headers: &HeaderMap, raw: &Bytes) -> Result<(String, Vec<u8>), String
     }
 }
 
-fn sts(shared: &Shared, body: &[u8]) -> Response {
+fn sts(headers: &HeaderMap, body: &[u8]) -> Response {
     let action = form_urlencoded::parse(body)
         .find(|(key, _)| key == "Action")
         .map(|(_, value)| value.into_owned())
@@ -499,7 +564,9 @@ fn sts(shared: &Shared, body: &[u8]) -> Response {
     }
     let xml = format!(
         "<GetCallerIdentityResponse xmlns=\"https://sts.amazonaws.com/doc/2011-06-15/\"><GetCallerIdentityResult><Arn>arn:aws:iam::{MOCK_ACCOUNT}:user/credshim</Arn><UserId>{}</UserId><Account>{MOCK_ACCOUNT}</Account></GetCallerIdentityResult><ResponseMetadata><RequestId>credshim</RequestId></ResponseMetadata></GetCallerIdentityResponse>",
-        shared.keys.access_key_id
+        parse_authorization(headers)
+            .map(|auth| auth.access_key_id)
+            .unwrap_or_default()
     );
     (StatusCode::OK, [("content-type", "text/xml")], xml).into_response()
 }

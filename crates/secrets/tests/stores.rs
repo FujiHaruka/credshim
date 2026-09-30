@@ -59,9 +59,17 @@ fn assert_remove(store: &dyn SecretStore) {
     assert!(!store.remove("gone").unwrap());
     assert_eq!(value(store, "gone"), None);
     assert_eq!(value(store, "kept").as_deref(), Some("kept"));
-    let names: Vec<String> = store.list().unwrap().into_iter().map(|info| info.name).collect();
+    let names: Vec<String> = store
+        .list()
+        .unwrap()
+        .into_iter()
+        .map(|info| info.name)
+        .collect();
     assert_eq!(names, ["kept"]);
-    assert!(matches!(store.remove("a/b"), Err(StoreError::InvalidName(_))));
+    assert!(matches!(
+        store.remove("a/b"),
+        Err(StoreError::InvalidName(_))
+    ));
 }
 
 fn assert_rejects_bad_names(store: &dyn SecretStore) {

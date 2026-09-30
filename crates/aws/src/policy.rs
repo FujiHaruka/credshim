@@ -35,6 +35,9 @@ pub enum Reason {
     EncodedBody,
     EndpointMismatch,
     BufferBusy,
+    SsoLoginRequired,
+    SsoRefused,
+    SsoUnavailable,
 }
 
 impl Reason {
@@ -54,6 +57,9 @@ impl Reason {
             Reason::EncodedBody => "encoded_body",
             Reason::EndpointMismatch => "endpoint_mismatch",
             Reason::BufferBusy => "buffer_busy",
+            Reason::SsoLoginRequired => "sso_login_required",
+            Reason::SsoRefused => "sso_refused",
+            Reason::SsoUnavailable => "sso_unavailable",
         }
     }
 }
