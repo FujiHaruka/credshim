@@ -165,11 +165,11 @@ session-bind の無い要求、任意データへの署名要求は拒否する�
 
 **完了条件**
 
-- [ ] testkit のモック SSO（デバイス認可、トークン発行と更新、ロール認証情報の発行）に対し、ログインから `aws` CLI の実行までが通る。
-- [ ] ロール認証情報の期限切れ前後で、`aws` CLI の要求が途切れずに通る。
-- [ ] SSO トークンの期限切れ後は上流へ送らずエラーになり、再ログインで復旧する。
-- [ ] SSO トークンとロール認証情報がログ、エラー、ディスク上の平文、クライアントへの応答に現れない。
-- [ ] 脅威モデルの AWS の追加行それぞれに回帰テストがある。
+- [x] testkit のモック SSO（デバイス認可、トークン発行と更新、ロール認証情報の発行）に対し、ログインから `aws` CLI の実行までが通る。
+- [x] ロール認証情報の期限切れ前後で、`aws` CLI の要求が途切れずに通る。
+- [x] SSO トークンの期限切れ後は上流へ送らずエラーになり、再ログインで復旧する。
+- [x] SSO トークンとロール認証情報がログ、エラー、ディスク上の平文、クライアントへの応答に現れない。
+- [x] 脅威モデルの AWS の追加行それぞれに回帰テストがある。
 - [ ] 人間が実際の IAM Identity Center でログインし、`aws` コマンドを確認する（手動マイルストーン）。
 
 **実装メモ（Phase 10）**
@@ -185,6 +185,7 @@ session-bind の無い要求、任意データへの署名要求は拒否する�
 - スクラブ：core に `ScrubSource`（世代つきの置き換え対の提供元）を足し、SSO のプロバイダが取得したロール認証情報（アクセスキー ID はダミーに、シークレットとセッショントークンは固定文字列に）と SSO トークンを、キーごとに直近2世代まで渡す。
 - 設定：`[[aws_sso_session]]`（`name`、`start_url` は `https://` のみ、`region` は小文字・数字・`-`）と `[[aws_sso_role]]`（`name`、`dummy_access_key_id`、`session`、`account_id` は12桁、`role_name` は IAM の文字種で64文字まで、`services`、`regions`）。静的キーと名前空間とダミーの重なり検査を共有する。`credshim preset aws-sso`、`credshim aws sso login <session>`（stdin が TTY でなければ拒否。疑似端末で迂回できるので、最後の防壁は人間が覚えのないコードを承認しないこと。URL とユーザーコードだけを表示し、デバイスコードは出さない）、`credshim aws sso logout <session>`。
 - `expose_secret()` の許可先に `crates/aws/src/sso/api.rs`（トークン交換）と `crates/aws/src/sso/stored.rs`（保存形式）を足した。
+- 既知の制約：`credshim aws sso login` のバイナリは TTY の確認と `testing` の DNS 上書きが無いため、テストでは拒否の経路だけを通す。デバイス認可フローそのものはライブラリの `sso::login` をモック SSO に対して通し（統合テストと aws CLI の E2E）、実物は手動マイルストーンで確かめる。`logout` には TTY の確認を付けていない（段階Aでは秘密ストアを直接消せるので守るものが無い）。keychain の `update` は読んでから書くだけで、age-file のようなロックは無い。保存されたログインが読めない（壊れている、別の `start_url`・`region` で作られた）ときも、消えたときと同じく書き戻さずに使うのをやめる（fail closed）。
 - テスト：testkit の `MockSso` は `oidc.<region>` と `portal.sso.<region>` を1つの待ち受けで受け、クライアント登録、デバイス認可（`approve` するまで `authorization_pending`）、トークン発行と回転するリフレッシュ、ロール認証情報の発行、ログアウトを行う。発行したロール認証情報は `MockAws` と共有する鍵束（`Keyring`）に期限とセッショントークン付きで入り、`MockAws` は期限切れを `ExpiredToken` で拒否し、`x-amz-security-token` が署名されていることを確かめる。
 
 ## Phase 11: 運用への組み込み
