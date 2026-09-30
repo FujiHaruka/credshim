@@ -15,10 +15,22 @@ umask 077
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
+refuse_writable_ancestors() {
+  local dir=$1
+  while :; do
+    if [[ $(stat -c %u "$dir") != 0 ]] || (( 8#$(stat -c %a "$dir") & 8#022 )); then
+      echo "$dir must be owned by root and not writable by group or others; the proxy binary below it could be replaced" >&2
+      exit 1
+    fi
+    [[ $dir == / ]] && break
+    dir=$(dirname "$dir")
+  done
+}
+
 user=credshim
 state=/var/lib/credshim
 public=/etc/credshim
-bin=/opt/credshim/bin/credshim
+bin=/usr/local/libexec/credshim/credshim
 
 if ! id -u "$user" >/dev/null 2>&1; then
   useradd --system --home-dir "$state" --no-create-home --shell /usr/sbin/nologin "$user"
@@ -26,8 +38,8 @@ fi
 
 install -d -m 0700 -o "$user" -g "$user" "$state"
 install -d -m 0755 -o root -g root "$public"
-[[ -d /opt ]] || install -d -m 0755 -o root -g root /opt
-install -d -m 0755 -o root -g root /opt/credshim /opt/credshim/bin
+install -d -m 0755 -o root -g root /usr/local/libexec /usr/local/libexec/credshim
+refuse_writable_ancestors /usr/local/libexec/credshim
 install -m 0755 -o root -g root "$binary" "$bin"
 
 if [[ ! -e $state/config.toml ]]; then

@@ -15,10 +15,22 @@ umask 077
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
+refuse_writable_ancestors() {
+  local dir=$1
+  while :; do
+    if [[ $(stat -f %u "$dir") != 0 ]] || (( 8#$(stat -f %Lp "$dir") & 8#022 )); then
+      echo "$dir must be owned by root and not writable by group or others; the proxy binary below it could be replaced" >&2
+      exit 1
+    fi
+    [[ $dir == / ]] && break
+    dir=$(dirname "$dir")
+  done
+}
+
 user=_credshim
 state=/var/lib/credshim
 public=/etc/credshim
-bin=/opt/credshim/bin/credshim
+bin=/Library/CredShim/bin/credshim
 label=dev.credshim.proxy
 plist=/Library/LaunchDaemons/$label.plist
 
@@ -39,11 +51,10 @@ if ! dscl . -read "/Users/$user" >/dev/null 2>&1; then
   dscl . -create "/Users/$user" Password '*'
 fi
 
-for dir in /var/lib /opt; do
-  [[ -d $dir ]] || install -d -m 0755 -o root -g wheel "$dir"
-done
+[[ -d /var/lib ]] || install -d -m 0755 -o root -g wheel /var/lib
 install -d -m 0700 -o "$user" -g "$user" "$state"
-install -d -m 0755 -o root -g wheel "$public" /opt/credshim /opt/credshim/bin
+install -d -m 0755 -o root -g wheel "$public" /Library/CredShim /Library/CredShim/bin
+refuse_writable_ancestors /Library/CredShim/bin
 install -m 0755 -o root -g wheel "$binary" "$bin"
 
 if [[ ! -e $state/config.toml ]]; then

@@ -62,7 +62,7 @@ jobs:
         run: "! /tmp/verify.sh"
       - name: diagnostics
         if: failure()
-        run: ls -ld / /opt /opt/credshim /opt/credshim/bin /opt/credshim/bin/credshim
+        run: ls -ld / /usr /usr/local /usr/local/libexec /usr/local/libexec/credshim /usr/local/libexec/credshim/credshim
       - name: service logs
         if: failure()
         run: sudo journalctl -u credshim --no-pager
