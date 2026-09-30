@@ -151,14 +151,31 @@ pub(crate) struct Session {
     oauth: Option<Arc<OAuth>>,
     scrub: bool,
     stats: Arc<Stats>,
+    ingress: Ingress,
     connector: TargetConnector,
     client: Client<TargetConnector, ProxyBody>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Ingress {
+    Connect,
+    BaseUrl,
+}
+
+impl Ingress {
+    fn name(self) -> &'static str {
+        match self {
+            Ingress::Connect => "connect",
+            Ingress::BaseUrl => "base_url",
+        }
+    }
 }
 
 impl Session {
     pub(crate) async fn open(
         upstream: Upstream,
         services: Services,
+        ingress: Ingress,
         host: String,
         port: u16,
         connect_timeout: Duration,
@@ -175,6 +192,7 @@ impl Session {
             oauth: services.oauth,
             scrub: services.scrub,
             stats: services.stats,
+            ingress,
             connector,
             client,
         })
@@ -257,18 +275,53 @@ impl Session {
 
     async fn handle(&self, req: Request<Incoming>) -> Response<ProxyBody> {
         let (parts, body) = req.into_parts();
+        if !self.addressed_to_target(&parts) {
+            tracing::warn!(
+                host = %self.target.host,
+                port = self.target.port,
+                method = %parts.method,
+                "request inside CONNECT tunnel names a different host"
+            );
+            let response = status(StatusCode::MISDIRECTED_REQUEST);
+            self.audit(
+                &parts.method,
+                parts.uri.path(),
+                &Outcome::Misdirected,
+                &response,
+            );
+            return response;
+        }
+        self.respond(parts, body).await
+    }
+
+    pub(crate) async fn respond(
+        &self,
+        parts: http::request::Parts,
+        body: Incoming,
+    ) -> Response<ProxyBody> {
         let method = parts.method.clone();
         let path = parts.uri.path().to_string();
         let (outcome, response) = self.relay(parts, body).await;
+        self.audit(&method, &path, &outcome, &response);
+        response
+    }
+
+    fn audit(
+        &self,
+        method: &Method,
+        path: &str,
+        outcome: &Outcome,
+        response: &Response<ProxyBody>,
+    ) {
         let entry = audit::Entry {
+            ingress: self.ingress.name(),
             scheme: "https",
             host: &self.target.host,
             port: self.target.port,
-            method: &method,
-            path: &path,
+            method,
+            path,
         };
-        audit::record(&entry, &outcome, response.status(), &self.stats);
-        response
+        audit::record(&entry, outcome, response.status(), &self.stats);
     }
 
     async fn relay(
@@ -277,18 +330,6 @@ impl Session {
         body: Incoming,
     ) -> (Outcome, Response<ProxyBody>) {
         let target = &self.target;
-        if !self.addressed_to_target(&parts) {
-            tracing::warn!(
-                host = %target.host,
-                port = target.port,
-                method = %parts.method,
-                "request inside CONNECT tunnel names a different host"
-            );
-            return (
-                Outcome::Misdirected,
-                status(StatusCode::MISDIRECTED_REQUEST),
-            );
-        }
         tracing::debug!(
             method = %parts.method,
             host = %target.host,

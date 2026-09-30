@@ -61,7 +61,7 @@ async fn ca_init_refuses_to_replace_an_existing_ca() {
 }
 
 #[tokio::test]
-async fn ca_bundle_appends_the_dev_ca_to_the_os_roots_without_the_key() {
+async fn ca_bundle_puts_the_dev_ca_before_the_os_roots_without_the_key() {
     let dir = tempfile::tempdir().unwrap();
     let ca_dir = path_arg(&dir);
     assert!(
@@ -88,7 +88,7 @@ async fn ca_bundle_appends_the_dev_ca_to_the_os_roots_without_the_key() {
     assert!(to_file.status.success(), "{to_file:?}");
     let bundle = String::from_utf8(stdout.stdout).unwrap();
     assert_eq!(std::fs::read_to_string(&out).unwrap(), bundle);
-    assert!(bundle.contains(dev_ca.trim()));
+    assert!(bundle.starts_with(dev_ca.trim()));
     assert!(bundle.matches("BEGIN CERTIFICATE").count() > 1);
     assert!(!bundle.contains("PRIVATE KEY"));
 }

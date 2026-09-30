@@ -19,11 +19,14 @@ use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
-use credshim_core::Injector;
+use credshim_core::{BaseUrls, Injector};
 use credshim_oauth::OAuth;
 
 use crate::audit::{self, Outcome, Stats};
-use crate::intercept::{Intercept, Services, Session};
+use crate::base_url::BaseUrlServer;
+use crate::ca::CertificateAuthority;
+use crate::doctor;
+use crate::intercept::{Ingress, Intercept, Services, Session};
 use crate::upstream::{ConnectError, Upstream};
 
 pub type ProxyBody = BoxBody<Bytes, hyper::Error>;
@@ -41,6 +44,9 @@ pub struct ProxyConfig {
     pub scrub: bool,
     pub stats: Arc<Stats>,
     pub purge_interval: Duration,
+    pub doctor_ca: Option<Arc<CertificateAuthority>>,
+    pub base_url_listen: Option<SocketAddr>,
+    pub base_urls: BaseUrls,
 }
 
 impl ProxyConfig {
@@ -57,6 +63,9 @@ impl ProxyConfig {
             scrub: true,
             stats: Arc::default(),
             purge_interval: Duration::from_secs(60),
+            doctor_ca: None,
+            base_url_listen: None,
+            base_urls: BaseUrls::default(),
         }
     }
 }
@@ -71,23 +80,47 @@ pub enum BindError {
     RuleHostNotIntercepted(String),
     #[error("OAuth host {0} is not in the intercept list, so its tokens could never be swapped")]
     OAuthHostNotIntercepted(String),
+    #[error("base_url_prefix is set on a rule but [listen] base_url_addr is not")]
+    BaseUrlWithoutListener,
     #[error("could not listen on {addr}: {source}")]
     Io { addr: SocketAddr, source: io::Error },
 }
 
 pub struct Proxy {
     addr: SocketAddr,
+    base_url_addr: Option<SocketAddr>,
     accept_loop: JoinHandle<()>,
+    base_url_loop: Option<JoinHandle<()>>,
     purge_loop: Option<JoinHandle<()>>,
+}
+
+fn check_listen(addr: SocketAddr, allow_non_loopback: bool) -> Result<(), BindError> {
+    if addr.ip().is_unspecified() {
+        return Err(BindError::Unspecified(addr));
+    }
+    if !addr.ip().is_loopback() && !allow_non_loopback {
+        return Err(BindError::NotLoopback(addr));
+    }
+    Ok(())
+}
+
+async fn listen(addr: SocketAddr) -> Result<(TcpListener, SocketAddr), BindError> {
+    let listener = TcpListener::bind(addr)
+        .await
+        .map_err(|source| BindError::Io { addr, source })?;
+    let local = listener
+        .local_addr()
+        .map_err(|source| BindError::Io { addr, source })?;
+    Ok((listener, local))
 }
 
 impl Proxy {
     pub async fn bind(config: ProxyConfig, upstream: Upstream) -> Result<Self, BindError> {
-        if config.listen.ip().is_unspecified() {
-            return Err(BindError::Unspecified(config.listen));
-        }
-        if !config.listen.ip().is_loopback() && !config.allow_non_loopback {
-            return Err(BindError::NotLoopback(config.listen));
+        check_listen(config.listen, config.allow_non_loopback)?;
+        if let Some(addr) = config.base_url_listen {
+            check_listen(addr, config.allow_non_loopback)?;
+        } else if !config.base_urls.is_empty() {
+            return Err(BindError::BaseUrlWithoutListener);
         }
         if let Some(host) = config
             .injector
@@ -105,17 +138,25 @@ impl Proxy {
         {
             return Err(BindError::OAuthHostNotIntercepted(host.to_string()));
         }
-        let listener = TcpListener::bind(config.listen)
-            .await
-            .map_err(|source| BindError::Io {
-                addr: config.listen,
-                source,
-            })?;
-        let addr = listener.local_addr().map_err(|source| BindError::Io {
-            addr: config.listen,
-            source,
-        })?;
-        let handler = Arc::new(Handler::new(&config, upstream));
+        let (listener, addr) = listen(config.listen).await?;
+        let base_url = match config.base_url_listen {
+            Some(listen_addr) => Some(listen(listen_addr).await?),
+            None => None,
+        };
+        let handler = Arc::new(Handler::new(&config, upstream.clone()));
+        let base_url_addr = base_url.as_ref().map(|(_, addr)| *addr);
+        let base_url_loop = base_url.map(|(listener, local)| {
+            let server = Arc::new(BaseUrlServer::new(
+                config.base_urls.clone(),
+                local.ip(),
+                upstream,
+                handler.services.clone(),
+                config.connect_timeout,
+                config.idle_timeout,
+            ));
+            tracing::info!(base_url = %local, "base URL listener ready");
+            tokio::spawn(server.accept_loop(listener, config.header_read_timeout))
+        });
         let purge_loop = config
             .oauth
             .clone()
@@ -124,13 +165,19 @@ impl Proxy {
         tracing::info!(%addr, "proxy listening");
         Ok(Self {
             addr,
+            base_url_addr,
             accept_loop,
+            base_url_loop,
             purge_loop,
         })
     }
 
     pub fn local_addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    pub fn base_url_addr(&self) -> Option<SocketAddr> {
+        self.base_url_addr
     }
 
     pub async fn wait(mut self) {
@@ -141,8 +188,11 @@ impl Proxy {
 impl Drop for Proxy {
     fn drop(&mut self) {
         self.accept_loop.abort();
-        if let Some(purge_loop) = &self.purge_loop {
-            purge_loop.abort();
+        for task in [&self.base_url_loop, &self.purge_loop]
+            .into_iter()
+            .flatten()
+        {
+            task.abort();
         }
     }
 }
@@ -196,6 +246,7 @@ struct Handler {
     intercept: Option<Intercept>,
     injector: Arc<Injector>,
     services: Services,
+    doctor_ca: Option<Arc<CertificateAuthority>>,
 }
 
 impl Handler {
@@ -222,6 +273,7 @@ impl Handler {
                 scrub: config.scrub,
                 stats: config.stats.clone(),
             },
+            doctor_ca: config.doctor_ca.clone(),
         }
     }
 
@@ -239,6 +291,14 @@ impl Handler {
             return status(StatusCode::BAD_REQUEST);
         };
         tracing::debug!(%host, port, "CONNECT");
+        if doctor::is_doctor_host(&host) {
+            let Some(ca) = self.doctor_ca.clone() else {
+                tracing::warn!("doctor check needs a CA; create one with `credshim ca init`");
+                return status(StatusCode::SERVICE_UNAVAILABLE);
+            };
+            doctor::serve_tls(hyper::upgrade::on(&mut req), ca, self.handshake_timeout);
+            return Response::new(empty());
+        }
         if let Some(intercept) = self.intercept.as_ref().filter(|i| i.covers(&host)) {
             return self.intercept(req, intercept, host, port).await;
         }
@@ -277,6 +337,7 @@ impl Handler {
         let session = match Session::open(
             self.upstream.clone(),
             self.services.clone(),
+            Ingress::Connect,
             host.clone(),
             port,
             self.connect_timeout,
@@ -312,9 +373,13 @@ impl Handler {
             return status(StatusCode::BAD_REQUEST);
         };
         tracing::debug!(method = %parts.method, %authority, path = parts.uri.path(), "forward");
+        if doctor::is_doctor_host(authority.host()) {
+            return doctor::report(false, parts.version);
+        }
         let method = parts.method.clone();
         let path = parts.uri.path().to_string();
         let entry = audit::Entry {
+            ingress: "forward",
             scheme: "http",
             host: authority.host(),
             port: authority.port_u16().unwrap_or(80),

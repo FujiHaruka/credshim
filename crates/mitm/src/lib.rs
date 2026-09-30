@@ -2,7 +2,9 @@
 compile_error!("the `testing` feature must never be enabled in a release build");
 
 pub mod audit;
+mod base_url;
 pub mod ca;
+mod doctor;
 pub mod intercept;
 pub mod proxy;
 mod scrub;
@@ -11,6 +13,7 @@ pub mod upstream;
 
 pub use audit::{AUDIT_TARGET, Counts, Stats};
 pub use ca::{CaError, CertificateAuthority};
+pub use doctor::{DOCTOR_HOST, Probe, ProbeError, probe};
 pub use intercept::{Intercept, VerifiedTarget};
 pub use proxy::{BindError, Proxy, ProxyConfig};
 pub use status::serve_status;

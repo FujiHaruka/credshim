@@ -71,6 +71,7 @@ for file in config.toml secrets.age secrets.key ca/ca-key.pem oauth-vault.age au
 done
 check "public CA certificate is readable" test -r "$public/ca.pem"
 check "trust bundle is readable" test -r "$public/bundle.pem"
+check "shell environment file is readable" test -r "$public/env"
 check "public CA directory holds no private key" bash -c "! grep -q 'PRIVATE KEY' '$public'/*.pem"
 
 pid=$(pgrep -u "$service_user" -f 'credshim run' | head -n 1)

@@ -14,6 +14,7 @@ use time::{Duration, OffsetDateTime};
 
 pub const CERT_FILE: &str = "ca.pem";
 pub const KEY_FILE: &str = "ca-key.pem";
+pub const BUNDLE_FILE: &str = "bundle.pem";
 
 const CA_VALIDITY: Duration = Duration::days(5 * 365);
 const LEAF_VALIDITY: Duration = Duration::hours(24);
@@ -158,11 +159,13 @@ pub fn trust_bundle(dir: &Path) -> Result<String, CaError> {
     roots.sort();
     roots.dedup();
     let lf = pem::EncodeConfig::new().set_line_ending(pem::LineEnding::LF);
-    let mut bundle = String::new();
+    let mut bundle = dev_ca;
+    if !bundle.ends_with('\n') {
+        bundle.push('\n');
+    }
     for der in roots {
         bundle.push_str(&pem::encode_config(&pem::Pem::new("CERTIFICATE", der), lf));
     }
-    bundle.push_str(&dev_ca);
     Ok(bundle)
 }
 

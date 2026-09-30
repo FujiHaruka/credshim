@@ -43,6 +43,8 @@ impl Setup {
             allow_methods: allow_methods.map(strings),
             allow_paths: allow_paths.map(strings),
             limits,
+            base_url_prefix: None,
+            env: None,
             secret: "openai".into(),
             dummy: DUMMY.into(),
             inject: InjectSpec {

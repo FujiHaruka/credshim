@@ -46,6 +46,7 @@ impl Outcome {
 }
 
 pub(crate) struct Entry<'a> {
+    pub ingress: &'static str,
     pub scheme: &'static str,
     pub host: &'a str,
     pub port: u16,
@@ -141,6 +142,7 @@ pub(crate) fn record(entry: &Entry<'_>, outcome: &Outcome, status: StatusCode, s
     stats.record(outcome);
     tracing::info!(
         target: AUDIT_TARGET,
+        ingress = entry.ingress,
         scheme = entry.scheme,
         host = entry.host,
         port = entry.port,

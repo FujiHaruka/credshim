@@ -26,6 +26,8 @@ pub struct RuleSpec {
     pub allow_paths: Option<Vec<String>>,
     #[serde(default)]
     pub limits: Limits,
+    pub base_url_prefix: Option<String>,
+    pub env: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -235,6 +237,8 @@ impl Rule {
             allow_methods,
             allow_paths,
             limits,
+            base_url_prefix: _,
+            env: _,
         } = spec;
         if !is_identifier(&name) {
             return Err(RuleError::InvalidName(name));

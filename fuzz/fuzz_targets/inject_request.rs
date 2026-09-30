@@ -17,6 +17,8 @@ static INJECTOR: LazyLock<Injector> = LazyLock::new(|| {
         allow_methods: None,
         allow_paths: None,
         limits: Default::default(),
+        base_url_prefix: None,
+        env: None,
         secret: "real".into(),
         dummy: dummy.into(),
         inject,

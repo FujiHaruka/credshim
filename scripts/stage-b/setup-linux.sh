@@ -65,6 +65,7 @@ socket = "$state/status.sock"
 
 # Add rules with: credshim preset openai | sudo -u $user tee -a $state/config.toml
 # then register the secret: sudo -u $user $bin secret set openai --config $state/config.toml
+# then rerun `sudo credshim service install` so $public/env carries the new dummies
 TOML
   install -m 0600 -o "$user" -g "$user" "$tmp/config.toml" "$state/config.toml"
 fi
@@ -75,6 +76,9 @@ fi
 install -m 0644 -o root -g root "$state/ca/ca.pem" "$public/ca.pem"
 sudo -u "$user" HOME="$state" "$bin" ca bundle --dir "$state/ca" > "$tmp/bundle.pem"
 install -m 0644 -o root -g root "$tmp/bundle.pem" "$public/bundle.pem"
+sudo -u "$user" HOME="$state" "$bin" env --config "$state/config.toml" \
+  --ca-cert "$public/ca.pem" --bundle "$public/bundle.pem" > "$tmp/env"
+install -m 0644 -o root -g root "$tmp/env" "$public/env"
 
 cat > /etc/systemd/system/credshim.service <<UNIT
 [Unit]
@@ -112,6 +116,6 @@ systemctl restart credshim.service
 cat <<DONE
 credshim runs as '$user' and listens on 127.0.0.1:8787.
 For the development user:
-  export HTTPS_PROXY=http://127.0.0.1:8787 SSL_CERT_FILE=$public/bundle.pem NODE_EXTRA_CA_CERTS=$public/ca.pem
+  . $public/env && $bin doctor
 Check isolation as that user (not root): scripts/stage-b/verify.sh
 DONE

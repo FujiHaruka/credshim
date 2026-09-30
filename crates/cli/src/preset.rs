@@ -7,6 +7,7 @@ pub struct Preset {
     inject: &'static str,
     allow_paths: &'static str,
     env: &'static str,
+    base_url_prefix: &'static str,
 }
 
 pub const PRESETS: &[Preset] = &[
@@ -17,6 +18,7 @@ pub const PRESETS: &[Preset] = &[
         inject: r#"{ header = "authorization" }"#,
         allow_paths: r#"["/v1/chat/completions", "/v1/responses", "/v1/completions", "/v1/embeddings", "/v1/models", "/v1/moderations", "/v1/audio", "/v1/images"]"#,
         env: "OPENAI_API_KEY",
+        base_url_prefix: "/openai",
     },
     Preset {
         name: "anthropic",
@@ -25,6 +27,7 @@ pub const PRESETS: &[Preset] = &[
         inject: r#"{ header = "x-api-key" }"#,
         allow_paths: r#"["/v1/messages", "/v1/models", "/v1/complete"]"#,
         env: "ANTHROPIC_API_KEY",
+        base_url_prefix: "/anthropic",
     },
     Preset {
         name: "gemini",
@@ -33,6 +36,7 @@ pub const PRESETS: &[Preset] = &[
         inject: r#"{ header = "x-goog-api-key", query = "key" }"#,
         allow_paths: r#"["/v1beta/models", "/v1/models", "/v1beta/files", "/upload/v1beta/files"]"#,
         env: "GEMINI_API_KEY",
+        base_url_prefix: "/gemini",
     },
 ];
 
@@ -44,12 +48,13 @@ impl Preset {
     pub fn render(&self) -> String {
         let dummy = dummy::generate(self.dummy_prefix);
         format!(
-            "# app side: {env}={dummy}\n[[rule]]\nname = \"{name}\"\nhost = \"{host}\"\nsecret = \"{name}\"\ndummy = \"{dummy}\"\ninject = {inject}\nallow_methods = [\"GET\", \"POST\"]\nallow_paths = {allow_paths}\n",
+            "[[rule]]\nname = \"{name}\"\nhost = \"{host}\"\nsecret = \"{name}\"\ndummy = \"{dummy}\"\nenv = \"{env}\"\ninject = {inject}\nallow_methods = [\"GET\", \"POST\"]\nallow_paths = {allow_paths}\nbase_url_prefix = \"{base_url_prefix}\"\n",
             env = self.env,
             name = self.name,
             host = self.host,
             inject = self.inject,
             allow_paths = self.allow_paths,
+            base_url_prefix = self.base_url_prefix,
         )
     }
 }

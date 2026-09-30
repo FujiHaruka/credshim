@@ -41,6 +41,8 @@ fn spec(name: &str, host: &str, dummy: &str, inject: InjectSpec) -> RuleSpec {
         allow_methods: None,
         allow_paths: None,
         limits: Default::default(),
+        base_url_prefix: None,
+        env: None,
         secret: name.to_string(),
         dummy: dummy.to_string(),
         inject,

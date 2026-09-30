@@ -24,6 +24,8 @@ rustix.workspace = true
 rustls.workspace = true
 secrecy.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
 time = { workspace = true, features = ["formatting"] }
 tokio.workspace = true
 toml.workspace = true

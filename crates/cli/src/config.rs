@@ -61,6 +61,7 @@ pub struct LimitsConfig {
 #[serde(deny_unknown_fields)]
 pub struct ListenConfig {
     pub addr: Option<SocketAddr>,
+    pub base_url_addr: Option<SocketAddr>,
     #[serde(default)]
     pub allow_non_loopback: bool,
 }
@@ -97,8 +98,11 @@ pub fn load(explicit: Option<&Path>) -> anyhow::Result<Loaded> {
         }
         Err(err) => return Err(err).with_context(|| format!("could not read {}", path.display())),
     };
-    let config =
+    let config: Config =
         toml::from_str(&text).with_context(|| format!("invalid config {}", path.display()))?;
+    config
+        .check_env_names()
+        .with_context(|| format!("invalid config {}", path.display()))?;
     Ok(Loaded {
         config,
         source: Some(path),
@@ -106,6 +110,19 @@ pub fn load(explicit: Option<&Path>) -> anyhow::Result<Loaded> {
 }
 
 impl Config {
+    fn check_env_names(&self) -> anyhow::Result<()> {
+        for rule in &self.rules {
+            if let Some(name) = &rule.env {
+                anyhow::ensure!(
+                    is_env_name(name),
+                    "rule {:?}: env {name:?} must be an environment variable name (A-Z, 0-9, '_', not starting with a digit)",
+                    rule.name
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub fn listen(&self) -> SocketAddr {
         self.listen.addr.unwrap_or_else(|| {
             DEFAULT_LISTEN
@@ -159,4 +176,11 @@ fn default_backend() -> anyhow::Result<BackendConfig> {
         path: config_dir()?.join("secrets.age"),
         identity: None,
     })
+}
+
+fn is_env_name(name: &str) -> bool {
+    name.bytes().next().is_some_and(|b| !b.is_ascii_digit())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
 }

@@ -40,9 +40,16 @@ jobs:
           cache: npm
           cache-dependency-path: crates/e2e/sdk/node/package-lock.json
       - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+      - run: uv python install 3.13
       - run: npm ci
         working-directory: crates/e2e/sdk/node
       - run: cargo test -p credshim-e2e -- --ignored
+      - name: env + doctor from curl, Python, Node and Go
+        run: cargo test -p credshim --test dev_tools -- --ignored
 
   stage-b:
     runs-on: ubuntu-latest
@@ -51,13 +58,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p credshim
-      - run: sudo scripts/stage-b/setup-linux.sh target/release/credshim
+      - run: sudo target/release/credshim service install
       - name: setup is idempotent
-        run: sudo scripts/stage-b/setup-linux.sh target/release/credshim
+        run: sudo target/release/credshim service install
       - run: sudo useradd --create-home devtest
       - run: install -m 0755 scripts/stage-b/verify.sh /tmp/verify.sh
       - name: a non-sudo development user cannot read or write the proxy's state
         run: sudo -u devtest /tmp/verify.sh
+      - name: the development user passes doctor from the public env file
+        run: sudo -u devtest bash -c '. /etc/credshim/env && /usr/local/libexec/credshim/credshim doctor --no-runtimes'
       - name: verify flags a development user who can sudo
         run: "! /tmp/verify.sh"
       - name: diagnostics

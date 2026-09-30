@@ -45,6 +45,8 @@ impl Setup {
             allow_methods: None,
             allow_paths: None,
             limits: Default::default(),
+            base_url_prefix: None,
+            env: None,
             secret: "api".into(),
             dummy: DUMMY.into(),
             inject: InjectSpec {
