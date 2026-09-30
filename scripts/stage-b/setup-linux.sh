@@ -73,7 +73,8 @@ fi
 if [[ ! -e $state/ca/ca-key.pem ]]; then
   sudo -u "$user" HOME="$state" "$bin" ca init --dir "$state/ca" >/dev/null
 fi
-install -m 0644 -o root -g root "$state/ca/ca.pem" "$public/ca.pem"
+sudo -u "$user" cat "$state/ca/ca.pem" > "$tmp/ca.pem"
+install -m 0644 -o root -g root "$tmp/ca.pem" "$public/ca.pem"
 sudo -u "$user" HOME="$state" "$bin" ca bundle --dir "$state/ca" > "$tmp/bundle.pem"
 install -m 0644 -o root -g root "$tmp/bundle.pem" "$public/bundle.pem"
 sudo -u "$user" HOME="$state" "$bin" env --config "$state/config.toml" \

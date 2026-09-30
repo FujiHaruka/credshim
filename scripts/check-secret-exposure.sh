@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 
 allowed='^crates/(core/src/(inject|scrub)\.rs|secrets/src/|oauth/src/vault\.rs|oauth/src/token_exchange\.rs)'
 
-matches=$(grep -rnE --include='*.rs' 'expose_secret[[:space:]]*\(' crates | grep -v '/tests/' || [[ $? == 1 ]])
+matches=$(grep -rnE --include='*.rs' --exclude-dir=tests '\bexpose_secret(_mut)?\b' crates || [[ $? == 1 ]])
 violations=$(printf '%s\n' "$matches" | grep -Ev "$allowed" | grep -v '^$' || [[ $? == 1 ]])
 
 if [[ -n "$violations" ]]; then

@@ -145,6 +145,52 @@ async fn host_header_follows_the_request_target() {
 }
 
 #[tokio::test]
+async fn userinfo_stays_out_of_the_host_header_and_logs() {
+    let logs = capture_logs();
+    let proxy = start_proxy().await;
+    let mock = MockUpstream::http().start().await;
+    let password = fake_secret("userinfo");
+    let authority = format!("127.0.0.1:{}", mock.port());
+
+    let response = raw_exchange(
+        proxy.local_addr(),
+        &format!(
+            "GET http://user:{password}@{authority}/h HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
+        ),
+    )
+    .await;
+
+    let body = &response[response.find("\r\n\r\n").unwrap() + 4..];
+    let echo: Echo = serde_json::from_str(body).unwrap();
+    assert_eq!(echo.header("host"), Some(authority.as_str()));
+    logs.assert_absent(&[&password]);
+}
+
+#[tokio::test]
+async fn forwards_plain_http_to_an_ipv6_literal() {
+    if std::net::TcpListener::bind("[::1]:0").is_err() {
+        return;
+    }
+    let proxy = start_proxy().await;
+    let mock = MockUpstream::http()
+        .bind("[::1]:0".parse().unwrap())
+        .start()
+        .await;
+    let client = client_via(proxy.local_addr(), None);
+
+    let echo: Echo = client
+        .get(mock.url("[::1]", "/v6"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(echo.path, "/v6");
+}
+
+#[tokio::test]
 async fn rejects_origin_form_and_non_http_targets() {
     let proxy = start_proxy().await;
 

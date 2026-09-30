@@ -170,6 +170,9 @@ impl<'a> Exchange<'a> {
             return Ok(replay.response());
         }
         let response = self.exchange(parts, raw, doc, Some(dummy), send).await?;
+        if !response.status().is_success() {
+            return Ok(response);
+        }
         *slot = Some(Replay {
             at: Instant::now(),
             status: response.status(),

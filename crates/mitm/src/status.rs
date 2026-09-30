@@ -28,6 +28,7 @@ pub fn serve_status(path: &Path, stats: Arc<Stats>) -> io::Result<JoinHandle<()>
     Ok(tokio::spawn(async move {
         loop {
             let Ok((mut stream, _)) = listener.accept().await else {
+                tokio::time::sleep(crate::proxy::ACCEPT_RETRY_DELAY).await;
                 continue;
             };
             let body = stats.to_json();

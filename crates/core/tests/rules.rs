@@ -215,6 +215,26 @@ fn dummy_sent_to_an_unbound_destination_is_denied_and_left_untouched() {
 }
 
 #[test]
+fn basic_encoded_dummy_in_a_bound_header_is_not_counted_as_injected() {
+    let injector = injector_with(vec![spec(
+        "openai",
+        "api.openai.com",
+        OPENAI_DUMMY,
+        header("x-api-key"),
+    )]);
+    let mut parts = request(
+        "/",
+        &[("x-api-key", &basic(&format!("user:{OPENAI_DUMMY}")))],
+    );
+    let before = snapshot(&parts);
+
+    let verdict = injector.apply(OPENAI, &mut parts).unwrap();
+
+    assert_eq!(verdict, Verdict::Pass);
+    assert_eq!(snapshot(&parts), before);
+}
+
+#[test]
 fn dummy_hidden_anywhere_in_the_request_is_found() {
     let injector = injector();
     let encoded: String = OPENAI_DUMMY.bytes().map(|b| format!("%{b:02X}")).collect();

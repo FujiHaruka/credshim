@@ -295,3 +295,19 @@ fn backend_config_opens_an_age_file_store() {
     store.set("x", SecretString::from("v")).unwrap();
     assert_eq!(value(store.as_ref(), "x").as_deref(), Some("v"));
 }
+
+#[test]
+fn command_store_times_out_when_a_background_process_holds_stdout() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = command_store(
+        dir.path(),
+        "sleep 10 &\necho value",
+        Duration::from_millis(500),
+    );
+
+    let started = std::time::Instant::now();
+    let err = store.get("openai").unwrap_err();
+
+    assert!(err.to_string().contains("timed out"), "{err}");
+    assert!(started.elapsed() < Duration::from_secs(5));
+}

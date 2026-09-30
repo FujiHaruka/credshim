@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use base64::Engine;
-use base64::engine::general_purpose::STANDARD_NO_PAD;
+use base64::engine::GeneralPurpose;
+use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_encode};
@@ -136,11 +137,13 @@ fn encodings(secret: &[u8], dummy: &[u8]) -> Vec<(Zeroizing<Vec<u8>>, Bytes)> {
             Bytes::copy_from_slice(dummy),
         ));
     }
-    for offset in 0..3 {
-        out.push((
-            base64_at(secret, offset),
-            Bytes::from(base64_at(dummy, offset).to_vec()),
-        ));
+    for engine in [&STANDARD_NO_PAD, &URL_SAFE_NO_PAD] {
+        for offset in 0..3 {
+            out.push((
+                base64_at(engine, secret, offset),
+                Bytes::from(base64_at(engine, dummy, offset).to_vec()),
+            ));
+        }
     }
     out
 }
@@ -162,10 +165,10 @@ fn lowercase_escapes(encoded: &str) -> String {
     out
 }
 
-fn base64_at(bytes: &[u8], offset: usize) -> Zeroizing<Vec<u8>> {
+fn base64_at(engine: &GeneralPurpose, bytes: &[u8], offset: usize) -> Zeroizing<Vec<u8>> {
     let mut shifted = Zeroizing::new(vec![0u8; offset]);
     shifted.extend_from_slice(bytes);
-    let encoded = Zeroizing::new(STANDARD_NO_PAD.encode(&*shifted).into_bytes());
+    let encoded = Zeroizing::new(engine.encode(&*shifted).into_bytes());
     let skip = (offset * 8).div_ceil(6);
     let bits = shifted.len() * 8;
     let keep = bits / 6;
