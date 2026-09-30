@@ -28,6 +28,18 @@
 
 base URL モード（Phase 7）では、接続先はクライアントが操れる値ではなく設定の対応表（接頭辞→ルールのホスト）で決まる。クライアントが選べるのはパスだけなので、接頭辞の照合はセグメント単位で行い、ドットセグメントやエンコードされた区切りを含むパスは一致させない。listener はループバックだけに bind し、ループバック以外を名乗る Host は拒否する（DNS リバインディング対策）。ダミーを含まない要求はそのまま転送するが、本物は使わないので MITM の pass と同じ扱いになる。
 
+## SSH エージェント（v0.2）
+
+CredShim は ssh-agent として、鍵をプロキシの中だけに置いて署名を代行する。署名するのは、同じ agent 接続で検証済みの `session-bind@openssh.com` があり、そのホスト鍵の SHA256 指紋がルールの束縛先に含まれ、署名対象が bind のセッション ID と許可されたユーザー名を含むユーザー認証要求（`publickey` か `publickey-hostbound-v00@openssh.com`。後者はホスト鍵が bind と一致すること）ちょうどの形をしているときだけ。1本の接続で受け付ける bind は1回で、検証に失敗した bind や2回目の bind のあとはその接続での署名をすべて拒否し、`is_forwarding=1` の bind を一度でも受けた接続（`ssh -A` の先）も拒否する。
+
+| エージェントが取りうる行動 | 対策 |
+| --- | --- |
+| `~/.ssh` やプロセスのメモリから秘密鍵を読む | 鍵はプロキシの中で生成し秘密ストアにだけ置く。ディスク上の鍵ファイルは作らない |
+| agent ソケットを自作クライアントで叩き、攻撃者のサーバーへの認証に使う | session-bind 必須。ホスト鍵が束縛先でなければ署名しない |
+| 束縛先への正規セッションで得た署名を別ホストへ流用する | 署名対象に bind のセッション ID が入り、他の接続では通らない |
+| 任意のデータ（コミット署名、別プロトコルの challenge）に署名させる | ユーザー認証要求ちょうどの形以外は拒否 |
+| agent フォワードを経由して別ホストから使う | フォワードされた接続からの要求は拒否 |
+
 ## 回帰テスト対応表
 
 脅威モデルの各行に対応する回帰テスト。
@@ -41,3 +53,8 @@ base URL モード（Phase 7）では、接続先はクライアントが操れ�
 | 設定を書き換えて秘密を別ホストに束縛し直す | `crates/cli/tests/dev_tools.rs` の `env_refuses_config_values_that_could_run_or_redirect_the_shell`（`credshim env` の出力で開発ユーザーのシェルを乗っ取らせない）、`crates/cli/tests/hardening.rs` の `run_refuses_a_config_others_could_rewrite`・`every_config_reading_command_refuses_a_config_others_could_rewrite`（`secret set` などで秘密ストアの場所を差し替えさせない）・`run_refuses_a_config_directory_others_could_write`、段階Bの `scripts/stage-b/verify.sh`（CI の `stage-b` ジョブで、sudo できない開発ユーザーが設定を読めず書けないことを検証） |
 | プロキシのメモリ、秘密ストア、CA秘密鍵を読む | `crates/cli/tests/hardening.rs` の `run_refuses_secret_store_and_ca_key_others_could_write`・`proxy_memory_and_environment_are_closed_to_the_same_user`（Linux）、`crates/cli/src/harden.rs` の `core_dumps_are_disabled`、`crates/cli/tests/ca.rs` の `ca_init_writes_a_private_key_only_the_owner_can_read`、段階Bの `scripts/stage-b/verify.sh` |
 | プロキシ経由で本物の権限を乱用する | `crates/mitm/tests/policy.rs` の `paths_and_methods_outside_the_allow_list_are_403_and_never_reach_upstream`・`requests_over_the_rate_limit_are_429_and_never_reach_upstream`・`daily_limit_caps_total_requests`・`concurrency_limit_holds_for_the_whole_streamed_response`、`crates/core/tests/policy.rs`、`crates/cli/tests/hardening.rs` の `status_socket_reports_rule_names_and_counters_only`、監査ログの `audit_log_records_decisions_as_json_without_values`、`crates/mitm/tests/forward_proxy.rs` の `connect_tunnels_to_non_intercepted_hosts_are_audited`（インターセプトしないホストへのトンネルも監査に残す）、`crates/mitm/tests/oauth.rs` の `revoked_refresh_dummies_are_not_replayed`、`crates/oauth/tests/exchange.rs` の `revoke_query_tokens_of_another_provider_are_refused`・`refreshes_with_unknown_tokens_are_never_replayed` |
+| `~/.ssh` やプロセスのメモリから秘密鍵を読む | `crates/cli/tests/ssh.rs` の `keygen_stores_the_private_key_and_prints_only_the_public_half`・`run_serves_the_agent_and_openssh_logs_in_without_a_key_on_disk`（鍵がディスク上の平文にも出力にも現れない）、`crates/ssh/tests/openssh.rs` の各テストの `assert_key_never_logged`、`crates/ssh/tests/agent.rs` の `debug_output_never_contains_secret_values` |
+| agent ソケットを自作クライアントで叩き、攻撃者のサーバーへの認証に使う | `crates/ssh/tests/openssh.rs` の `servers_whose_host_key_is_not_bound_get_no_signature_and_the_refusal_is_audited`・`users_outside_the_allow_list_are_refused`、`crates/ssh/tests/policy.rs` の `requests_without_a_session_bind_are_refused`・`a_bind_that_fails_verification_poisons_the_connection`・`host_keys_outside_the_binding_are_refused_and_reported`、`crates/ssh/tests/agent.rs` の `binds_that_fail_verification_are_refused_on_the_wire`・`write_requests_fail_and_leave_the_keys_unchanged`・`oversized_frames_close_the_connection_without_buffering` |
+| 束縛先への正規セッションで得た署名を別ホストへ流用する | `crates/ssh/tests/policy.rs` の `a_session_id_other_than_the_bound_one_is_refused`・`a_second_bind_on_an_authentication_connection_poisons_it`・`a_hostbound_host_key_that_differs_from_the_bind_is_refused`、`crates/ssh/tests/agent.rs` の `hostbound_requests_naming_another_host_key_get_no_signature` |
+| 任意のデータ（コミット署名、別プロトコルの challenge）に署名させる | `crates/ssh/tests/openssh.rs` の `ssh_keygen_signatures_are_refused`、`crates/ssh/tests/policy.rs` の `data_that_is_not_exactly_a_user_authentication_request_is_refused`・`a_request_naming_another_key_or_algorithm_is_refused`・`unknown_keys_and_signature_flags_are_refused` |
+| agent フォワードを経由して別ホストから使う | `crates/ssh/tests/openssh.rs` の `requests_through_a_forwarded_agent_are_refused`、`crates/ssh/tests/policy.rs` の `forwarded_connections_are_refused_even_after_a_later_authentication_bind` |

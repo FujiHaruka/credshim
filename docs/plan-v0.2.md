@@ -93,6 +93,19 @@ session-bind の無い要求、任意データへの署名要求は拒否する�
 - [ ] 脅威モデルの SSH の追加行それぞれに回帰テストがある。
 - [ ] 人間が生成した公開鍵を GitHub に登録し、実物の `git clone` と `git push` を確認する（手動マイルストーン）。
 
+**実装メモ（Phase 8）**
+
+- agent は新しいクレート `credshim-ssh`（`crates/ssh`）に置いた。`rule.rs` が設定の `[[ssh_key]]`、`policy.rs` が I/O の無い判定（接続ごとの bind の状態と署名の可否）、`key.rs` が鍵の生成と署名（`expose_secret` の許可先に追加）、`agent.rs` がソケット。ssh-agent-lib は `proto` の型だけを使い（`default-features = false`）、フレームの読み書きは自前にした。ライブラリの `listen` はフレーム長に上限が無く、デコードに失敗すると接続を切り、要求を `Debug` でログに出すため。
+- フレームは 256KiB（OpenSSH の `AGENT_MAX_LEN`）を超えるか長さ0なら接続を切る。解釈できない要求、鍵の追加・削除・ロック・スマートカード、session-bind 以外の拡張には `SSH_AGENT_FAILURE` を返して接続は保つ。
+- bind の状態：最初の bind が検証でき `is_forwarding=0` なら束縛済み、`is_forwarding=1` ならフォワード扱い（以後ずっと拒否）、検証に失敗（セッション ID が 128 バイト超を含む）すればその接続を汚染済みにする。束縛済みの接続への2回目の bind も汚染済みにする（OpenSSH の ssh-agent も認証用に束縛した接続への再 bind を拒否する）。署名の判定は bind の状態だけを見るので、bind への応答（成功／失敗）はクライアントへの通知でしかない。
+- 署名の判定：要求の公開鍵が設定の鍵と一致（証明書は不可）→ 束縛済み → bind のホスト鍵の SHA256 指紋がルールの `host_keys` に含まれる → 署名対象がユーザー認証要求ちょうどの形（セッション ID、`50`、ユーザー名、`ssh-connection`、method、`TRUE`、アルゴリズム名、公開鍵、hostbound ならホスト鍵、で余りのバイトが無い）→ セッション ID が bind と一致 → ユーザー名が `users` に含まれる → アルゴリズム名と公開鍵が署名に使う鍵と一致 → hostbound のホスト鍵が bind と一致 → flags が0。どれかで落ちれば `SSH_AGENT_FAILURE`。
+- `REQUEST_IDENTITIES` は bind の有無に関係なく全部の鍵を返す（束縛先で絞ると `ssh` が署名を求めず、束縛外への試みが監査に残らないため）。コメントは `credshim:<ルール名>`。
+- 監査ログは target `credshim::audit`（定数を core に移した）で `ingress="ssh_agent"`、`rules`、`host_key`（SHA256 指紋）、`user`、`decision`（`sign`・`deny`・`error`）、`reason`（`no_session_bind`、`bind_failed`、`forwarded`、`host_key_not_bound`、`not_user_auth`、`session_mismatch`、`user_not_allowed`、`hostbound_key_mismatch`、`key_mismatch`、`unsupported_flags`、`unknown_key`）。`credshim tail` は `sign ssh <user>@<指紋> [<ルール>] via ssh_agent` の形で出す。ステータスソケットのカウンタにはまだ入れていない。
+- 設定は `[ssh] socket`（既定 `$XDG_CONFIG_HOME/credshim/ssh-agent.sock`、0600）と `[[ssh_key]]`（`name`、`secret`、`host_keys` は `SHA256:` の指紋だけ、`users`）。名前の重複と、同じ秘密を2つのルールで使う設定は読み込み時に拒否する。`credshim run` は起動時に全部の鍵を秘密ストアから読んで解析し、無い・解析できない・暗号化されている・Ed25519 でない鍵があれば起動しない。
+- `credshim ssh keygen <秘密の名前>` は Ed25519 の鍵を生成して秘密ストアに OpenSSH 形式で保存し、公開鍵（コメント `credshim:<名前>`）だけを標準出力に出す。同じ名前の秘密があれば上書きせず失敗する（登録済みの鍵を黙って入れ替えると締め出されるため）。`credshim preset github-ssh` は GitHub のホスト鍵3種とユーザー `git` のルールを出す。
+- 既存の SSH 鍵ファイルの取り込みは用意しない（計画どおり入れ替えを案内する）。使うたびの確認（`ssh-add -c` 相当）も v0.2 では用意しない。
+- テスト用 SSH サーバーは `credshim_testkit::sshd::TestSshd`（ホスト鍵3種を `ssh-keygen` で作り、`sshd -D -e` を一般ユーザーのまま高いポートで起動）。クライアントは `HOME` を一時ディレクトリにし、`-F /dev/null`、存在しない `IdentityFile`、known_hosts 無効で動かすので、開発者の `~/.ssh` を読まない。CI の Linux では `openssh-server` を入れる。
+
 ## Phase 9: AWS 静的キー（SigV4 再署名）
 
 このフェーズの終わりで、`~/.aws/credentials` にダミーのアクセスキーだけがある状態で、`aws` コマンドが実際の AWS を操作できる。

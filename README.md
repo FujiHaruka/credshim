@@ -101,6 +101,31 @@ OPENAI_BASE_URL=http://127.0.0.1:8788/openai/v1 OPENAI_API_KEY=sk-credshim-opena
 
 `credshim env` は base URL を `# base URL for openai: http://127.0.0.1:8788/openai` のようにコメントで出す。対応表に無いパス、`..` や `%2f` を含むパス、ループバック以外を名乗る Host は拒否する。ダミーを含まない要求はそのまま上流へ転送する（本物は使わない）。
 
+## SSH エージェント
+
+CredShim は ssh-agent としても動く。鍵はプロキシの中で生成して秘密ストアにだけ置き、外へは公開鍵しか出さない。署名するのは、OpenSSH 8.9 以降の `ssh` が送る session-bind で検証できたサーバーのホスト鍵が設定の指紋に含まれ、許可したユーザー名でのログイン要求のときだけ。`ssh -A` の先からの要求、`ssh-keygen -Y sign`（コミット署名）、鍵の追加・削除は拒否する。
+
+```sh
+credshim preset github-ssh >> ~/.config/credshim/config.toml   # GitHub のホスト鍵3種、ユーザー git
+credshim ssh keygen ssh-github                                  # 公開鍵を GitHub に登録する
+credshim run                                                    # 既定のソケットは ~/.config/credshim/ssh-agent.sock
+export SSH_AUTH_SOCK=~/.config/credshim/ssh-agent.sock
+ssh -T git@github.com
+```
+
+```toml
+[ssh]
+socket = "/path/to/ssh-agent.sock"
+
+[[ssh_key]]
+name = "github"
+secret = "ssh-github"
+users = ["git"]
+host_keys = ["SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU"]
+```
+
+ProxyJump で踏み台にも同じ鍵で入るなら、踏み台のホスト鍵の指紋も `host_keys` に入れる。既存の `~/.ssh` の鍵は取り込まず、新しい鍵に入れ替えて古い鍵は無効化する。
+
 ## 監査ログと状態
 
 ```toml
