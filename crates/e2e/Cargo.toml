@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 
 [dev-dependencies]
+credshim-aws.workspace = true
 credshim-core.workspace = true
 credshim-mitm = { workspace = true, features = ["testing"] }
 credshim-testkit.workspace = true

@@ -51,6 +51,7 @@ jobs:
       - run: uv python install 3.13
       - run: npm ci
         working-directory: crates/e2e/sdk/node
+      - run: aws --version
       - run: cargo test -p credshim-e2e -- --ignored
       - name: env + doctor from curl, Python, Node and Go
         run: cargo test -p credshim --test dev_tools -- --ignored
