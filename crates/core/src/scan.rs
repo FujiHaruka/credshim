@@ -17,7 +17,7 @@ const LENIENT_BASE64: GeneralPurpose = GeneralPurpose::new(
 pub(crate) enum Hit {
     Header(HeaderName),
     BasicAuth,
-    Query(String),
+    Query(Vec<u8>),
     Uri,
 }
 
@@ -26,7 +26,7 @@ impl Hit {
         match (self, location) {
             (Hit::Header(found), Location::Header(wanted)) => found == wanted,
             (Hit::BasicAuth, Location::BasicAuth) => true,
-            (Hit::Query(found), Location::Query(wanted)) => found == wanted,
+            (Hit::Query(found), Location::Query(wanted)) => found == wanted.as_bytes(),
             _ => false,
         }
     }
@@ -56,9 +56,7 @@ pub(crate) fn hits(dummy: &str, parts: &Parts) -> Vec<Hit> {
     if let Some(query) = parts.uri.query() {
         for (name, value) in query_pairs(query) {
             if contains(&decode(value), needle) {
-                hits.push(Hit::Query(
-                    String::from_utf8_lossy(&decode(name)).into_owned(),
-                ));
+                hits.push(Hit::Query(decode(name)));
             }
             if contains(&decode(name), needle) {
                 hits.push(Hit::Uri);

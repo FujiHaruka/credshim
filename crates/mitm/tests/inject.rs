@@ -153,7 +153,7 @@ async fn openai_bearer_dummy_reaches_the_upstream_as_the_real_secret() {
 
     let echo: Echo = fixture
         .client()
-        .post(format!("https://{OPENAI}/v1/chat/completions"))
+        .post(format!("https://{OPENAI}/v1/responses"))
         .bearer_auth(OPENAI_DUMMY)
         .body("{}")
         .send()
