@@ -63,12 +63,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p credshim
-      - run: sudo target/release/credshim service install
-      - name: setup is idempotent when rerun with the installed binary
-        run: sudo /usr/local/libexec/credshim/credshim service install
-      - name: a different binary does not replace the installed one without --upgrade
-        run: "! sudo target/release/credshim service install"
       - run: sudo useradd --create-home devtest
+      - run: sudo target/release/credshim service install --user devtest
+      - name: setup is idempotent when rerun with the installed binary
+        run: sudo /usr/local/libexec/credshim/credshim service install --user devtest
+      - name: a different binary does not replace the installed one without --upgrade
+        run: "! sudo target/release/credshim service install --user devtest"
+      - name: an ssh key made as the service user is served to the development user
+        run: |
+          sudo -u credshim HOME=/var/lib/credshim /usr/local/libexec/credshim/credshim ssh keygen ssh-github --config /var/lib/credshim/config.toml
+          /usr/local/libexec/credshim/credshim preset github-ssh | sudo -u credshim tee -a /var/lib/credshim/config.toml >/dev/null
+          sudo /usr/local/libexec/credshim/credshim service install --user devtest
+          sudo -u devtest bash -c '. /etc/credshim/env && ssh-add -l | grep -q credshim:github'
       - run: install -m 0755 scripts/stage-b/verify.sh /tmp/verify.sh
       - name: a non-sudo development user cannot read or write the proxy's state
         run: sudo -u devtest /tmp/verify.sh

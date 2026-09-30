@@ -151,6 +151,8 @@ enum ServiceCommand {
         print: bool,
         #[arg(long)]
         upgrade: bool,
+        #[arg(long, value_name = "NAME")]
+        user: Option<String>,
     },
 }
 
@@ -247,8 +249,13 @@ async fn main() -> anyhow::Result<()> {
             tail::run(&path, lines, !no_follow).await
         }
         Command::Service {
-            command: ServiceCommand::Install { print, upgrade },
-        } => service::install(print, upgrade),
+            command:
+                ServiceCommand::Install {
+                    print,
+                    upgrade,
+                    user,
+                },
+        } => service::install(print, upgrade, user),
         Command::Ssh {
             command: SshCommand::Keygen { name, config },
         } => {

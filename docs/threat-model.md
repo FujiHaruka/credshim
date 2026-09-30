@@ -39,6 +39,9 @@ CredShim は ssh-agent として、鍵をプロキシの中だけに置いて署
 | 束縛先への正規セッションで得た署名を別ホストへ流用する | 署名対象に bind のセッション ID が入り、他の接続では通らない |
 | 任意のデータ（コミット署名、別プロトコルの challenge）に署名させる | ユーザー認証要求ちょうどの形以外は拒否 |
 | agent フォワードを経由して別ホストから使う | フォワードされた接続からの要求は拒否 |
+| 束縛先への本物の権限を乱用する（署名を大量に得る） | 残存リスク。ルールごとの毎分・日次の上限、ホスト鍵とユーザー名の許可リスト、監査ログで緩和 |
+| 同じマシンの別ユーザーが agent ソケットにつなぐ | 接続元の uid を `SO_PEERCRED`／`getpeereid` で確かめ、`[ssh] client_uids`（既定はプロキシ自身の uid）以外は切る。段階Bのソケットは専用ユーザーが所有し開発ユーザーが書けないディレクトリに置く |
+| 移行前の鍵を `~/.ssh` から読む | 残存リスク。`credshim doctor` が `~/.ssh` に残った秘密鍵を報告する。既存の鍵は読まれた前提で、新しい鍵に入れ替えてサーバーから外す |
 
 ## AWS 認証情報（v0.2）
 
@@ -57,6 +60,8 @@ SSO のロールでは、SSO のログインを CredShim が行う。`credshim a
 | SSO のキャッシュ（`~/.aws/sso/cache`、`~/.aws/cli/cache`）を読む | ログインは `credshim aws sso login` で行い、`~/.aws` には何も書かない。SSO トークン（アクセス、リフレッシュ、クライアントのシークレット）は秘密ストアに暗号化して置き、ロール認証情報はプロキシのメモリだけ |
 | SSO トークンやロール認証情報を、ログ、エラー、応答から得る | 取得したロール認証情報と SSO トークンは直近2世代までスクラブ対象に加える。ログとエラーには状態コードと AWS のエラーコードだけを出す |
 | SSO の期限切れやログアウトのあとも使い続ける | プロキシは要求ごとに SSO トークンの期限を確かめ、更新できなければ上流へ送らず拒否する。ロール認証情報の取得が401なら秘密ストアを読み直し、新しいログインが無ければ拒否する。秘密ストアからログインが消えていれば、更新したトークンを書き戻さずに使うのをやめる。`logout` はアクセストークンが切れていれば更新してからポータルのセッションを終わらせる |
+| 束縛先の API で本物の権限を乱用する、認証情報以外の秘密（`ecr:GetAuthorizationToken` など）を得る | 残存リスク。ルールの `operations` で操作を許可リストにでき、要求から特定した操作のどれかが許可リストに無ければ、または操作を特定できなければ403。ルールごとの毎分・日次・同時実行の上限は429。どちらも上流へは何も送らない。IAM 側の最小権限を併用する |
+| 移行前の認証情報を `~/.aws` や環境変数から読む | 残存リスク。`credshim doctor` が `~/.aws` の本物のアクセスキー、`credential_process`・SSO のプロファイル、SSO と CLI のキャッシュ、環境変数の本物のキーとセッショントークンを報告する（値は出さない） |
 | 自分で `credshim aws sso login` を実行して人間に承認させる | 残存リスクを含む。`login` は stdin が TTY でなければ拒否するが、疑似端末で迂回でき、`--config` で自分の秘密ストアを指せば得たトークンを読める（そのトークンは SSO の本人の全アカウントとロールに効く）。最後の防壁は、人間が覚えのないデバイスコードを承認しないこと。段階Cではコンテナから SSO OIDC とポータルへの出口がプロキシしか無く、プロキシはそれらへの CONNECT を拒否するので、コンテナ内の `login` は届かない |
 
 ## 回帰テスト対応表
@@ -87,3 +92,7 @@ SSO のロールでは、SSO のログインを CredShim が行う。`credshim a
 | SSO トークンやロール認証情報を、ログ、エラー、応答から得る | `crates/mitm/tests/aws_sso.rs` の `requests_need_a_login_then_use_role_credentials_that_never_reach_the_client`・`role_credentials_are_replaced_before_they_expire_and_no_request_fails`（MockAws がエコーしたロールのアクセスキー ID がダミーに置き換わる）、`crates/e2e/tests/aws_sso_cli.rs` の `aws_cli_keeps_working_while_role_credentials_expire_and_are_replaced`、`crates/core/tests/scrub.rs` の `a_scrub_source_is_reread_when_its_generation_moves` |
 | SSO の期限切れやログアウトのあとも使い続ける | `crates/mitm/tests/aws_sso.rs` の `after_the_sso_token_expires_nothing_reaches_aws_until_the_next_login`・`logout_revokes_the_token_and_the_next_role_fetch_needs_a_login`・`a_login_removed_from_the_store_is_never_written_back_by_a_refresh`・`logout_after_the_access_token_expired_refreshes_it_to_end_the_session`、`crates/e2e/tests/aws_sso_cli.rs` の `aws_cli_reports_an_expired_sso_login_and_recovers_after_logging_in_again` |
 | 自分で `credshim aws sso login` を実行して人間に承認させる | `crates/cli/tests/aws.rs` の `sso_login_is_for_a_person_at_a_terminal_and_logout_needs_no_network_without_a_login`、`crates/mitm/tests/aws_sso.rs` の `clients_still_cannot_reach_the_sso_endpoints_the_proxy_itself_uses` |
+| 束縛先への本物の権限を乱用する（SSH） | `crates/ssh/tests/agent.rs` の `signatures_beyond_a_rule_limit_are_refused_and_audited`・`concurrent_and_zero_limits_are_rejected_for_ssh_keys` |
+| 同じマシンの別ユーザーが agent ソケットにつなぐ | `crates/ssh/tests/agent.rs` の `connections_from_uids_outside_the_client_list_are_closed`、段階Bの `scripts/stage-b/verify.sh`（ソケットのディレクトリが専用ユーザーの所有で開発ユーザーが書けず、開発ユーザーが鍵の一覧を取れること） |
+| 移行前の鍵や認証情報を `~/.ssh`・`~/.aws`・環境変数から読む | `crates/cli/tests/dev_tools.rs` の `doctor_reports_an_unreachable_agent_an_old_openssh_and_leftover_credentials`（報告に値が出ないことも確かめる）、`crates/cli/src/leftovers.rs` の単体テスト |
+| 束縛先の API で本物の権限を乱用する、認証情報以外の秘密を得る（AWS） | `crates/mitm/tests/aws.rs` の `operations_outside_the_allow_list_are_refused_with_an_aws_error`・`requests_over_a_rule_limit_get_429_and_never_reach_aws`、`crates/aws/tests/policy.rs` の `every_identified_operation_must_be_on_the_allow_list`・`rest_operations_are_identified_by_their_most_specific_route`・`operation_patterns_and_limits_are_validated` |

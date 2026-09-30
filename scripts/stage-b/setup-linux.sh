@@ -2,11 +2,11 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: sudo $0 <path-to-credshim-binary>" >&2
+  echo "usage: sudo $0 <path-to-credshim-binary> [<development-user>]" >&2
   exit 2
 }
 
-[[ $# -eq 1 ]] || usage
+[[ $# -eq 1 || $# -eq 2 ]] || usage
 [[ $EUID -eq 0 ]] || { echo "run as root (sudo)" >&2; exit 1; }
 binary=$(realpath "$1")
 [[ -x $binary ]] || { echo "$binary is not an executable" >&2; exit 1; }
@@ -28,7 +28,13 @@ refuse_writable_ancestors() {
 }
 
 user=credshim
+dev_uid=
+if [[ $# -eq 2 ]]; then
+  dev_uid=$(id -u "$2") || { echo "no such user: $2" >&2; exit 1; }
+  [[ $dev_uid != 0 ]] || { echo "the development user must not be root" >&2; exit 1; }
+fi
 state=/var/lib/credshim
+agent=/var/lib/credshim-ssh
 public=/etc/credshim
 bin=/usr/local/libexec/credshim/credshim
 
@@ -37,6 +43,7 @@ if ! id -u "$user" >/dev/null 2>&1; then
 fi
 
 install -d -m 0700 -o "$user" -g "$user" "$state"
+install -d -m 0755 -o "$user" -g "$user" "$agent"
 install -d -m 0755 -o root -g root "$public"
 install -d -m 0755 -o root -g root /usr/local/libexec /usr/local/libexec/credshim
 refuse_writable_ancestors /usr/local/libexec/credshim
@@ -63,11 +70,22 @@ path = "$state/audit.jsonl"
 [status]
 socket = "$state/status.sock"
 
+[ssh]
+socket = "$agent/agent.sock"
+${dev_uid:+client_uids = [$dev_uid]}
+
 # Add rules with: credshim preset openai | sudo -u $user tee -a $state/config.toml
 # then register the secret: sudo -u $user $bin secret set openai --config $state/config.toml
 # then rerun "sudo $bin service install" so $public/env carries the new dummies
+# SSH keys and AWS SSO logins are made as $user too:
+#   sudo -u $user HOME=$state $bin ssh keygen ssh-github --config $state/config.toml
+#   sudo -u $user HOME=$state $bin aws sso login <session> --config $state/config.toml
 TOML
   install -m 0600 -o "$user" -g "$user" "$tmp/config.toml" "$state/config.toml"
+fi
+
+if [[ -n $dev_uid ]] && ! grep -Eq "^client_uids *=.*[^0-9]$dev_uid([^0-9]|$)" "$state/config.toml"; then
+  echo "note: add 'client_uids = [$dev_uid]' under [ssh] in $state/config.toml (socket = \"$agent/agent.sock\") so $2 can use the ssh agent" >&2
 fi
 
 if [[ ! -e $state/ca/ca-key.pem ]]; then
@@ -97,7 +115,7 @@ LimitCORE=0
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=$state
+ReadWritePaths=$state $agent
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectKernelTunables=yes

@@ -14,7 +14,7 @@ const SETUP: &str = include_str!("../../../scripts/stage-b/setup-macos.sh");
 #[cfg(target_os = "macos")]
 pub const INSTALLED: &str = "/Library/CredShim/bin/credshim";
 
-pub fn install(print: bool, upgrade: bool) -> anyhow::Result<()> {
+pub fn install(print: bool, upgrade: bool, user: Option<String>) -> anyhow::Result<()> {
     if print {
         std::io::stdout().write_all(SETUP.as_bytes())?;
         return Ok(());
@@ -34,11 +34,22 @@ pub fn install(print: bool, upgrade: bool) -> anyhow::Result<()> {
             binary.display()
         );
     }
+    let user = user.or_else(|| {
+        std::env::var("SUDO_USER")
+            .ok()
+            .filter(|name| name != "root")
+    });
+    if user.is_none() {
+        eprintln!(
+            "credshim: no development user given (--user, or run through sudo); the ssh agent will accept only its own user"
+        );
+    }
     let status = Command::new("/bin/bash")
         .arg("-c")
         .arg(SETUP)
         .arg("credshim-service-install")
         .arg(&binary)
+        .args(user)
         .env_clear()
         .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
         .stdin(Stdio::null())

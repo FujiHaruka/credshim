@@ -18,7 +18,7 @@
 - `crates/secrets` 秘密ストアのバックエンド
 - `crates/oauth` トークン保管庫、トークンエンドポイント処理
 - `crates/ssh` ssh-agent（session-bind の検証と署名の判定、鍵の生成）
-- `crates/aws` SigV4 の解析と再署名、認証情報を発行する操作の拒否（一覧は `scripts/aws/credential-operations.py` で botocore から生成）
+- `crates/aws` SigV4 の解析と再署名、認証情報を発行する操作の拒否と操作の許可リスト（操作の表は `scripts/aws/credential-operations.py` で botocore から生成）
 - `crates/testkit` テスト用CA、モック上流（echo・SSE・大容量・WebSocket、h1/h2）、モック AWS（SigV4 検証）、テスト用 sshd、ログキャプチャ
 - `crates/cli` `credshim` バイナリ（設定ファイル、`secret set/list`、`preset`、監査ログ）
 - `crates/e2e` 実SDK（Python、Node）と `aws` CLI v2 の E2E。`#[ignore]` なので `mise exec -- cargo test -p credshim-e2e -- --ignored`（Node は先に `crates/e2e/sdk/node` で `npm ci`）
