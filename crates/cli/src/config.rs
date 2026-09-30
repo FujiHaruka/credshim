@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use credshim_core::RuleSpec;
+use credshim_oauth::ProviderSpec;
 use credshim_secrets::BackendConfig;
 use serde::Deserialize;
 
@@ -20,6 +21,24 @@ pub struct Config {
     pub audit: AuditConfig,
     #[serde(default, rename = "rule")]
     pub rules: Vec<RuleSpec>,
+    #[serde(default, rename = "oauth")]
+    pub oauth: Vec<ProviderSpec>,
+    #[serde(default)]
+    pub vault: VaultConfig,
+    #[serde(default)]
+    pub limits: LimitsConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VaultConfig {
+    pub path: Option<PathBuf>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LimitsConfig {
+    pub max_token_body_bytes: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -81,6 +100,13 @@ impl Config {
         match &self.ca.dir {
             Some(dir) => Ok(dir.clone()),
             None => default_ca_dir(),
+        }
+    }
+
+    pub fn vault_path(&self) -> anyhow::Result<PathBuf> {
+        match &self.vault.path {
+            Some(path) => Ok(path.clone()),
+            None => Ok(config_dir()?.join("oauth-vault.age")),
         }
     }
 

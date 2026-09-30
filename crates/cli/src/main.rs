@@ -11,14 +11,17 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
-use credshim_core::{Injector, RuleSet, Secrets};
+use credshim_core::{Injector, Rule, RuleSet, Secrets};
 use credshim_mitm::{AUDIT_TARGET, CertificateAuthority, Intercept, Proxy, ProxyConfig, Upstream};
+use credshim_oauth::{DEFAULT_MAX_BODY, OAuth, Provider, Vault};
 use credshim_secrets::SecretStore;
 use secrecy::SecretString;
 use tracing_subscriber::filter::{EnvFilter, Targets};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{Layer, fmt};
+
+const VAULT_KEY_SECRET: &str = "credshim-oauth-vault-key";
 
 #[derive(Parser)]
 #[command(
@@ -152,23 +155,48 @@ async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::
         .transpose()?;
     init_logging(audit)?;
     match &loaded.source {
-        Some(path) => {
-            tracing::info!(config = %path.display(), rules = config.rules.len(), "loaded config")
-        }
+        Some(path) => tracing::info!(
+            config = %path.display(),
+            rules = config.rules.len(),
+            oauth = config.oauth.len(),
+            "loaded config"
+        ),
         None => tracing::info!("no config file; running without rules"),
     }
 
-    let rules = RuleSet::new(config.rules.clone())?;
+    let mut rules = config
+        .rules
+        .iter()
+        .cloned()
+        .map(Rule::from_spec)
+        .collect::<Result<Vec<_>, _>>()?;
     let mut proxy_config = ProxyConfig::new(listen.unwrap_or_else(|| config.listen()));
-    if !rules.is_empty() {
+    if !rules.is_empty() || !config.oauth.is_empty() {
         let store = config.secrets()?.open()?;
+        let oauth = if config.oauth.is_empty() {
+            None
+        } else {
+            Some(Arc::new(load_oauth(&config, store.as_ref())?))
+        };
+        if let Some(oauth) = &oauth {
+            rules.extend(oauth.client_secret_rules()?);
+        }
+        let rules = RuleSet::from_rules(rules)?;
         let secrets = load_secrets(store.as_ref(), &rules)?;
-        let injector = Arc::new(Injector::new(rules, secrets)?);
+        let mut injector = Injector::new(rules, secrets)?;
+        if let Some(oauth) = &oauth {
+            injector = injector.with_tokens(oauth.clone());
+        }
         let ca_dir = config.ca_dir()?;
         let ca = CertificateAuthority::load(&ca_dir)
             .context("rules need a CA; create one with `credshim ca init`")?;
-        proxy_config.intercept = Some(Intercept::new(Arc::new(ca), injector.rules().hosts()));
-        proxy_config.injector = injector;
+        let hosts = injector
+            .rules()
+            .hosts()
+            .chain(oauth.iter().flat_map(|oauth| oauth.hosts()));
+        proxy_config.intercept = Some(Intercept::new(Arc::new(ca), hosts));
+        proxy_config.injector = Arc::new(injector);
+        proxy_config.oauth = oauth;
     }
     let proxy = Proxy::bind(proxy_config, Upstream::new()?).await?;
     tokio::select! {
@@ -186,12 +214,47 @@ fn load_secrets(store: &dyn SecretStore, rules: &RuleSet) -> anyhow::Result<Secr
         .collect();
     let mut secrets = Secrets::new();
     for name in names {
-        let value = store.get(name)?.with_context(|| {
-            format!("secret {name:?} is not set; run `credshim secret set {name}`")
-        })?;
-        secrets.insert(name, value);
+        secrets.insert(name, required_secret(store, name)?);
     }
     Ok(secrets)
+}
+
+fn required_secret(store: &dyn SecretStore, name: &str) -> anyhow::Result<SecretString> {
+    store
+        .get(name)?
+        .with_context(|| format!("secret {name:?} is not set; run `credshim secret set {name}`"))
+}
+
+fn load_oauth(config: &config::Config, store: &dyn SecretStore) -> anyhow::Result<OAuth> {
+    let providers = config
+        .oauth
+        .iter()
+        .map(|spec| {
+            let client_secret = spec
+                .client_secret_name()
+                .map(|name| required_secret(store, name))
+                .transpose()?;
+            Ok(Provider::new(spec.clone(), client_secret)?)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let key = match store.get(VAULT_KEY_SECRET)? {
+        Some(key) => key,
+        None => {
+            let key = Vault::generate_key();
+            store.set(VAULT_KEY_SECRET, key.clone()).with_context(|| {
+                format!("could not create the OAuth vault key; store an age identity as secret {VAULT_KEY_SECRET:?}")
+            })?;
+            tracing::info!(secret = VAULT_KEY_SECRET, "created the OAuth vault key");
+            key
+        }
+    };
+    let vault = Vault::open(config.vault_path()?, &key)?;
+    Ok(OAuth::new(providers, vault)?.with_max_body(
+        config
+            .limits
+            .max_token_body_bytes
+            .unwrap_or(DEFAULT_MAX_BODY),
+    ))
 }
 
 fn open_audit_log(path: &Path) -> anyhow::Result<File> {

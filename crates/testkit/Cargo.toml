@@ -39,4 +39,5 @@ form_urlencoded = "1"
 workspace = true
 
 [dev-dependencies]
+reqwest = { workspace = true, features = ["form", "query"] }
 tokio-tungstenite = "0.30"

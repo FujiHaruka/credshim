@@ -215,3 +215,87 @@ async fn audit_log_records_decisions_as_json_without_values() {
         0o600
     );
 }
+
+fn oauth_provider(home: &std::path::Path) -> String {
+    format!(
+        "[vault]\npath = \"{vault}\"\n\n[limits]\nmax_token_body_bytes = 4096\n\n[[oauth]]\nname = \"example\"\ntoken_endpoint = \"https://oauth.example.test/token\"\nrevoke_endpoint = \"https://oauth.example.test/revoke\"\nclient_id = \"client\"\nclient_secret = {{ secret = \"example-client\", dummy = \"credshim-example-client-0123456789abcdef\" }}\nresource_hosts = [\"api.example.test\"]\n",
+        vault = home.join("vault.age").display(),
+    )
+}
+
+#[tokio::test]
+async fn run_accepts_oauth_providers_and_creates_the_vault_key() {
+    let home = tempfile::tempdir().unwrap();
+    ca_init(home.path()).await;
+    let config = write_config(home.path(), &oauth_provider(home.path()));
+
+    let missing = output(
+        home.path(),
+        &["run", "--listen", "127.0.0.1:0", "--config", &config],
+    )
+    .await;
+    assert!(!missing.status.success());
+    assert!(
+        stderr(&missing).contains("credshim secret set example-client"),
+        "{}",
+        stderr(&missing)
+    );
+
+    let client_secret = fake_secret("example-client");
+    store_secret(home.path(), "example-client", &client_secret);
+    let proxy = spawn_run(
+        home.path(),
+        &["--listen", "127.0.0.1:0", "--config", &config],
+    )
+    .await;
+    assert!(!proxy.addr.is_empty());
+
+    let list = output(home.path(), &["secret", "list", "--config", &config]).await;
+    let names = String::from_utf8(list.stdout).unwrap();
+    assert!(names.contains("credshim-oauth-vault-key"), "{names}");
+    assert!(!names.contains(&client_secret));
+}
+
+#[tokio::test]
+async fn run_rejects_invalid_oauth_providers() {
+    let home = tempfile::tempdir().unwrap();
+    ca_init(home.path()).await;
+    store_secret(
+        home.path(),
+        "example-client",
+        &fake_secret("example-client"),
+    );
+    let valid = oauth_provider(home.path());
+
+    for (extra, expected) in [
+        (
+            valid.replace("https://oauth", "http://oauth"),
+            "must be an https URL",
+        ),
+        (format!("{valid}bogus = 1\n"), "invalid config"),
+        (
+            format!(
+                "{valid}\n{}",
+                valid
+                    .split("[[oauth]]")
+                    .nth(1)
+                    .map(|p| format!("[[oauth]]{p}"))
+                    .unwrap()
+            ),
+            "defined more than once",
+        ),
+    ] {
+        let config = write_config(home.path(), &extra);
+        let output = output(
+            home.path(),
+            &["run", "--listen", "127.0.0.1:0", "--config", &config],
+        )
+        .await;
+        assert!(!output.status.success(), "{extra}");
+        assert!(
+            stderr(&output).contains(expected),
+            "{extra}: {}",
+            stderr(&output)
+        );
+    }
+}
