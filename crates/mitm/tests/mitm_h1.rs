@@ -344,6 +344,24 @@ async fn inner_host_comparison_ignores_case() {
 }
 
 #[tokio::test]
+async fn inner_host_with_a_root_dot_matches_the_connect_target() {
+    let setup = Setup::new().await;
+    let (tcp, _) = connect(setup.addr(), &setup.target(&format!("{API}."))).await;
+    let mut tls = tls_over(tcp, setup.dev_roots(), API, true).await.unwrap();
+
+    let response = exchange(
+        &mut tls,
+        &format!(
+            "GET / HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            setup.target(&format!("{API}."))
+        ),
+    )
+    .await;
+
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+}
+
+#[tokio::test]
 async fn reqwest_through_mitm_reuses_and_survives_multiple_requests() {
     let setup = Setup::new().await;
     let client = setup.client();
