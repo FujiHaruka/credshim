@@ -94,6 +94,44 @@ async fn ca_bundle_puts_the_dev_ca_before_the_os_roots_without_the_key() {
 }
 
 #[tokio::test]
+async fn bundles_are_written_0644_even_over_a_group_writable_or_private_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca_dir = dir.path().join("ca");
+    std::fs::create_dir(&ca_dir).unwrap();
+    std::fs::set_permissions(&ca_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let in_ca_dir = ca_dir.join("bundle.pem");
+    let out = dir.path().join("out.pem");
+    for (path, mode) in [(&in_ca_dir, 0o666), (&out, 0o600)] {
+        std::fs::write(path, "old").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+    let ca_dir = ca_dir.display().to_string();
+
+    let init = credshim(&["ca", "init", "--dir", &ca_dir]).await;
+    let bundle = credshim(&[
+        "ca",
+        "bundle",
+        "--dir",
+        &ca_dir,
+        "--out",
+        out.to_str().unwrap(),
+    ])
+    .await;
+
+    assert!(init.status.success(), "{init:?}");
+    assert!(bundle.status.success(), "{bundle:?}");
+    for path in [&in_ca_dir, &out] {
+        let mode = std::fs::metadata(path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o644, "{}", path.display());
+        assert!(
+            std::fs::read_to_string(path)
+                .unwrap()
+                .contains("BEGIN CERTIFICATE")
+        );
+    }
+}
+
+#[tokio::test]
 async fn run_with_rules_needs_an_existing_ca() {
     let home = tempfile::tempdir().unwrap();
     store_secret(home.path(), "openai", "real");

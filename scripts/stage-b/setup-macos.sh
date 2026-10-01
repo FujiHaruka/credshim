@@ -108,6 +108,9 @@ fi
 if [[ ! -e $state/ca/ca-key.pem ]]; then
   sudo -u "$user" HOME="$state" "$bin" ca init --dir "$state/ca" >/dev/null
 fi
+if [[ -e $state/ca/bundle.pem ]]; then
+  chmod go-w "$state/ca/bundle.pem"
+fi
 sudo -u "$user" cat "$state/ca/ca.pem" > "$tmp/ca.pem"
 install -m 0644 -o root -g wheel "$tmp/ca.pem" "$public/ca.pem"
 sudo -u "$user" HOME="$state" "$bin" ca bundle --dir "$state/ca" > "$tmp/bundle.pem"

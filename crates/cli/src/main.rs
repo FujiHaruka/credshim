@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{IsTerminal, Write};
 use std::net::SocketAddr;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -836,9 +836,10 @@ fn secret_list(config_path: Option<&Path>) -> anyhow::Result<()> {
 
 fn ca_init(dir: &Path) -> anyhow::Result<()> {
     CertificateAuthority::init(dir)?;
-    let bundle = dir.join(credshim_mitm::ca::BUNDLE_FILE);
-    std::fs::write(&bundle, credshim_mitm::ca::trust_bundle(dir)?)
-        .with_context(|| format!("could not write {}", bundle.display()))?;
+    write_public(
+        &dir.join(credshim_mitm::ca::BUNDLE_FILE),
+        credshim_mitm::ca::trust_bundle(dir)?.as_bytes(),
+    )?;
     let cert = dir.join(credshim_mitm::ca::CERT_FILE);
     writeln!(std::io::stdout(), "{}", cert.display())?;
     Ok(())
@@ -847,11 +848,24 @@ fn ca_init(dir: &Path) -> anyhow::Result<()> {
 fn ca_bundle(dir: &Path, out: Option<&Path>) -> anyhow::Result<()> {
     let bundle = credshim_mitm::ca::trust_bundle(dir)?;
     match out {
-        Some(path) => std::fs::write(path, bundle)
-            .with_context(|| format!("could not write {}", path.display()))?,
+        Some(path) => write_public(path, bundle.as_bytes())?,
         None => std::io::stdout().write_all(bundle.as_bytes())?,
     }
     Ok(())
+}
+
+fn write_public(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+    let context = || format!("could not write {}", path.display());
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o644)
+        .open(path)
+        .with_context(context)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o644))
+        .with_context(context)?;
+    file.write_all(contents).with_context(context)
 }
 
 fn ca_dir_or_default(dir: Option<PathBuf>) -> anyhow::Result<PathBuf> {
