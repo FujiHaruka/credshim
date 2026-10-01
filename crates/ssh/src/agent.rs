@@ -135,16 +135,20 @@ impl Agent {
         match request {
             Request::RequestIdentities => Response::IdentitiesAnswer(self.identities()),
             Request::SignRequest(request) => self.sign(connection, &request),
-            Request::Extension(extension) => match extension.parse_message::<SessionBind>() {
-                Ok(Some(bind)) => match connection.bind(&bind) {
+            Request::Extension(extension) => {
+                let bound = match extension.parse_message::<SessionBind>() {
+                    Ok(Some(bind)) => connection.bind(&bind),
+                    Ok(None) => return Response::Failure,
+                    Err(_) => Err(connection.reject_undecodable_bind()),
+                };
+                match bound {
                     Ok(()) => Response::Success,
                     Err(refusal) => {
                         tracing::info!(%refusal, "refused an ssh session bind");
                         Response::Failure
                     }
-                },
-                _ => Response::Failure,
-            },
+                }
+            }
             _ => Response::Failure,
         }
     }

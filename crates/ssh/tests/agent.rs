@@ -108,6 +108,26 @@ async fn binds_that_fail_verification_are_refused_on_the_wire() {
 }
 
 #[tokio::test]
+async fn an_undecodable_bind_poisons_the_connection() {
+    let setup = Setup::new();
+    let mut client = setup.client().await;
+    let id = session_id(32);
+    let valid = Extension::new_message(setup.host.bind(&id, true)).unwrap();
+    let mut truncated = encode(&Request::Extension(valid));
+    truncated.truncate(truncated.len() - 8);
+    assert_eq!(client.raw(&truncated).await, Some(Response::Failure));
+    assert_eq!(
+        client.bind(setup.host.bind(&id, false)).await,
+        Response::Failure
+    );
+    let data = Auth::hostbound(&id, "git", &setup.user, &setup.host).to_bytes();
+    let response = client
+        .send(Request::SignRequest(sign_request(&setup.user, data)))
+        .await;
+    assert_eq!(response, Response::Failure);
+}
+
+#[tokio::test]
 async fn write_requests_fail_and_leave_the_keys_unchanged() {
     let setup = Setup::new();
     let mut client = setup.client().await;
