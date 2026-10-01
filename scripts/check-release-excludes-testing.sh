@@ -14,4 +14,9 @@ grep -q "must never be enabled in a release build" "$log" || {
   cat "$log" >&2
   exit 1
 }
-echo "OK: release build refuses the testing feature"
+cargo build --release -p credshim
+if grep -q "credshim-testing-hooks-enabled" target/release/credshim; then
+  echo "FAIL: the release binary contains the testing hooks marker" >&2
+  exit 1
+fi
+echo "OK: release build refuses the testing feature and the release binary has no testing hooks"
