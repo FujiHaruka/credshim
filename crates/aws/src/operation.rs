@@ -84,7 +84,7 @@ impl RestOperation {
         }
     }
 
-    fn matches(&self, request: &Request<'_>, s3_host: Option<S3Host>) -> bool {
+    fn matches(&self, request: &Request<'_>, segments: &[String], s3_host: Option<S3Host>) -> bool {
         let path = if self.endpoint_prefix == S3_PREFIX && s3_host == Some(S3Host::BucketInHost) {
             match self.path.strip_prefix("/{Bucket}") {
                 Some(rest) => rest,
@@ -102,16 +102,37 @@ impl RestOperation {
                 .headers
                 .iter()
                 .all(|name| request.headers.contains_key(*name))
-            && path_matches(path, &request.segments)
+            && route_matches(
+                &path
+                    .split('/')
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>(),
+                segments,
+            )
     }
 
-    fn specificity(&self) -> (usize, usize) {
-        let literals = self
-            .path
+    fn literals(&self) -> usize {
+        self.path
             .split('/')
             .filter(|part| !part.is_empty() && !part.starts_with('{'))
-            .count();
-        (self.query.len() + self.headers.len(), literals)
+            .count()
+    }
+
+    fn outranks(&self, other: &RestOperation) -> bool {
+        let covers = other.query.iter().all(|q| self.query.contains(q))
+            && other.headers.iter().all(|h| self.headers.contains(h));
+        let more_required =
+            self.query.len() + self.headers.len() > other.query.len() + other.headers.len();
+        let paths_comparable = self.path == other.path || !(self.greedy() || other.greedy());
+        let more_literal = self.literals() > other.literals();
+        covers
+            && paths_comparable
+            && self.literals() >= other.literals()
+            && (more_required || more_literal)
+    }
+
+    fn greedy(&self) -> bool {
+        self.path.contains("+}")
     }
 }
 
@@ -128,7 +149,7 @@ fn s3_host(host: &str, region: &str) -> Option<S3Host> {
     let rest = host.strip_suffix(&format!(".{}", hosts::AWS_DOMAIN))?;
     let legacy = format!("s3-{region}");
     let labels: Vec<&str> = rest.split('.').collect();
-    let index = labels.iter().position(|label| {
+    let index = labels.iter().rposition(|label| {
         [
             "s3",
             "s3-fips",
@@ -190,18 +211,29 @@ pub fn identify(scope: &Scope, host: &str, parts: &Parts, names: &[String]) -> V
     let request = Request::new(parts, names);
     let s3_host = s3_host(host, &scope.region);
     let start = REST_OPERATIONS.partition_point(|op| op.signing_name < service);
-    let matched: Vec<&RestOperation> = REST_OPERATIONS[start..]
+    let routes: Vec<&RestOperation> = REST_OPERATIONS[start..]
         .iter()
         .take_while(|op| op.signing_name == service)
-        .filter(|op| op.served_by(host, s3_host) && op.matches(&request, s3_host))
+        .filter(|op| op.served_by(host, s3_host))
         .collect();
-    let best = matched.iter().map(|op| op.specificity()).max();
-    let mut found: Vec<String> = Vec::new();
-    let most_specific = matched
+    let segments = literal_segments(parts.uri.path());
+    let matched: Vec<&RestOperation> = match &segments {
+        Some(segments) => routes
+            .iter()
+            .copied()
+            .filter(|op| op.matches(&request, segments, s3_host))
+            .collect(),
+        None => Vec::new(),
+    };
+    if !routes.is_empty() && matched.is_empty() {
+        return Vec::new();
+    }
+    let unbeaten = matched
         .iter()
-        .filter(|op| Some(op.specificity()) == best)
+        .filter(|op| !matched.iter().any(|other| other.outranks(op)))
         .map(|op| op.name.to_string());
-    for name in names.iter().cloned().chain(most_specific) {
+    let mut found: Vec<String> = Vec::new();
+    for name in names.iter().cloned().chain(unbeaten) {
         if !found.iter().any(|seen| seen.eq_ignore_ascii_case(&name)) {
             found.push(name);
         }
@@ -286,6 +318,34 @@ fn segments(path: &str) -> Vec<String> {
         }
     }
     resolved
+}
+
+fn literal_segments(path: &str) -> Option<Vec<String>> {
+    let path = path.strip_prefix('/')?;
+    let path = path.strip_suffix('/').unwrap_or(path);
+    if path.is_empty() {
+        return Some(Vec::new());
+    }
+    path.split('/')
+        .map(|segment| {
+            let segment = percent_decode_str(segment).decode_utf8_lossy().into_owned();
+            (!matches!(segment.as_str(), "" | "." | "..")).then_some(segment)
+        })
+        .collect()
+}
+
+fn route_matches(template: &[&str], segments: &[String]) -> bool {
+    let Some((part, rest)) = template.split_first() else {
+        return segments.is_empty();
+    };
+    if part.starts_with('{') && part.ends_with("+}") {
+        return (1..=segments.len()).any(|taken| route_matches(rest, &segments[taken..]));
+    }
+    let Some((segment, tail)) = segments.split_first() else {
+        return false;
+    };
+    let is_label = part.starts_with('{') && part.ends_with('}');
+    (is_label || segment.eq_ignore_ascii_case(part)) && route_matches(rest, tail)
 }
 
 fn path_matches(template: &str, segments: &[String]) -> bool {

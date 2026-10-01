@@ -858,7 +858,7 @@ fn rest_operations_are_identified_by_their_most_specific_route() {
             &[],
             &["GetBucketLifecycle", "GetBucketLifecycleConfiguration"],
         ),
-        ("GET", virtual_host, "/a/../b.txt", &[], &["GetObject"]),
+        ("GET", virtual_host, "/a/../b.txt", &[], &[]),
     ];
     for (method, host, uri, headers, expected) in cases {
         assert_eq!(
@@ -1015,5 +1015,81 @@ fn operation_patterns_and_limits_are_validated() {
     assert_eq!(
         AwsRule::from_specs(&[rule]).unwrap_err(),
         AwsRuleError::ZeroLimit("dev".into())
+    );
+}
+
+#[test]
+fn greedy_routes_dot_segments_bucket_labels_and_spoofed_names_never_hide_an_operation() {
+    let web = "workspaces-web.ap-northeast-1.amazonaws.com";
+    let arn = "/portals/arn%3Aaws%3Aworkspaces-web%3Aap-northeast-1%3A123456789012%3Aportal%2Fabc";
+    assert_eq!(
+        identified("DELETE", web, arn, "workspaces-web", &[]),
+        ["DeletePortal"]
+    );
+    assert_eq!(
+        identified(
+            "PUT",
+            web,
+            &format!("{arn}?browserSettingsArn=x"),
+            "workspaces-web",
+            &[]
+        ),
+        ["UpdatePortal"]
+    );
+    let slash_arn =
+        "/portals/arn:aws:workspaces-web:ap-northeast-1:123456789012:portal/abc/browserSettings";
+    let both = identified("DELETE", web, slash_arn, "workspaces-web", &[]);
+    assert!(both.contains(&"DeletePortal".to_string()), "{both:?}");
+    assert!(
+        both.contains(&"DisassociateBrowserSettings".to_string()),
+        "{both:?}"
+    );
+
+    let s3 = "bucket.s3.ap-northeast-1.amazonaws.com";
+    assert_eq!(
+        identified("DELETE", s3, "/?analytics&id=1&policy", "s3", &[]).len(),
+        2
+    );
+    assert_eq!(
+        identified(
+            "GET",
+            "s3.foo.s3.ap-northeast-1.amazonaws.com",
+            "/key",
+            "s3",
+            &[]
+        ),
+        ["GetObject"]
+    );
+    for path in [
+        "/bucket/x/..",
+        "/bucket/./x",
+        "/bucket//x",
+        "/bucket/x/%2e%2e",
+    ] {
+        assert!(
+            identified("PUT", "s3.ap-northeast-1.amazonaws.com", path, "s3", &[]).is_empty(),
+            "{path}"
+        );
+    }
+    assert!(
+        identified(
+            "GET",
+            "lambda.ap-northeast-1.amazonaws.com",
+            "/not-an-operation?Action=ListFunctions",
+            "lambda",
+            &[]
+        )
+        .is_empty()
+    );
+    assert_eq!(identified("GET", s3, "/dir/", "s3", &[]), ["GetObject"]);
+    assert_eq!(
+        identified(
+            "GET",
+            "s3.ap-northeast-1.amazonaws.com",
+            "/bucket/",
+            "s3",
+            &[]
+        ),
+        ["ListObjects"]
     );
 }
