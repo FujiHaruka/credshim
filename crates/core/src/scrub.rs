@@ -137,13 +137,17 @@ fn encodings(secret: &[u8], dummy: &[u8]) -> Vec<(Zeroizing<Vec<u8>>, Bytes)> {
         Zeroizing::new(secret.to_vec()),
         Bytes::copy_from_slice(dummy),
     )];
-    let upper = Zeroizing::new(percent_encode(secret, QUERY_VALUE).to_string());
-    let lower = Zeroizing::new(lowercase_escapes(&upper));
-    for encoded in [&upper, &lower] {
-        out.push((
-            Zeroizing::new(encoded.as_bytes().to_vec()),
-            Bytes::copy_from_slice(dummy),
-        ));
+    let query = Zeroizing::new(percent_encode(secret, QUERY_VALUE).to_string());
+    let mut form = Zeroizing::new(String::with_capacity(secret.len() * 3));
+    form.extend(form_urlencoded::byte_serialize(secret));
+    for upper in [&query, &form] {
+        let lower = Zeroizing::new(lowercase_escapes(upper));
+        for encoded in [upper, &lower] {
+            out.push((
+                Zeroizing::new(encoded.as_bytes().to_vec()),
+                Bytes::copy_from_slice(dummy),
+            ));
+        }
     }
     for engine in [&STANDARD_NO_PAD, &URL_SAFE_NO_PAD] {
         for offset in 0..3 {

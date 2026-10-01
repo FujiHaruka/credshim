@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{IsTerminal, Write};
 use std::net::SocketAddr;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -297,6 +297,7 @@ fn print_env(
     let ca_dir = config.ca_dir()?;
     let cert = ca_cert.unwrap_or_else(|| ca_dir.join(credshim_mitm::ca::CERT_FILE));
     let bundle = bundle.unwrap_or_else(|| ca_dir.join(credshim_mitm::ca::BUNDLE_FILE));
+    check_trust_files(&cert, &bundle)?;
     for (path, fix) in [
         (&cert, "credshim ca init"),
         (&bundle, "credshim ca bundle --out <file>"),
@@ -385,7 +386,8 @@ fn init_logging(audit: Option<File>) -> anyhow::Result<()> {
 async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::Result<()> {
     let loaded = load_config(config_path)?;
     let config = loaded.config;
-    check_state_paths(&config)?;
+    let backend = config.secrets()?.with_resolved_program()?;
+    check_state_paths(&config, &backend)?;
     let audit = config
         .audit
         .path
@@ -440,7 +442,7 @@ async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::
     }
     let intercepts = !rules.is_empty() || !config.oauth.is_empty() || config.has_aws();
     let store: Option<Arc<dyn SecretStore>> = if intercepts || !config.ssh_keys.is_empty() {
-        Some(Arc::from(config.secrets()?.open()?))
+        Some(Arc::from(backend.open()?))
     } else {
         None
     };
@@ -684,13 +686,28 @@ fn ssh_keygen(config_path: Option<&Path>, name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn check_state_paths(config: &config::Config) -> anyhow::Result<()> {
-    let ca_key = config.ca_dir()?.join(credshim_mitm::ca::KEY_FILE);
-    harden::check_secret(&ca_key, "CA private key")?;
-    if let credshim_secrets::BackendConfig::AgeFile { path, identity } = &config.secrets()? {
-        harden::check_secret(path, "secret store")?;
-        let store = credshim_secrets::AgeFileStore::new(path.clone(), identity.clone());
-        harden::check_secret(store.identity_path(), "secret store key")?;
+fn check_state_paths(
+    config: &config::Config,
+    backend: &credshim_secrets::BackendConfig,
+) -> anyhow::Result<()> {
+    let ca_dir = config.ca_dir()?;
+    harden::check_secret(&ca_dir.join(credshim_mitm::ca::KEY_FILE), "CA private key")?;
+    check_trust_files(
+        &ca_dir.join(credshim_mitm::ca::CERT_FILE),
+        &ca_dir.join(credshim_mitm::ca::BUNDLE_FILE),
+    )?;
+    match backend {
+        credshim_secrets::BackendConfig::AgeFile { path, identity } => {
+            harden::check_secret(path, "secret store")?;
+            let store = credshim_secrets::AgeFileStore::new(path.clone(), identity.clone());
+            harden::check_secret(store.identity_path(), "secret store key")?;
+        }
+        credshim_secrets::BackendConfig::Command { command, .. } => {
+            if let Some(program) = command.first() {
+                harden::check_private(Path::new(program), "secret store command")?;
+            }
+        }
+        credshim_secrets::BackendConfig::Keychain { .. } => {}
     }
     if !config.oauth.is_empty() {
         harden::check_secret(&config.vault_path()?, "OAuth token vault")?;
@@ -704,6 +721,11 @@ fn check_state_paths(config: &config::Config) -> anyhow::Result<()> {
         harden::check_private_dir(dir, "directory holding the ssh agent socket")?;
     }
     Ok(())
+}
+
+fn check_trust_files(cert: &Path, bundle: &Path) -> anyhow::Result<()> {
+    harden::check_private(cert, "CA certificate")?;
+    harden::check_private(bundle, "CA bundle")
 }
 
 async fn status(config_path: Option<&Path>) -> anyhow::Result<()> {
@@ -818,9 +840,10 @@ fn secret_list(config_path: Option<&Path>) -> anyhow::Result<()> {
 
 fn ca_init(dir: &Path) -> anyhow::Result<()> {
     CertificateAuthority::init(dir)?;
-    let bundle = dir.join(credshim_mitm::ca::BUNDLE_FILE);
-    std::fs::write(&bundle, credshim_mitm::ca::trust_bundle(dir)?)
-        .with_context(|| format!("could not write {}", bundle.display()))?;
+    write_public(
+        &dir.join(credshim_mitm::ca::BUNDLE_FILE),
+        credshim_mitm::ca::trust_bundle(dir)?.as_bytes(),
+    )?;
     let cert = dir.join(credshim_mitm::ca::CERT_FILE);
     writeln!(std::io::stdout(), "{}", cert.display())?;
     Ok(())
@@ -829,11 +852,24 @@ fn ca_init(dir: &Path) -> anyhow::Result<()> {
 fn ca_bundle(dir: &Path, out: Option<&Path>) -> anyhow::Result<()> {
     let bundle = credshim_mitm::ca::trust_bundle(dir)?;
     match out {
-        Some(path) => std::fs::write(path, bundle)
-            .with_context(|| format!("could not write {}", path.display()))?,
+        Some(path) => write_public(path, bundle.as_bytes())?,
         None => std::io::stdout().write_all(bundle.as_bytes())?,
     }
     Ok(())
+}
+
+fn write_public(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+    let context = || format!("could not write {}", path.display());
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o644)
+        .open(path)
+        .with_context(context)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o644))
+        .with_context(context)?;
+    file.write_all(contents).with_context(context)
 }
 
 fn ca_dir_or_default(dir: Option<PathBuf>) -> anyhow::Result<PathBuf> {

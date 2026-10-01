@@ -3,8 +3,6 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use http::header::{self, HeaderMap, HeaderValue};
 use http::request::Parts;
@@ -96,7 +94,8 @@ pub struct Exchange<'a> {
     provider: &'a Provider,
     kind: EndpointKind,
     disguised: bool,
-    basic_client_id: Option<String>,
+    basic_users: Vec<Zeroizing<String>>,
+    query_client_ids: Vec<String>,
     query_tokens: Vec<String>,
 }
 
@@ -113,8 +112,9 @@ impl<'a> Exchange<'a> {
             provider,
             kind,
             disguised,
-            basic_client_id: basic_client_id(&parts.headers),
-            query_tokens: query_tokens(parts),
+            basic_users: basic_users(&parts.headers),
+            query_client_ids: query_values(parts, "client_id"),
+            query_tokens: query_values(parts, "token"),
         }
     }
 
@@ -298,11 +298,21 @@ impl<'a> Exchange<'a> {
     }
 
     fn check_client_id(&self, doc: &Document) -> Result<(), ExchangeError> {
+        let secret_dummy = self.provider.client_secret.as_ref().map(|s| &s.dummy);
+        if secret_dummy
+            .is_some_and(|dummy| self.basic_users.iter().any(|u| u.contains(dummy.as_str())))
+        {
+            return Err(ExchangeError::ClientMismatch);
+        }
         let Some(expected) = &self.provider.client_id else {
             return Ok(());
         };
-        let presented = [doc.get("client_id"), self.basic_client_id.as_deref()];
-        if presented.into_iter().flatten().any(|id| id != expected) {
+        let mut presented = doc
+            .all("client_id")
+            .into_iter()
+            .chain(self.basic_users.iter().map(|user| Some(user.as_str())))
+            .chain(self.query_client_ids.iter().map(|id| Some(id.as_str())));
+        if presented.any(|id| id != Some(expected.as_str())) {
             return Err(ExchangeError::ClientMismatch);
         }
         Ok(())
@@ -396,24 +406,29 @@ impl<'a> Exchange<'a> {
     }
 }
 
-fn basic_client_id(headers: &HeaderMap) -> Option<String> {
-    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-    let (scheme, credentials) = value.trim().split_once(' ')?;
-    if !scheme.eq_ignore_ascii_case("basic") {
-        return None;
-    }
-    let decoded = Zeroizing::new(STANDARD.decode(credentials.trim()).ok()?);
-    let user = decoded.split(|b| *b == b':').next()?;
-    let user: String = form_urlencoded::parse(&[b"x=", user].concat())
-        .next()
-        .map(|(_, value)| value.into_owned())?;
-    Some(user)
+fn basic_users(headers: &HeaderMap) -> Vec<Zeroizing<String>> {
+    headers
+        .get_all(header::AUTHORIZATION)
+        .iter()
+        .filter_map(credshim_core::decode_basic)
+        .map(|decoded| {
+            let decoded = Zeroizing::new(decoded);
+            let user = decoded.split(|b| *b == b':').next().unwrap_or_default();
+            let encoded = Zeroizing::new([b"x=", user].concat());
+            Zeroizing::new(
+                form_urlencoded::parse(&encoded)
+                    .next()
+                    .map(|(_, value)| value.into_owned())
+                    .unwrap_or_default(),
+            )
+        })
+        .collect()
 }
 
-fn query_tokens(parts: &Parts) -> Vec<String> {
+fn query_values(parts: &Parts, key: &str) -> Vec<String> {
     let query = parts.uri.query().unwrap_or_default();
     form_urlencoded::parse(query.as_bytes())
-        .filter(|(name, _)| name == "token")
+        .filter(|(name, _)| name == key)
         .map(|(_, value)| value.into_owned())
         .collect()
 }
@@ -474,6 +489,39 @@ enum Format {
     Json(Map<String, Value>),
 }
 
+struct UniqueKeys(Map<String, Value>);
+
+impl<'de> serde::Deserialize<'de> for UniqueKeys {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = UniqueKeys;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON object without repeated keys")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut access: A,
+            ) -> Result<UniqueKeys, A::Error> {
+                let mut map = Map::new();
+                while let Some((key, value)) = access.next_entry::<String, Value>()? {
+                    if let Some(mut earlier) = map.insert(key, value) {
+                        zeroize_value(&mut earlier);
+                        map.values_mut().for_each(zeroize_value);
+                        return Err(serde::de::Error::custom("repeated key"));
+                    }
+                }
+                Ok(UniqueKeys(map))
+            }
+        }
+
+        deserializer.deserialize_map(Visitor)
+    }
+}
+
 struct Document {
     format: Format,
     touched: bool,
@@ -504,10 +552,7 @@ impl Document {
             _ => body.iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'{'),
         };
         let format = if json {
-            match serde_json::from_slice(body).ok()? {
-                Value::Object(map) => Format::Json(map),
-                _ => return None,
-            }
+            Format::Json(serde_json::from_slice::<UniqueKeys>(body).ok()?.0)
         } else {
             let text = std::str::from_utf8(body).ok()?.trim_ascii();
             if !text.contains('=') || text.contains(char::is_whitespace) {
@@ -532,6 +577,17 @@ impl Document {
                 .find(|(name, _)| name == key)
                 .map(|(_, value)| value.as_str()),
             Format::Json(map) => map.get(key)?.as_str(),
+        }
+    }
+
+    fn all(&self, key: &str) -> Vec<Option<&str>> {
+        match &self.format {
+            Format::Form(pairs) => pairs
+                .iter()
+                .filter(|(name, _)| name == key)
+                .map(|(_, value)| Some(value.as_str()))
+                .collect(),
+            Format::Json(map) => map.get(key).map(Value::as_str).into_iter().collect(),
         }
     }
 

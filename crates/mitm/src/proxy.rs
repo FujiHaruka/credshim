@@ -326,6 +326,11 @@ impl Handler {
         }
         let upstream = match self.connect_with_timeout(&host, port).await {
             Ok(tcp) => tcp,
+            Err(err) if err.is_off_limits() => {
+                tracing::warn!(%host, port, "CONNECT to a link-local, unspecified or cloud metadata address refused");
+                self.audit_connect("tcp", &host, port, &Outcome::Blocked, StatusCode::FORBIDDEN);
+                return status(StatusCode::FORBIDDEN);
+            }
             Err(err) => {
                 tracing::warn!(%host, port, error = %err, "CONNECT upstream failed");
                 self.audit_connect(
@@ -376,6 +381,17 @@ impl Handler {
         .await
         {
             Ok(session) => session,
+            Err(ConnectError::OffLimits { .. }) => {
+                tracing::warn!(%host, port, "intercepted CONNECT to a link-local, unspecified or cloud metadata address refused");
+                self.audit_connect(
+                    "https",
+                    &host,
+                    port,
+                    &Outcome::Blocked,
+                    StatusCode::FORBIDDEN,
+                );
+                return status(StatusCode::FORBIDDEN);
+            }
             Err(err) => {
                 tracing::warn!(%host, port, error = %err, "intercepted upstream failed");
                 self.audit_connect(
@@ -482,23 +498,22 @@ impl Handler {
         }
         parts.version = http::Version::HTTP_11;
         let req = Request::from_parts(parts, body.boxed());
-        let response = match self.client.request(req).await {
+        let (outcome, response) = match self.client.request(req).await {
             Ok(res) => {
                 let (mut parts, body) = res.into_parts();
                 strip_hop_by_hop(&mut parts.headers);
-                Response::from_parts(parts, body.boxed())
+                (Outcome::Pass, Response::from_parts(parts, body.boxed()))
+            }
+            Err(err) if TunnelError::off_limits_in(&err) => {
+                tracing::warn!(%authority, "request to a link-local, unspecified or cloud metadata address refused");
+                (Outcome::Blocked, status(StatusCode::FORBIDDEN))
             }
             Err(err) => {
                 tracing::warn!(%authority, error = %err, "upstream request failed");
-                status(StatusCode::BAD_GATEWAY)
+                (Outcome::Pass, status(StatusCode::BAD_GATEWAY))
             }
         };
-        audit::record(
-            &entry,
-            &Outcome::Pass,
-            response.status(),
-            &self.services.stats,
-        );
+        audit::record(&entry, &outcome, response.status(), &self.services.stats);
         response
     }
 }
@@ -511,10 +526,22 @@ enum TunnelError {
     Connect(#[from] ConnectError),
 }
 
+impl TunnelError {
+    fn is_off_limits(&self) -> bool {
+        matches!(self, Self::Connect(ConnectError::OffLimits { .. }))
+    }
+
+    fn off_limits_in(err: &(dyn std::error::Error + 'static)) -> bool {
+        std::iter::successors(Some(err), |err| err.source())
+            .any(|err| err.downcast_ref::<Self>().is_some_and(Self::is_off_limits))
+    }
+}
+
 fn connect_target(uri: &Uri) -> Option<(String, u16)> {
     let authority = uri.authority()?;
     let port = authority.port_u16()?;
-    Some((bare_host(authority.host()).to_string(), port))
+    let host = without_root_dot(bare_host(authority.host()))?;
+    Some((host.to_string(), port))
 }
 
 fn forward_authority(uri: &Uri) -> Option<http::uri::Authority> {
@@ -525,11 +552,20 @@ fn forward_authority(uri: &Uri) -> Option<http::uri::Authority> {
     let host_port = authority
         .rsplit_once('@')
         .map_or(authority, |(_, rest)| rest);
-    host_port.parse().ok()
+    let parsed: http::uri::Authority = host_port.parse().ok()?;
+    let host = without_root_dot(parsed.host())?;
+    match parsed.port() {
+        Some(port) => format!("{host}:{port}").parse().ok(),
+        None => host.parse().ok(),
+    }
 }
 
 fn bare_host(host: &str) -> &str {
     host.trim_start_matches('[').trim_end_matches(']')
+}
+
+fn without_root_dot(host: &str) -> Option<&str> {
+    Some(host.trim_end_matches('.')).filter(|host| !host.is_empty())
 }
 
 const HOP_BY_HOP: [HeaderName; 8] = [

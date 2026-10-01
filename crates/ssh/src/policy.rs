@@ -40,6 +40,8 @@ pub enum BindRefusal {
     AlreadyBound,
     #[error("an earlier bind on this connection failed")]
     Poisoned,
+    #[error("the session bind could not be decoded")]
+    Undecodable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,6 +123,13 @@ impl Connection {
         };
         self.state = next;
         result
+    }
+
+    pub fn reject_undecodable_bind(&mut self) -> BindRefusal {
+        if !matches!(self.state, State::Forwarded) {
+            self.state = State::Poisoned;
+        }
+        BindRefusal::Undecodable
     }
 
     pub fn decide(&self, keys: &[AgentKey], request: &SignRequest) -> Decision {

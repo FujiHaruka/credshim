@@ -363,6 +363,53 @@ fn command_store_is_read_only() {
 }
 
 #[test]
+fn command_store_runs_the_absolute_path_it_resolved_on_path() {
+    let store = CommandStore::new(
+        vec!["sh".into(), "-c".into(), r#"printf '%s' "$0""#.into()],
+        Duration::from_secs(10),
+    )
+    .unwrap();
+
+    let program = value(&store, "openai").unwrap();
+
+    assert!(
+        program.starts_with('/') && program.ends_with("/sh"),
+        "{program}"
+    );
+}
+
+#[test]
+fn command_store_refuses_a_program_it_cannot_pin_down() {
+    for program in ["credshim-no-such-program", "/usr/bin/{name}"] {
+        let err = CommandStore::new(vec![program.into()], Duration::from_secs(1))
+            .err()
+            .unwrap();
+        assert!(
+            matches!(err, StoreError::InvalidCommand(_)),
+            "{program}: {err}"
+        );
+    }
+}
+
+#[test]
+fn backend_config_resolves_only_the_command_program() {
+    let command = BackendConfig::Command {
+        command: vec!["sh".into(), "{name}".into()],
+        timeout_secs: None,
+    }
+    .with_resolved_program()
+    .unwrap();
+    let keychain = BackendConfig::Keychain { service: None };
+
+    let BackendConfig::Command { command, .. } = command else {
+        panic!("{command:?}");
+    };
+    assert!(command[0].starts_with('/') && command[0].ends_with("/sh"));
+    assert_eq!(command[1], "{name}");
+    assert_eq!(keychain.clone().with_resolved_program().unwrap(), keychain);
+}
+
+#[test]
 fn backend_config_parses_each_backend_and_rejects_unknown_fields() {
     let parse = |text: &str| toml::from_str::<BackendConfig>(text);
 

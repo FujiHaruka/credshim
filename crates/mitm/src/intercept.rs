@@ -132,7 +132,8 @@ impl VerifiedTarget {
         let host = host
             .strip_prefix('[')
             .and_then(|h| h.strip_suffix(']'))
-            .unwrap_or(host);
+            .unwrap_or(host)
+            .trim_end_matches('.');
         host.eq_ignore_ascii_case(&self.host)
             && authority.port_u16().unwrap_or(HTTPS_PORT) == self.port
     }

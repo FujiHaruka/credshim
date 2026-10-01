@@ -6,8 +6,8 @@ use std::time::{Duration, SystemTime};
 use bytes::Bytes;
 use credshim_core::TokenResolver;
 use credshim_oauth::{
-    ClientSecretSpec, EXPIRY_GRACE, ExchangeError, OAuth, Provider, ProviderError, ProviderSpec,
-    TokenKind, Vault, VaultError,
+    ClientSecretSpec, EXPIRY_GRACE, EndpointKind, ExchangeError, OAuth, Provider, ProviderError,
+    ProviderSpec, TokenKind, Vault, VaultError,
 };
 use http::{Request, Response, StatusCode};
 use http_body_util::Full;
@@ -68,6 +68,16 @@ async fn run(
     response: Response<Full<Bytes>>,
 ) -> (Result<Response<Bytes>, ExchangeError>, Sent) {
     let parts = parts(path, "application/x-www-form-urlencoded");
+    run_parts(oauth, host, parts, body, response).await
+}
+
+async fn run_parts(
+    oauth: &OAuth,
+    host: &str,
+    parts: http::request::Parts,
+    body: &str,
+    response: Response<Full<Bytes>>,
+) -> (Result<Response<Bytes>, ExchangeError>, Sent) {
     let exchange = oauth.exchange(host, 443, &parts).expect("endpoint");
     let sent: Sent = Arc::default();
     let record = sent.clone();
@@ -200,6 +210,133 @@ async fn requests_for_another_client_or_provider_never_leave_the_proxy() {
         let err = result.unwrap_err();
         assert!(format!("{err:?}").starts_with(expected), "{err:?}");
         assert!(sent.lock().unwrap().is_none());
+    }
+}
+
+#[tokio::test]
+async fn client_ids_are_checked_wherever_they_appear() {
+    use base64::Engine;
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+
+    let mut anonymous = spec("c", "c.example.test");
+    anonymous.client_id = None;
+    let oauth = OAuth::new(
+        vec![
+            provider("a", "a.example.test"),
+            Provider::new(anonymous, Some(SecretString::from(REAL_SECRET))).unwrap(),
+        ],
+        Vault::in_memory(),
+    )
+    .unwrap();
+    let basic = |engine: &base64::engine::GeneralPurpose, credentials: &str| {
+        format!("Basic {}", engine.encode(credentials))
+    };
+    let form = "application/x-www-form-urlencoded";
+    let cases = [
+        (
+            "a",
+            "/token",
+            form,
+            vec![basic(&STANDARD_NO_PAD, "client-z:secre")],
+            CLIENT_CREDENTIALS,
+        ),
+        (
+            "a",
+            "/token",
+            form,
+            vec![
+                basic(&STANDARD, "client-a:x"),
+                basic(&STANDARD, "client-z:x"),
+            ],
+            CLIENT_CREDENTIALS,
+        ),
+        (
+            "a",
+            "/token?client_id=client-z",
+            form,
+            vec![],
+            CLIENT_CREDENTIALS,
+        ),
+        (
+            "a",
+            "/token",
+            form,
+            vec![],
+            "grant_type=client_credentials&client_id=client-a&client_id=client-z",
+        ),
+        (
+            "a",
+            "/token",
+            "application/json",
+            vec![],
+            r#"{"grant_type":"client_credentials","client_id":5}"#,
+        ),
+        (
+            "c",
+            "/token",
+            form,
+            vec![basic(&STANDARD_NO_PAD, &format!("{CLIENT_DUMMY}-c:x"))],
+            "grant_type=client_credentials",
+        ),
+    ];
+    for (provider, path, content_type, authorizations, body) in cases {
+        let mut parts = parts(path, content_type);
+        for value in &authorizations {
+            parts
+                .headers
+                .append("authorization", value.parse().unwrap());
+        }
+        let (result, sent) = run_parts(
+            &oauth,
+            &format!("{provider}.example.test"),
+            parts,
+            body,
+            json(StatusCode::OK, "{}"),
+        )
+        .await;
+        let err = result.expect_err(path);
+        assert!(
+            matches!(err, ExchangeError::ClientMismatch),
+            "{authorizations:?} {path} {body}: {err:?}"
+        );
+        assert!(sent.lock().unwrap().is_none());
+    }
+}
+
+#[tokio::test]
+async fn json_bodies_with_a_repeated_key_never_leave_the_proxy() {
+    let oauth = oauth();
+    let (result, sent) = run_parts(
+        &oauth,
+        "a.example.test",
+        parts("/token", "application/json"),
+        r#"{"grant_type":"client_credentials","client_id":"client-z","client_id":"client-a"}"#,
+        json(StatusCode::OK, "{}"),
+    )
+    .await;
+
+    let err = result.unwrap_err();
+    assert!(matches!(err, ExchangeError::MalformedRequest), "{err:?}");
+    assert!(sent.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_revoke_endpoint_nested_under_the_token_endpoint_is_a_revoke() {
+    let mut nested = spec("d", "d.example.test");
+    nested.token_endpoint = "https://d.example.test/oauth2/token".into();
+    nested.revoke_endpoint = Some("https://d.example.test/oauth2/token/revoke".into());
+    let oauth = OAuth::new(
+        vec![Provider::new(nested, Some(SecretString::from(REAL_SECRET))).unwrap()],
+        Vault::in_memory(),
+    )
+    .unwrap();
+    for (path, kind) in [
+        ("/oauth2/token", EndpointKind::Token),
+        ("/oauth2/token/revoke", EndpointKind::Revoke),
+    ] {
+        let parts = parts(path, "application/x-www-form-urlencoded");
+        let exchange = oauth.exchange("d.example.test", 443, &parts).expect(path);
+        assert_eq!(exchange.kind(), kind, "{path}");
     }
 }
 

@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::io;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -51,6 +52,31 @@ pub enum ConnectError {
     InvalidName(String),
     #[error("timed out connecting to upstream {host}:{port}")]
     Timeout { host: String, port: u16 },
+    #[error(
+        "upstream {host}:{port} resolves only to link-local, unspecified or cloud metadata addresses"
+    )]
+    OffLimits { host: String, port: u16 },
+}
+
+const GCP_METADATA_V6: Ipv6Addr = Ipv6Addr::new(0xfd20, 0xce, 0, 0, 0, 0, 0, 0x254);
+
+fn is_aws_service_v6(v6: Ipv6Addr) -> bool {
+    v6.segments()[..2] == [0xfd00, 0xec2]
+}
+
+fn is_off_limits(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_link_local() || v4.octets()[0] == 0,
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => is_off_limits(IpAddr::V4(v4)),
+            None => {
+                v6.is_unspecified()
+                    || v6.is_unicast_link_local()
+                    || is_aws_service_v6(v6)
+                    || v6 == GCP_METADATA_V6
+            }
+        },
+    }
 }
 
 impl Upstream {
@@ -88,13 +114,29 @@ impl Upstream {
                     source,
                 });
         }
-        TcpStream::connect((host, port))
+        let tcp_error = |source| ConnectError::Tcp {
+            host: host.to_string(),
+            port,
+            source,
+        };
+        let resolved: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
             .await
-            .map_err(|source| ConnectError::Tcp {
+            .map_err(tcp_error)?
+            .collect();
+        let allowed: Vec<SocketAddr> = resolved
+            .iter()
+            .copied()
+            .filter(|addr| !is_off_limits(addr.ip()))
+            .collect();
+        if allowed.is_empty() && !resolved.is_empty() {
+            return Err(ConnectError::OffLimits {
                 host: host.to_string(),
                 port,
-                source,
-            })
+            });
+        }
+        TcpStream::connect(allowed.as_slice())
+            .await
+            .map_err(tcp_error)
     }
 
     pub async fn connect_tls(

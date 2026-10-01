@@ -227,14 +227,17 @@ socket = "/path/to/status.sock"
 同じOSユーザーでエージェントとプロキシが動く限り、エージェントは秘密ストアや設定に手が届く。実運用ではプロキシを専用ユーザーで常駐させ、開発ユーザーには sudo を与えない。
 
 ```sh
-sudo credshim service install          # Linux は systemd（ユーザー credshim）、macOS は launchd（ユーザー _credshim）
-credshim service install --print       # 実行前に中身を確認する
+# /path/to/credshim は root 所有で、開発ユーザーが書き換えられないディレクトリに置いたバイナリ
+sudo /path/to/credshim service install   # Linux は systemd（ユーザー credshim）、macOS は launchd（ユーザー _credshim）
+/path/to/credshim service install --print # 実行前に中身を確認する
 ```
+
+管理者になる操作（`su`、`sudo`）と専用ユーザーとしての操作（秘密の入力、SSO のログイン）は、開発ユーザーが持つ端末では行わない。開発ユーザーのプロセスはその端末に打ち込まれた文字を読めるので、管理者のパスワードや登録する秘密を盗める。別のコンソール、管理者ユーザーでの SSH ログイン、別の GUI ユーザーのセッションから行う。最初の `service install` も、開発ユーザーが書き換えられない場所にあるバイナリをフルパスで指定する。
 
 状態は `/var/lib/credshim`（専用ユーザーだけが読める）、公開用の CA 証明書・結合バンドル・シェル用の変数は `/etc/credshim` に置かれる。ルールと秘密の登録は専用ユーザーとして行い、ルールを変えたらインストール済みのバイナリで `service install` をもう一度実行して `/etc/credshim/env` を更新する（開発ユーザーが書き換えられるバイナリを sudo で動かさない）。別のバイナリで置き換えるときは `--upgrade` を付ける。
 
 ```sh
-credshim preset openai | sudo -u credshim tee -a /var/lib/credshim/config.toml
+/usr/local/libexec/credshim/credshim preset openai | sudo -u credshim tee -a /var/lib/credshim/config.toml
 sudo -u credshim /usr/local/libexec/credshim/credshim secret set openai --config /var/lib/credshim/config.toml
 sudo /usr/local/libexec/credshim/credshim service install   # macOS は /Library/CredShim/bin/credshim
 

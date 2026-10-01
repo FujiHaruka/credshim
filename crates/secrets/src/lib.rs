@@ -9,7 +9,7 @@ use secrecy::SecretString;
 use serde::Deserialize;
 
 pub use age_file::AgeFileStore;
-pub use command::CommandStore;
+pub use command::{CommandStore, find_in_path, resolve_program};
 pub use keychain::{Keychain, KeychainStore};
 
 pub const DEFAULT_KEYCHAIN_SERVICE: &str = "credshim";
@@ -59,6 +59,8 @@ pub enum StoreError {
     ListUnsupported(&'static str),
     #[error("secret command for {name:?} failed: {reason}")]
     Command { name: String, reason: String },
+    #[error("invalid secret store command: {0}")]
+    InvalidCommand(String),
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -78,6 +80,26 @@ pub enum BackendConfig {
 }
 
 impl BackendConfig {
+    pub fn with_resolved_program(self) -> Result<Self, StoreError> {
+        let BackendConfig::Command {
+            mut command,
+            timeout_secs,
+        } = self
+        else {
+            return Ok(self);
+        };
+        if let Some(program) = command.first_mut() {
+            *program = resolve_program(program)?
+                .into_os_string()
+                .into_string()
+                .map_err(|_| StoreError::InvalidCommand("the program path is not UTF-8".into()))?;
+        }
+        Ok(BackendConfig::Command {
+            command,
+            timeout_secs,
+        })
+    }
+
     pub fn open(&self) -> Result<Box<dyn SecretStore>, StoreError> {
         Ok(match self {
             BackendConfig::Keychain { service } => Box::new(KeychainStore::new(

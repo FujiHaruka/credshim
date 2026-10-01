@@ -185,6 +185,22 @@ fn encoded_forms_the_proxy_sends_are_scrubbed_too() {
 }
 
 #[test]
+fn form_encoded_echoes_are_scrubbed_too() {
+    let secret = "Entra~secret*with space";
+    let s = scrubber(&[(secret, "DUMMY-VALUE-0123456789")]);
+    for body in [
+        "client_secret=Entra%7Esecret*with+space&grant_type=x",
+        "client_secret=Entra%7esecret*with+space&grant_type=x",
+    ] {
+        let scrubbed = s.scrub(body.as_bytes()).expect("form body scrubbed");
+        assert_eq!(
+            scrubbed, b"client_secret=DUMMY-VALUE-0123456789&grant_type=x",
+            "{body}"
+        );
+    }
+}
+
+#[test]
 fn base64url_echoes_are_scrubbed_too() {
     use base64::Engine;
     use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};

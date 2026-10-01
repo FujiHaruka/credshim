@@ -3,7 +3,7 @@ mod common;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use common::{OPENAI_DUMMY, openai_rule, output, spawn_run, store_secret, write_config};
+use common::{OPENAI_DUMMY, credshim, openai_rule, output, spawn_run, store_secret, write_config};
 use credshim_testkit::{MockUpstream, fake_secret};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -86,6 +86,130 @@ async fn run_refuses_a_config_directory_others_could_write() {
     assert!(
         stderr.contains("directory holding the config file"),
         "{stderr}"
+    );
+}
+
+#[tokio::test]
+async fn a_config_named_without_a_directory_still_has_its_directory_checked() {
+    let (home, _) = ready_home().await;
+    chmod(home.path(), 0o777);
+
+    let output = common::credshim(home.path())
+        .current_dir(home.path())
+        .args([
+            "run",
+            "--listen",
+            "127.0.0.1:0",
+            "--config",
+            "credshim.toml",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .unwrap();
+    chmod(home.path(), 0o700);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("directory holding the config file"),
+        "{stderr}"
+    );
+}
+
+#[tokio::test]
+async fn a_symlinked_config_has_the_directory_of_its_target_checked() {
+    let (home, config) = ready_home().await;
+    let shared = home.path().join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    std::fs::rename(&config, shared.join("credshim.toml")).unwrap();
+    std::os::unix::fs::symlink(shared.join("credshim.toml"), &config).unwrap();
+    chmod(&shared, 0o777);
+
+    let stderr = run_refused(home.path(), &config).await;
+    chmod(&shared, 0o700);
+
+    assert!(
+        stderr.contains("directory holding the config file"),
+        "{stderr}"
+    );
+}
+
+#[tokio::test]
+async fn run_and_env_refuse_ca_certificates_others_could_rewrite() {
+    let (home, config) = ready_home().await;
+    chmod(&home.path().join("ca/ca.pem"), 0o666);
+
+    let stderr = run_refused(home.path(), &config).await;
+    let env = output(home.path(), &["env", "--config", &config]).await;
+
+    assert!(stderr.contains("CA certificate"), "{stderr}");
+    assert!(!env.status.success());
+    let env_stderr = String::from_utf8_lossy(&env.stderr);
+    assert!(env_stderr.contains("CA certificate"), "{env_stderr}");
+}
+
+fn write_command_config(home: &Path, program: &str) -> String {
+    let config = home.join("command.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[secrets]\nbackend = \"command\"\ncommand = [\"{program}\", \"{{name}}\"]\n\n[ca]\ndir = \"{}\"\n\n{}",
+            home.join("ca").display(),
+            openai_rule("api.openai.com", 443),
+        ),
+    )
+    .unwrap();
+    config.display().to_string()
+}
+
+#[tokio::test]
+async fn run_refuses_a_secret_store_command_others_could_rewrite() {
+    let (home, _) = ready_home().await;
+    let program = home.path().join("fetch-secret");
+    std::fs::write(&program, "#!/bin/sh\necho value\n").unwrap();
+    chmod(&program, 0o777);
+    let config = write_command_config(home.path(), &program.display().to_string());
+
+    let stderr = run_refused(home.path(), &config).await;
+
+    assert!(stderr.contains("secret store command"), "{stderr}");
+    assert!(stderr.contains("writable by group or others"), "{stderr}");
+}
+
+#[tokio::test]
+async fn run_resolves_the_secret_store_command_on_path_once_and_checks_that_file() {
+    let (home, _) = ready_home().await;
+    let bin = home.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let program = bin.join("fetch-secret");
+    std::fs::write(&program, "#!/bin/sh\necho value\n").unwrap();
+    chmod(&program, 0o755);
+    chmod(&bin, 0o777);
+    let config = write_command_config(home.path(), "fetch-secret");
+    let run_with_path = |path: String| {
+        credshim(home.path())
+            .env("PATH", path)
+            .args(["run", "--listen", "127.0.0.1:0", "--config", &config])
+            .stdin(std::process::Stdio::null())
+            .output()
+    };
+
+    let found = run_with_path(format!("{}:/usr/bin:/bin", bin.display()))
+        .await
+        .unwrap();
+    let missing = run_with_path("/usr/bin:/bin".to_string()).await.unwrap();
+
+    let found = String::from_utf8_lossy(&found.stderr);
+    assert!(
+        found.contains("the directory holding the secret store command"),
+        "{found}"
+    );
+    assert!(found.contains("writable by group or others"), "{found}");
+    let missing = String::from_utf8_lossy(&missing.stderr);
+    assert!(
+        missing.contains(r#""fetch-secret" is not an executable on PATH"#),
+        "{missing}"
     );
 }
 
