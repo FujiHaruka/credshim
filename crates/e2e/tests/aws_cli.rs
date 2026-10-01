@@ -29,6 +29,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_rule(|_| {}).await
+    }
+
+    async fn with_rule(tweak: impl FnOnce(&mut AwsKeySpec)) -> Self {
         install_crypto_provider();
         let upstream_ca = TestCa::new();
         let real = AwsKeys {
@@ -67,7 +71,7 @@ impl Fixture {
                 .collect::<HashMap<_, _>>(),
         })
         .unwrap();
-        let rules = AwsRule::from_specs(&[AwsKeySpec {
+        let mut spec = AwsKeySpec {
             name: "aws".into(),
             dummy_access_key_id: DUMMY.into(),
             access_key_id: "aws-access-key-id".into(),
@@ -76,8 +80,9 @@ impl Fixture {
             regions: None,
             operations: None,
             limits: Default::default(),
-        }])
-        .unwrap();
+        };
+        tweak(&mut spec);
+        let rules = AwsRule::from_specs(&[spec]).unwrap();
         let mut signer = Signer::default();
         signer.insert(
             "aws",
@@ -262,4 +267,61 @@ async fn aws_cli_cannot_mint_new_credentials() {
     let session = fixture.aws(&["sts", "get-session-token"]).await;
     assert!(!session.status.success());
     assert!(fixture.mock.requests().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "needs the aws CLI v2; run with `mise exec -- cargo test -p credshim-e2e -- --ignored`"]
+async fn aws_cli_requests_outside_the_operations_allow_list_are_refused() {
+    let fixture = Fixture::with_rule(|spec| {
+        spec.operations = Some(vec![
+            "sts:GetCallerIdentity".into(),
+            "s3:ListObjectsV2".into(),
+            "s3:HeadObject".into(),
+            "s3:GetObject".into(),
+        ]);
+    })
+    .await;
+    fixture
+        .mock
+        .put_object(BUCKET, "kept.txt", b"read me".to_vec());
+
+    succeeded(&fixture.aws(&["sts", "get-caller-identity"]).await);
+    let listing = fixture.aws(&["s3", "ls", &format!("s3://{BUCKET}/")]).await;
+    assert!(succeeded(&listing).contains("kept.txt"));
+    let target = fixture.path("kept.txt");
+    let download = fixture
+        .aws(&[
+            "s3",
+            "cp",
+            &format!("s3://{BUCKET}/kept.txt"),
+            target.to_str().unwrap(),
+        ])
+        .await;
+    succeeded(&download);
+    assert_eq!(std::fs::read(&target).unwrap(), b"read me");
+    let allowed = fixture.mock.requests().len();
+
+    let source = fixture.path("new.txt");
+    std::fs::write(&source, b"new").unwrap();
+    let upload = fixture
+        .aws(&[
+            "s3",
+            "cp",
+            source.to_str().unwrap(),
+            &format!("s3://{BUCKET}/new.txt"),
+        ])
+        .await;
+    assert!(!upload.status.success());
+    let stderr = String::from_utf8_lossy(&upload.stderr);
+    assert!(stderr.contains("CredShimOperationNotAllowed"), "{stderr}");
+    assert!(stderr.contains("PutObject"), "{stderr}");
+    let tables = fixture.aws(&["dynamodb", "list-tables"]).await;
+    assert!(!tables.status.success());
+    assert!(
+        String::from_utf8_lossy(&tables.stderr).contains("ListTables"),
+        "{}",
+        String::from_utf8_lossy(&tables.stderr)
+    );
+    assert_eq!(fixture.mock.requests().len(), allowed);
+    fixture.assert_all_verified();
 }
