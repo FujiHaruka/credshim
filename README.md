@@ -10,7 +10,22 @@
 
 ## インストール
 
-Rust（rustup）が要る。
+[Releases](https://github.com/FujiHaruka/credshim/releases) にビルド済みのバイナリがある。`target` は `x86_64-unknown-linux-gnu`、`aarch64-unknown-linux-gnu`（どちらも glibc 2.35 以降）、`aarch64-apple-darwin`、`x86_64-apple-darwin` のどれか。
+
+```sh
+version=0.2.0
+target=aarch64-apple-darwin
+base=https://github.com/FujiHaruka/credshim/releases/download/v$version
+curl -fsSLO "$base/credshim-$version-$target.tar.gz"
+curl -fsSLO "$base/SHA256SUMS"
+grep " credshim-$version-$target.tar.gz\$" SHA256SUMS | shasum -a 256 -c
+tar -xzf "credshim-$version-$target.tar.gz"
+sudo install -m 0755 credshim /usr/local/bin/credshim
+```
+
+macOS のバイナリは Apple の署名と公証を受けていない。curl で取得すれば Gatekeeper には止められないが、ブラウザでダウンロードした場合は `xattr -d com.apple.quarantine credshim` で隔離属性を外す。
+
+ソースからビルドするには Rust（rustup）が要る。
 
 ```sh
 cargo install --locked --path crates/cli

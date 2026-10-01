@@ -15,7 +15,7 @@ grep -q "must never be enabled in a release build" "$log" || {
   exit 1
 }
 cargo build --locked --release -p credshim
-bin=${CARGO_TARGET_DIR:-target}/release/credshim
+bin=${CARGO_TARGET_DIR:-target}/${CARGO_BUILD_TARGET:+$CARGO_BUILD_TARGET/}release/credshim
 [[ -f $bin ]] || {
   echo "FAIL: the release binary is not at $bin" >&2
   exit 1
