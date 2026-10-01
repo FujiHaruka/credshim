@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use credshim_mitm::DOCTOR_HOST;
+use credshim_secrets::find_in_path;
 use credshim_ssh::ssh_agent_lib::proto::{Request, Response};
 use credshim_ssh::ssh_agent_lib::ssh_encoding::{Decode, Encode};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -591,20 +592,6 @@ impl Runtime {
             _ => String::new(),
         }
     }
-}
-
-fn find_in_path(program: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths)
-            .map(|dir| dir.join(program))
-            .find(|candidate| is_executable(candidate))
-    })
-}
-
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    path.metadata()
-        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
 #[cfg(test)]

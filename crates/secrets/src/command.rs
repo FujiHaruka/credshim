@@ -1,4 +1,6 @@
 use std::io::Read;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -12,34 +14,64 @@ const MAX_OUTPUT: u64 = 64 * 1024;
 const POLL: Duration = Duration::from_millis(10);
 
 pub struct CommandStore {
-    argv: Vec<String>,
+    program: PathBuf,
+    args: Vec<String>,
     timeout: Duration,
+}
+
+pub fn resolve_program(program: &str) -> Result<PathBuf, StoreError> {
+    let invalid = |reason: String| StoreError::InvalidCommand(reason);
+    if program.contains(NAME_PLACEHOLDER) {
+        return Err(invalid(format!(
+            "the program {program:?} cannot contain {NAME_PLACEHOLDER}"
+        )));
+    }
+    let found = if program.contains('/') {
+        PathBuf::from(program)
+    } else {
+        find_in_path(program)
+            .ok_or_else(|| invalid(format!("{program:?} is not an executable on PATH")))?
+    };
+    std::path::absolute(&found)
+        .map_err(|err| invalid(format!("could not resolve {}: {err}", found.display())))
+}
+
+pub fn find_in_path(program: &str) -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(program))
+        .find(|candidate| is_executable(candidate))
+}
+
+fn is_executable(path: &Path) -> bool {
+    path.metadata()
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
 impl CommandStore {
     pub fn new(argv: Vec<String>, timeout: Duration) -> Result<Self, StoreError> {
-        if argv.is_empty() {
-            return Err(StoreError::Command {
-                name: String::new(),
-                reason: "the command is empty".to_string(),
-            });
-        }
-        Ok(Self { argv, timeout })
+        let (program, args) = argv
+            .split_first()
+            .ok_or_else(|| StoreError::InvalidCommand("the command is empty".to_string()))?;
+        Ok(Self {
+            program: resolve_program(program)?,
+            args: args.to_vec(),
+            timeout,
+        })
     }
 
     fn fetch(&self, name: &str) -> Result<Zeroizing<Vec<u8>>, String> {
         let args: Vec<String> = self
-            .argv
+            .args
             .iter()
             .map(|arg| arg.replace(NAME_PLACEHOLDER, name))
             .collect();
-        let mut child = Command::new(&args[0])
-            .args(&args[1..])
+        let mut child = Command::new(&self.program)
+            .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .map_err(|err| format!("could not start {:?}: {err}", args[0]))?;
+            .map_err(|err| format!("could not start {}: {err}", self.program.display()))?;
         let stdout = child.stdout.take().expect("stdout is piped");
         let (sent, output) = std::sync::mpsc::channel();
         std::thread::spawn(move || {

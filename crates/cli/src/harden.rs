@@ -73,15 +73,6 @@ fn absolute(path: &Path) -> anyhow::Result<PathBuf> {
     std::path::absolute(path).with_context(|| format!("could not resolve {}", path.display()))
 }
 
-pub fn find_program(program: &str) -> Option<PathBuf> {
-    if program.contains('/') {
-        return Some(PathBuf::from(program));
-    }
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .map(|dir| dir.join(program))
-        .find(|candidate| candidate.is_file())
-}
-
 fn check_mode(
     path: &Path,
     metadata: &std::fs::Metadata,

@@ -386,7 +386,8 @@ fn init_logging(audit: Option<File>) -> anyhow::Result<()> {
 async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::Result<()> {
     let loaded = load_config(config_path)?;
     let config = loaded.config;
-    check_state_paths(&config)?;
+    let backend = config.secrets()?.with_resolved_program()?;
+    check_state_paths(&config, &backend)?;
     let audit = config
         .audit
         .path
@@ -441,7 +442,7 @@ async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::
     }
     let intercepts = !rules.is_empty() || !config.oauth.is_empty() || config.has_aws();
     let store: Option<Arc<dyn SecretStore>> = if intercepts || !config.ssh_keys.is_empty() {
-        Some(Arc::from(config.secrets()?.open()?))
+        Some(Arc::from(backend.open()?))
     } else {
         None
     };
@@ -685,22 +686,25 @@ fn ssh_keygen(config_path: Option<&Path>, name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn check_state_paths(config: &config::Config) -> anyhow::Result<()> {
+fn check_state_paths(
+    config: &config::Config,
+    backend: &credshim_secrets::BackendConfig,
+) -> anyhow::Result<()> {
     let ca_dir = config.ca_dir()?;
     harden::check_secret(&ca_dir.join(credshim_mitm::ca::KEY_FILE), "CA private key")?;
     check_trust_files(
         &ca_dir.join(credshim_mitm::ca::CERT_FILE),
         &ca_dir.join(credshim_mitm::ca::BUNDLE_FILE),
     )?;
-    match &config.secrets()? {
+    match backend {
         credshim_secrets::BackendConfig::AgeFile { path, identity } => {
             harden::check_secret(path, "secret store")?;
             let store = credshim_secrets::AgeFileStore::new(path.clone(), identity.clone());
             harden::check_secret(store.identity_path(), "secret store key")?;
         }
         credshim_secrets::BackendConfig::Command { command, .. } => {
-            if let Some(program) = command.first().and_then(|p| harden::find_program(p)) {
-                harden::check_private(&program, "secret store command")?;
+            if let Some(program) = command.first() {
+                harden::check_private(Path::new(program), "secret store command")?;
             }
         }
         credshim_secrets::BackendConfig::Keychain { .. } => {}
