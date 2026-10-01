@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
@@ -242,12 +243,23 @@ impl Config {
     }
 }
 
+const SERVICE_STATE_DIR: &str = "/var/lib/credshim";
+
 pub fn config_dir() -> anyhow::Result<PathBuf> {
+    let service = Path::new(SERVICE_STATE_DIR);
+    if is_own_directory(service) {
+        return Ok(service.to_path_buf());
+    }
     let config_home = match std::env::var_os("XDG_CONFIG_HOME") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
         _ => PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".config"),
     };
     Ok(config_home.join("credshim"))
+}
+
+fn is_own_directory(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|meta| meta.is_dir() && meta.uid() == rustix::process::geteuid().as_raw())
 }
 
 pub fn default_ca_dir() -> anyhow::Result<PathBuf> {
@@ -280,4 +292,26 @@ fn is_env_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_real_directory_owned_by_this_user_is_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, "").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(dir.path(), &link).unwrap();
+
+        assert!(is_own_directory(dir.path()));
+        assert!(!is_own_directory(&file));
+        assert!(!is_own_directory(&link));
+        assert!(!is_own_directory(&dir.path().join("missing")));
+        if !rustix::process::geteuid().is_root() {
+            assert!(!is_own_directory(Path::new("/usr")));
+        }
+    }
 }
