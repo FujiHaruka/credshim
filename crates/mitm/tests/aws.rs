@@ -595,8 +595,16 @@ async fn unsigned_credential_apis_are_refused_without_any_rule_matching() {
         "ap-northeast-1.signin.aws.amazon.com",
         "ap-northeast-1.oauth.signin.aws",
     ] {
-        let (_, head) = connect(f.proxy.local_addr(), &format!("{host}:443")).await;
-        assert!(head.starts_with("HTTP/1.1 403"), "{host}: {head}");
+        for target in [
+            host.to_string(),
+            format!("{host}."),
+            format!("{}.", host.to_uppercase()),
+        ] {
+            let (_, head) = connect(f.proxy.local_addr(), &format!("{target}:443")).await;
+            assert!(head.starts_with("HTTP/1.1 403"), "{target}: {head}");
+            let head = forward_head(f.proxy.local_addr(), &target).await;
+            assert!(head.starts_with("HTTP/1.1 403"), "{target}: {head}");
+        }
     }
     let contents = logs.contents();
     assert!(contents.contains("reason=\"unsigned_credential_operation\""));
@@ -816,4 +824,12 @@ async fn requests_over_a_rule_limit_get_429_and_never_reach_aws() {
     let contents = logs.contents();
     assert!(contents.contains("decision=\"limited\""), "{contents}");
     assert!(contents.contains("reason=\"limited\""), "{contents}");
+}
+
+async fn forward_head(proxy: std::net::SocketAddr, host: &str) -> String {
+    let mut tcp = tokio::net::TcpStream::connect(proxy).await.unwrap();
+    tcp.write_all(format!("GET http://{host}/ HTTP/1.1\r\nHost: {host}\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    read_head(&mut tcp).await
 }

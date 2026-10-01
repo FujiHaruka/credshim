@@ -332,6 +332,47 @@ async fn unreachable_upstream_is_502() {
 }
 
 #[tokio::test]
+async fn cloud_metadata_and_unspecified_addresses_are_refused() {
+    let logs = capture_logs();
+    let proxy = start_proxy().await;
+    for target in [
+        "169.254.169.254:80",
+        "[fd00:ec2::254]:80",
+        "[fe80::1]:80",
+        "[::ffff:169.254.169.254]:80",
+        "0.0.0.0:80",
+        "[::]:80",
+    ] {
+        let mut tcp = TcpStream::connect(proxy.local_addr()).await.unwrap();
+        tcp.write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let tunnelled = read_head(&mut tcp).await;
+        assert!(
+            tunnelled.starts_with("HTTP/1.1 403"),
+            "{target}: {tunnelled}"
+        );
+        let forwarded = raw_exchange(
+            proxy.local_addr(),
+            &format!(
+                "GET http://{target}/latest/meta-data/ HTTP/1.1\r\nHost: {target}\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert!(
+            forwarded.starts_with("HTTP/1.1 403"),
+            "{target}: {forwarded}"
+        );
+    }
+    let refused = connect_audit_lines(&logs, "169.254.169.254", 80);
+    assert_eq!(refused.len(), 1, "{refused:#?}");
+    assert!(
+        refused[0].ends_with(r#"rules= decision="deny" status=403"#),
+        "{refused:#?}"
+    );
+}
+
+#[tokio::test]
 async fn refuses_non_loopback_listen_address() {
     install_crypto_provider();
     let addr: SocketAddr = "192.0.2.1:8787".parse().unwrap();
