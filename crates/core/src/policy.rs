@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use http::{HeaderMap, Method};
+use http::{HeaderMap, Method, Uri};
 use serde::Deserialize;
 
 use crate::rule;
@@ -13,6 +13,8 @@ const METHOD_OVERRIDES: [&str; 3] = [
     "x-http-method",
     "x-method-override",
 ];
+const METHOD_OVERRIDE_PARAM: &str = "_method";
+const PATH_OVERRIDES: [&str; 2] = ["x-original-url", "x-rewrite-url"];
 
 const MINUTE: Duration = Duration::from_secs(60);
 const DAY_SECS: u64 = 24 * 60 * 60;
@@ -93,23 +95,46 @@ impl Policy {
         })
     }
 
-    pub fn allows(&self, method: &Method, path: &str, headers: &HeaderMap) -> bool {
+    pub fn allows(&self, method: &Method, uri: &Uri, headers: &HeaderMap) -> bool {
         let method_ok = self.methods.as_ref().is_none_or(|methods| {
-            methods.contains(method)
-                && !METHOD_OVERRIDES
+            requested_methods(method, uri, headers)
+                .all(|requested| requested.is_some_and(|requested| methods.contains(&requested)))
+        });
+        let path_ok = self.paths.as_ref().is_none_or(|paths| {
+            paths
+                .iter()
+                .any(|prefix| rule::path_is_under(uri.path(), prefix))
+                && !PATH_OVERRIDES
                     .iter()
                     .any(|name| headers.contains_key(*name))
         });
-        let path_ok = self
-            .paths
-            .as_ref()
-            .is_none_or(|paths| paths.iter().any(|prefix| rule::path_is_under(path, prefix)));
         method_ok && path_ok
     }
 
     pub fn limits(&self) -> Limits {
         self.limits
     }
+}
+
+fn requested_methods<'a>(
+    method: &Method,
+    uri: &'a Uri,
+    headers: &'a HeaderMap,
+) -> impl Iterator<Item = Option<Method>> + 'a {
+    let overridden = METHOD_OVERRIDES
+        .iter()
+        .flat_map(move |name| headers.get_all(*name))
+        .map(|value| value.to_str().ok().and_then(parse_method));
+    let in_query = form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes())
+        .filter(|(name, _)| name == METHOD_OVERRIDE_PARAM)
+        .map(|(_, value)| parse_method(&value));
+    std::iter::once(Some(method.clone()))
+        .chain(overridden)
+        .chain(in_query)
+}
+
+fn parse_method(value: &str) -> Option<Method> {
+    Method::from_bytes(value.trim().to_ascii_uppercase().as_bytes()).ok()
 }
 
 #[derive(Debug, Default)]

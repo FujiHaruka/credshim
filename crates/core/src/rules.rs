@@ -108,7 +108,7 @@ pub(crate) fn decide<'r>(
         !edit
             .rule
             .policy()
-            .allows(&parts.method, parts.uri.path(), &parts.headers)
+            .allows(&parts.method, &parts.uri, &parts.headers)
     }) {
         return Decision::NotAllowed(edit.rule);
     }

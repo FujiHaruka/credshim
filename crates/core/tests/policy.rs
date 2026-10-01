@@ -4,7 +4,7 @@ use credshim_core::{
     Destination, Injector, Limiter, Limits, Policy, PolicyError, RuleError, RuleSet, RuleSpec,
     Secrets, Verdict,
 };
-use http::{HeaderMap, Method, Request};
+use http::{HeaderMap, Method, Request, Uri};
 use secrecy::SecretString;
 
 const DUMMY: &str = "sk-credshim-openai-AAAAAAAAAAAAAAAAAAAAAAAA";
@@ -81,33 +81,118 @@ allow_paths = ["/v1/chat/completions", "/v1/embeddings"]"#,
     );
 }
 
+fn apply_with(
+    injector: &Injector,
+    method: Method,
+    uri: &str,
+    header: Option<(&str, &str)>,
+) -> Verdict {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("authorization", format!("Bearer {DUMMY}"));
+    if let Some((name, value)) = header {
+        builder = builder.header(name, value);
+    }
+    let (mut parts, ()) = builder.body(()).unwrap().into_parts();
+    injector.apply(OPENAI, &mut parts).unwrap()
+}
+
 #[test]
-fn method_override_headers_are_refused_when_methods_are_listed() {
-    let listed = injector(r#"allow_methods = ["post"]"#);
+fn method_overrides_must_name_a_listed_method() {
+    let post_only = injector(r#"allow_methods = ["post"]"#);
+    let get_and_post = injector(r#"allow_methods = ["get", "post"]"#);
     let unlisted = injector(r#"allow_paths = ["/v1"]"#);
     for name in [
         "x-http-method-override",
         "X-HTTP-Method",
         "x-method-override",
     ] {
-        let request = |injector: &Injector| {
-            let (mut parts, ()) = Request::builder()
-                .method(Method::POST)
-                .uri("/v1/files/abc")
-                .header("authorization", format!("Bearer {DUMMY}"))
-                .header(name, "DELETE")
-                .body(())
-                .unwrap()
-                .into_parts();
-            injector.apply(OPENAI, &mut parts).unwrap()
-        };
+        for (injector, value, expected) in [
+            (&post_only, "DELETE", Verdict::NotAllowed("openai".into())),
+            (&post_only, "get", Verdict::NotAllowed("openai".into())),
+            (&post_only, "", Verdict::NotAllowed("openai".into())),
+            (
+                &get_and_post,
+                " get ",
+                Verdict::Injected(vec!["openai".into()]),
+            ),
+            (
+                &get_and_post,
+                "DELETE",
+                Verdict::NotAllowed("openai".into()),
+            ),
+            (
+                &unlisted,
+                "DELETE",
+                Verdict::Injected(vec!["openai".into()]),
+            ),
+        ] {
+            assert_eq!(
+                apply_with(injector, Method::POST, "/v1/files/abc", Some((name, value))),
+                expected,
+                "{name}: {value:?}"
+            );
+        }
+    }
+    for (injector, query, expected) in [
+        (
+            &post_only,
+            "_method=DELETE",
+            Verdict::NotAllowed("openai".into()),
+        ),
+        (
+            &post_only,
+            "a=1&_method=delete",
+            Verdict::NotAllowed("openai".into()),
+        ),
+        (
+            &post_only,
+            "_method=POST&_method=DELETE",
+            Verdict::NotAllowed("openai".into()),
+        ),
+        (
+            &post_only,
+            "method=DELETE",
+            Verdict::Injected(vec!["openai".into()]),
+        ),
+        (
+            &get_and_post,
+            "_method=GET",
+            Verdict::Injected(vec!["openai".into()]),
+        ),
+        (
+            &unlisted,
+            "_method=DELETE",
+            Verdict::Injected(vec!["openai".into()]),
+        ),
+    ] {
         assert_eq!(
-            request(&listed),
+            apply_with(
+                injector,
+                Method::POST,
+                &format!("/v1/files/abc?{query}"),
+                None
+            ),
+            expected,
+            "{query}"
+        );
+    }
+}
+
+#[test]
+fn path_override_headers_are_refused_when_paths_are_listed() {
+    let listed = injector(r#"allow_paths = ["/v1/chat"]"#);
+    let unlisted = injector(r#"allow_methods = ["post"]"#);
+    for name in ["X-Original-URL", "x-rewrite-url"] {
+        let header = Some((name, "/v1/organization/api_keys"));
+        assert_eq!(
+            apply_with(&listed, Method::POST, "/v1/chat", header),
             Verdict::NotAllowed("openai".into()),
             "{name}"
         );
         assert_eq!(
-            request(&unlisted),
+            apply_with(&unlisted, Method::POST, "/v1/chat", header),
             Verdict::Injected(vec!["openai".into()]),
             "{name}"
         );
@@ -263,5 +348,9 @@ fn a_refused_request_consumes_no_quota_of_other_rules() {
 #[test]
 fn policy_without_lists_allows_everything() {
     let policy = Policy::new(None, None, Limits::default()).unwrap();
-    assert!(policy.allows(&Method::DELETE, "/anything/../x", &HeaderMap::new()));
+    assert!(policy.allows(
+        &Method::DELETE,
+        &Uri::from_static("/anything/../x"),
+        &HeaderMap::new()
+    ));
 }
