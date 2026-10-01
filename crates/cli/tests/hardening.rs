@@ -90,6 +90,90 @@ async fn run_refuses_a_config_directory_others_could_write() {
 }
 
 #[tokio::test]
+async fn a_config_named_without_a_directory_still_has_its_directory_checked() {
+    let (home, _) = ready_home().await;
+    chmod(home.path(), 0o777);
+
+    let output = common::credshim(home.path())
+        .current_dir(home.path())
+        .args([
+            "run",
+            "--listen",
+            "127.0.0.1:0",
+            "--config",
+            "credshim.toml",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .unwrap();
+    chmod(home.path(), 0o700);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("directory holding the config file"),
+        "{stderr}"
+    );
+}
+
+#[tokio::test]
+async fn a_symlinked_config_has_the_directory_of_its_target_checked() {
+    let (home, config) = ready_home().await;
+    let shared = home.path().join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    std::fs::rename(&config, shared.join("credshim.toml")).unwrap();
+    std::os::unix::fs::symlink(shared.join("credshim.toml"), &config).unwrap();
+    chmod(&shared, 0o777);
+
+    let stderr = run_refused(home.path(), &config).await;
+    chmod(&shared, 0o700);
+
+    assert!(
+        stderr.contains("directory holding the config file"),
+        "{stderr}"
+    );
+}
+
+#[tokio::test]
+async fn run_and_env_refuse_ca_certificates_others_could_rewrite() {
+    let (home, config) = ready_home().await;
+    chmod(&home.path().join("ca/ca.pem"), 0o666);
+
+    let stderr = run_refused(home.path(), &config).await;
+    let env = output(home.path(), &["env", "--config", &config]).await;
+
+    assert!(stderr.contains("CA certificate"), "{stderr}");
+    assert!(!env.status.success());
+    let env_stderr = String::from_utf8_lossy(&env.stderr);
+    assert!(env_stderr.contains("CA certificate"), "{env_stderr}");
+}
+
+#[tokio::test]
+async fn run_refuses_a_secret_store_command_others_could_rewrite() {
+    let (home, _) = ready_home().await;
+    let program = home.path().join("fetch-secret");
+    std::fs::write(&program, "#!/bin/sh\necho value\n").unwrap();
+    chmod(&program, 0o777);
+    let config = home.path().join("command.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[secrets]\nbackend = \"command\"\ncommand = [\"{}\", \"{{name}}\"]\n\n[ca]\ndir = \"{}\"\n\n{}",
+            program.display(),
+            home.path().join("ca").display(),
+            openai_rule("api.openai.com", 443),
+        ),
+    )
+    .unwrap();
+
+    let stderr = run_refused(home.path(), &config.display().to_string()).await;
+
+    assert!(stderr.contains("secret store command"), "{stderr}");
+    assert!(stderr.contains("writable by group or others"), "{stderr}");
+}
+
+#[tokio::test]
 async fn run_refuses_secret_store_and_ca_key_others_could_write() {
     for target in ["secrets.age", "secrets.key", "ca/ca-key.pem"] {
         let (home, config) = ready_home().await;

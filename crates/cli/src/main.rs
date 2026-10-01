@@ -297,6 +297,7 @@ fn print_env(
     let ca_dir = config.ca_dir()?;
     let cert = ca_cert.unwrap_or_else(|| ca_dir.join(credshim_mitm::ca::CERT_FILE));
     let bundle = bundle.unwrap_or_else(|| ca_dir.join(credshim_mitm::ca::BUNDLE_FILE));
+    check_trust_files(&cert, &bundle)?;
     for (path, fix) in [
         (&cert, "credshim ca init"),
         (&bundle, "credshim ca bundle --out <file>"),
@@ -685,12 +686,24 @@ fn ssh_keygen(config_path: Option<&Path>, name: &str) -> anyhow::Result<()> {
 }
 
 fn check_state_paths(config: &config::Config) -> anyhow::Result<()> {
-    let ca_key = config.ca_dir()?.join(credshim_mitm::ca::KEY_FILE);
-    harden::check_secret(&ca_key, "CA private key")?;
-    if let credshim_secrets::BackendConfig::AgeFile { path, identity } = &config.secrets()? {
-        harden::check_secret(path, "secret store")?;
-        let store = credshim_secrets::AgeFileStore::new(path.clone(), identity.clone());
-        harden::check_secret(store.identity_path(), "secret store key")?;
+    let ca_dir = config.ca_dir()?;
+    harden::check_secret(&ca_dir.join(credshim_mitm::ca::KEY_FILE), "CA private key")?;
+    check_trust_files(
+        &ca_dir.join(credshim_mitm::ca::CERT_FILE),
+        &ca_dir.join(credshim_mitm::ca::BUNDLE_FILE),
+    )?;
+    match &config.secrets()? {
+        credshim_secrets::BackendConfig::AgeFile { path, identity } => {
+            harden::check_secret(path, "secret store")?;
+            let store = credshim_secrets::AgeFileStore::new(path.clone(), identity.clone());
+            harden::check_secret(store.identity_path(), "secret store key")?;
+        }
+        credshim_secrets::BackendConfig::Command { command, .. } => {
+            if let Some(program) = command.first().and_then(|p| harden::find_program(p)) {
+                harden::check_private(&program, "secret store command")?;
+            }
+        }
+        credshim_secrets::BackendConfig::Keychain { .. } => {}
     }
     if !config.oauth.is_empty() {
         harden::check_secret(&config.vault_path()?, "OAuth token vault")?;
@@ -704,6 +717,11 @@ fn check_state_paths(config: &config::Config) -> anyhow::Result<()> {
         harden::check_private_dir(dir, "directory holding the ssh agent socket")?;
     }
     Ok(())
+}
+
+fn check_trust_files(cert: &Path, bundle: &Path) -> anyhow::Result<()> {
+    harden::check_private(cert, "CA certificate")?;
+    harden::check_private(bundle, "CA bundle")
 }
 
 async fn status(config_path: Option<&Path>) -> anyhow::Result<()> {

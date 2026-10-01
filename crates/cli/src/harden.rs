@@ -1,5 +1,5 @@
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
 use rustix::process::{Resource, Rlimit, geteuid, setrlimit};
@@ -24,8 +24,9 @@ pub fn check_private(path: &Path, what: &str) -> anyhow::Result<()> {
 }
 
 pub fn check_private_dir(dir: &Path, what: &str) -> anyhow::Result<()> {
-    match std::fs::metadata(dir) {
-        Ok(metadata) => check_mode(dir, &metadata, what, 0o022),
+    let dir = absolute(dir)?;
+    match std::fs::metadata(&dir) {
+        Ok(metadata) => check_mode(&dir, &metadata, what, 0o022),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err).with_context(|| format!("could not inspect {}", dir.display())),
     }
@@ -36,16 +37,20 @@ pub fn check_secret(path: &Path, what: &str) -> anyhow::Result<()> {
 }
 
 fn check(path: &Path, what: &str, forbidden: u32) -> anyhow::Result<()> {
-    match std::fs::metadata(path) {
-        Ok(metadata) => check_mode(path, &metadata, what, forbidden)?,
+    let path = absolute(path)?;
+    match std::fs::metadata(&path) {
+        Ok(metadata) => check_mode(&path, &metadata, what, forbidden)?,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
         Err(err) => {
             return Err(err).with_context(|| format!("could not inspect {}", path.display()));
         }
     }
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty() && parent.exists())
+    let target = std::fs::canonicalize(&path).ok();
+    for parent in [Some(path.as_path()), target.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter_map(Path::parent)
+        .filter(|parent| parent.exists())
     {
         let parent_metadata = std::fs::metadata(parent)
             .with_context(|| format!("could not inspect {}", parent.display()))?;
@@ -57,6 +62,24 @@ fn check(path: &Path, what: &str, forbidden: u32) -> anyhow::Result<()> {
         )?;
     }
     Ok(())
+}
+
+fn absolute(path: &Path) -> anyhow::Result<PathBuf> {
+    let path = if path.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        path
+    };
+    std::path::absolute(path).with_context(|| format!("could not resolve {}", path.display()))
+}
+
+pub fn find_program(program: &str) -> Option<PathBuf> {
+    if program.contains('/') {
+        return Some(PathBuf::from(program));
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(program))
+        .find(|candidate| candidate.is_file())
 }
 
 fn check_mode(
