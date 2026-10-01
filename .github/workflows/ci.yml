@@ -74,11 +74,16 @@ jobs:
         run: "! sudo target/release/credshim service install --user devtest"
       - name: an ssh key made as the service user is served to the development user
         run: |
-          sudo -u credshim HOME=/var/lib/credshim /usr/local/libexec/credshim/credshim ssh keygen ssh-github --config /var/lib/credshim/config.toml
+          sudo -u credshim /usr/local/libexec/credshim/credshim ssh keygen ssh-github
           /usr/local/libexec/credshim/credshim preset github-ssh | sudo -u credshim tee -a /var/lib/credshim/config.toml >/dev/null
           sudo /usr/local/libexec/credshim/credshim service install --user devtest
           for _ in $(seq 50); do [ -S /var/lib/credshim-ssh/agent.sock ] && break; sleep 0.2; done
           sudo -u devtest bash -c '. /etc/credshim/env && ssh-add -l | grep -q credshim:github'
+      - name: as the service user, the state directory wins over a HOME and XDG_CONFIG_HOME pointing elsewhere
+        run: |
+          sudo -u credshim env HOME=/home/devtest XDG_CONFIG_HOME=/home/devtest/.config \
+            /usr/local/libexec/credshim/credshim secret list | cut -f1 | grep -qx ssh-github
+          ! sudo test -e /home/devtest/.config/credshim
       - name: the state files verify.sh checks exist (no OAuth provider here, so no vault)
         run: |
           for file in config.toml secrets.age secrets.lock secrets.key ca/ca-key.pem audit.jsonl; do

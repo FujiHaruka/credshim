@@ -1,18 +1,54 @@
 # CredShim
 
-ローカル開発用のクレデンシャル注入プロキシ。アプリやコーディングエージェントにはダミーのAPIキーだけを持たせ、登録済みホストへ出ていく直前にプロキシが本物へ差し替える。本物のキーは .env にも、アプリのメモリにも、ログにも、エージェントのコンテキストにも現れない。
+ローカル開発用のクレデンシャル注入プロキシ。アプリやコーディングエージェントにはダミーのAPIキーだけを持たせ、登録済みホストへ出ていく直前にプロキシが本物へ差し替える。プロキシを専用のOSユーザーで動かせば、エージェントが暴走しても、プロンプトインジェクションで乗っ取られても、本物のキーの値は取り出せない。.env にも、アプリのメモリにも、ログにも、エージェントのコンテキストにも本物は現れない。
 
 - `HTTPS_PROXY` で挟まる MITM プロキシ（HTTP/1.1、HTTP/2、SSE、WebSocket）。SDK は無改造で動く。
 - CA を扱えないランタイム向けに、LiteLLM Proxy と同じ使い方の base URL モードもある。
 - ダミーは束縛したホスト（とポート、任意でパス）宛てのときだけ差し替え、それ以外は403で止める。レスポンスに本物が現れればダミーに戻す。
 
+守れないものもある。
+
+- **キーを使うことはできる。** エージェントはプロキシ経由で本物のキーを使った要求を送れる。使えるのはルールが許した宛先、パス、操作、回数の範囲だけで、それ以外は403か429になる。
+- **開発ユーザーが管理者だと保証は崩れる。** エージェントは開発ユーザー（エージェントが動く OS ユーザー）の権限で、シェルの設定に仕込みをして sudo のパスワードを盗み、root から秘密を読める。開発ユーザーは管理者にしない（下の手順0）。
+- **プロキシを開発ユーザーのまま動かす試用の構成では守れない。** エージェントは秘密ストアと設定に手が届く。
+
 設計と脅威モデルは [docs/plan.md](docs/plan.md) と [docs/threat-model.md](docs/threat-model.md)。
 
-## インストール
+## 構成
+
+| 構成 | 用途 | エージェントが本物の値を取り出せるか |
+| --- | --- | --- |
+| 専用ユーザー（段階B） | 推奨。下の「導入」 | 取り出せない |
+| コンテナ分離（段階C） | Bに加え、エージェントの通信をすべてプロキシの判定と監査に通す | 取り出せない |
+| 同一ユーザー（段階A） | 試用と動作確認だけ。下の「試用」 | 取り出せる |
+
+## 導入（段階B）
+
+プロキシは専用ユーザーのサービスとして常駐し、設定・秘密・CA鍵はそのユーザーだけが読める `/var/lib/credshim` に置く。開発ユーザーが触れるのは、公開用の CA 証明書とシェル用の変数を置く `/etc/credshim` だけ。
+
+| | Linux | macOS |
+| --- | --- | --- |
+| 専用ユーザー | `credshim` | `_credshim` |
+| インストール先 | `/usr/local/libexec/credshim/credshim` | `/Library/CredShim/bin/credshim` |
+| サービス | systemd の `credshim.service` | launchd の `dev.credshim.proxy` |
+
+### 0. 開発ユーザーを管理者にしない
+
+開発ユーザーのプロセスは、その端末に打ち込まれた文字を読める（シェルの設定に `sudo` を横取りする関数やキー入力の記録を仕込める）。開発ユーザーが sudo できるか、その端末で管理者のパスワードを打つと、エージェントは root になって秘密を読める。
+
+- **macOS。** 管理者アカウントを別に作り、普段のアカウントは「このコンピュータの管理を許可」を外して一般ユーザーにする。
+- **Linux。** 開発ユーザーを `sudo`・`wheel`・`admin` グループから外す。
+
+以降の「管理者のセッション」は、開発ユーザーが触れない経路を指す。ユーザーの切り替えで入った管理者の GUI セッション、管理者ユーザーでの SSH ログイン、別のコンソールのどれか。管理者のパスワードも、登録する本物のキーも、開発ユーザーの端末には打たない。
+
+### 1. サービスを作る（管理者のセッション）
 
 [Releases](https://github.com/FujiHaruka/credshim/releases) にビルド済みのバイナリがある。`target` は `x86_64-unknown-linux-gnu`、`aarch64-unknown-linux-gnu`（どちらも glibc 2.35 以降）、`aarch64-apple-darwin`、`x86_64-apple-darwin` のどれか。
 
 ```sh
+# Linux は user=credshim bin=/usr/local/libexec/credshim/credshim
+user=_credshim bin=/Library/CredShim/bin/credshim dev=yourname   # dev は開発ユーザーの名前
+
 version=0.2.0
 target=aarch64-apple-darwin
 base=https://github.com/FujiHaruka/credshim/releases/download/v$version
@@ -20,46 +56,42 @@ curl -fsSLO "$base/credshim-$version-$target.tar.gz"
 curl -fsSLO "$base/SHA256SUMS"
 grep " credshim-$version-$target.tar.gz\$" SHA256SUMS | shasum -a 256 -c
 tar -xzf "credshim-$version-$target.tar.gz"
-sudo install -m 0755 credshim /usr/local/bin/credshim
+
+./credshim service install --print            # 実行する内容を確かめる
+sudo ./credshim service install --user "$dev"  # 専用ユーザー、状態、CA、サービスを作り、バイナリを $bin に置く
 ```
 
-macOS のバイナリは Apple の署名と公証を受けていない。curl で取得すれば Gatekeeper には止められないが、ブラウザでダウンロードした場合は `xattr -d com.apple.quarantine credshim` で隔離属性を外す。
+macOS のバイナリは Apple の署名と公証を受けていない。curl で取得すれば Gatekeeper には止められないが、ブラウザでダウンロードした場合は `xattr -d com.apple.quarantine credshim` で隔離属性を外す。ソースからビルドするなら `cargo install --locked --path crates/cli`（Rust が要る）でできたバイナリを使う。どちらでも、`service install` に渡すバイナリは開発ユーザーが書き換えられない場所に置く。
 
-ソースからビルドするには Rust（rustup）が要る。
+`--user` は開発ユーザーの uid を SSH エージェントの接続許可に書くためのもの。管理者のセッションで sudo すると、省略時は管理者自身が開発ユーザーとみなされる。
+
+### 2. ルールと秘密を登録する（管理者のセッション）
+
+OpenAI を例にする。専用ユーザーとして実行した credshim は、`--config` が無くても `/var/lib/credshim/config.toml` を読む。
 
 ```sh
-cargo install --locked --path crates/cli
+alias svc="sudo -u $user $bin"
+
+# ルールを追加する（ダミーは毎回ランダムに生成される）
+$bin preset openai | sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/null
+
+# 本物のキーを登録する（端末から入力。argv や環境変数は経由しない）
+svc secret set openai
+
+# /etc/credshim/env に新しいダミーを載せ、サービスを再起動する
+sudo $bin service install --user "$dev"
 ```
 
-## 最初のストリーミング応答まで
+ルールや秘密を変えたら、毎回インストール済みのバイナリで `service install` をもう一度実行する（開発ユーザーが書き換えられるバイナリを sudo で動かさない）。別のバイナリで置き換えるときは `--upgrade` を付ける。
 
-OpenAI を例にする。設定ファイルは `~/.config/credshim/config.toml`（`$XDG_CONFIG_HOME` に従う）、秘密は macOS ではキーチェーン、それ以外では `~/.config/credshim/secrets.age` に入る。
-
-```sh
-# 1. 開発用CAを作る（OS の信頼ストアには入れない）
-credshim ca init
-
-# 2. ルールを追加する（ダミーは毎回ランダムに生成される）
-mkdir -p ~/.config/credshim
-credshim preset openai >> ~/.config/credshim/config.toml
-
-# 3. 本物のキーを登録する（端末から入力。argv や環境変数は経由しない）
-credshim secret set openai
-
-# 4. プロキシを起動する
-credshim run
-```
-
-別のシェルで:
+### 3. 使う（開発ユーザーのセッション）
 
 ```sh
-# 5. プロキシ、CA、ダミーキーの変数を読み込む
-eval "$(credshim env)"
+. /etc/credshim/env                          # プロキシ、CA、ダミーキーの変数
+export PATH="/Library/CredShim/bin:$PATH"    # Linux は /usr/local/libexec/credshim
+credshim doctor                              # このシェルのランタイムがプロキシと CA を本当に使っているか
 
-# 6. このシェルのランタイムがプロキシと CA を本当に使っているか確かめる
-credshim doctor
-
-# 7. ストリーミングで叩く（$OPENAI_API_KEY はダミー）
+# ストリーミングで叩く（$OPENAI_API_KEY はダミー）
 curl -N https://api.openai.com/v1/chat/completions \
   -H "Authorization: Bearer $OPENAI_API_KEY" \
   -H 'Content-Type: application/json' \
@@ -77,21 +109,53 @@ for chunk in openai.OpenAI().chat.completions.create(
 '
 ```
 
-`credshim env` が出すのは `HTTPS_PROXY`・`HTTP_PROXY`（小文字も）、`NO_PROXY`、結合バンドルを指す `SSL_CERT_FILE`・`REQUESTS_CA_BUNDLE`・`CURL_CA_BUNDLE`、開発CAを指す `NODE_EXTRA_CA_CERTS`、`NODE_USE_ENV_PROXY=1`、`aws` コマンド向けに結合バンドルを指す `AWS_CA_BUNDLE`、ルールに `env` がある場合はそのダミーキー（`OPENAI_API_KEY` など）。`[[ssh_key]]` があれば agent のソケットを指す `SSH_AUTH_SOCK`、AWS のルールがちょうど1つならそのダミーの `AWS_ACCESS_KEY_ID` と `AWS_SECRET_ACCESS_KEY`（2つ以上なら `~/.aws/credentials` に書くプロファイルをコメントで出す）。ダミーなので .env にそのまま書いてよい。
+`/etc/credshim/env`（`credshim env` の出力）にあるのは `HTTPS_PROXY`・`HTTP_PROXY`（小文字も）、`NO_PROXY`、結合バンドルを指す `SSL_CERT_FILE`・`REQUESTS_CA_BUNDLE`・`CURL_CA_BUNDLE`、開発CAを指す `NODE_EXTRA_CA_CERTS`、`NODE_USE_ENV_PROXY=1`、`aws` コマンド向けに結合バンドルを指す `AWS_CA_BUNDLE`、ルールに `env` がある場合はそのダミーキー（`OPENAI_API_KEY` など）。`[[ssh_key]]` があれば agent のソケットを指す `SSH_AUTH_SOCK`、AWS のルールがちょうど1つならそのダミーの `AWS_ACCESS_KEY_ID` と `AWS_SECRET_ACCESS_KEY`（2つ以上なら `~/.aws/credentials` に書くプロファイルをコメントで出す）。ダミーなので .env にそのまま書いてよい。
+
+### 4. 分離を確かめる（開発ユーザーのセッション）
+
+リポジトリの `scripts/stage-b/verify.sh` を開発ユーザーとして実行すると、開発ユーザーが管理者でないこと、設定・秘密（ロックファイルを含む）・CA鍵を読めず書けないこと、サービスの定義とプロキシのバイナリを書き換えられないこと、agent のディレクトリに書けないこと、agent から鍵の一覧を取れること、`/etc/credshim/env` の `AWS_CA_BUNDLE`・`SSH_AUTH_SOCK` が公開の場所を指すことを確かめる。
+
+### どのコマンドをどちらで実行するか
+
+| 管理者のセッション（`svc` は専用ユーザーとして実行） | 開発ユーザーのセッション |
+| --- | --- |
+| ルールの追加（`preset` の追記）、`svc secret set`・`svc secret list`、`svc ssh keygen`、`svc aws sso login`・`logout`、`svc tail`、`svc status`、`sudo $bin service install` | `. /etc/credshim/env`、`credshim doctor`、アプリとエージェント |
+
+以下の節のコマンドはこの分け方で書く。
+
+## 試用（段階A）
+
+動作確認のために、プロキシを開発ユーザーのまま動かす構成。この構成ではエージェントから守れない（秘密ストアと設定に開発ユーザーの権限で手が届く）。本物のキーを預けて常用するなら段階Bにする。
+
+設定は `~/.config/credshim/config.toml`（`$XDG_CONFIG_HOME` に従う）、秘密は macOS ではキーチェーン、それ以外では `~/.config/credshim/secrets.age` に入る。
+
+```sh
+credshim ca init                                                   # 開発用CAを作る（OS の信頼ストアには入れない）
+mkdir -p ~/.config/credshim
+credshim preset openai >> ~/.config/credshim/config.toml
+credshim secret set openai
+credshim run
+
+# 別のシェルで
+eval "$(credshim env)"
+credshim doctor
+```
+
+以下の節を段階Aで試すときは、`svc` を `credshim` に、`$bin preset X | sudo -u $user tee -a /var/lib/credshim/config.toml` を `credshim preset X >> ~/.config/credshim/config.toml` に、`sudo $bin service install` を `credshim run` の再起動に、`. /etc/credshim/env` を `eval "$(credshim env)"` に読み替える。
 
 ## credshim doctor
 
 `credshim.test` はプロキシ自身が答える予約ホスト名で、DNS には存在しない。そこへ届けば「プロキシ経由」、TLS が通れば「CA を信頼している」、ALPN で h2 か http/1.1 かも分かる。
 
 ```text
-[ok  ] proxy    credshim.test answered through 127.0.0.1:8787 over h2; its certificate chains to ~/.config/credshim/ca/ca.pem
+[ok  ] proxy    credshim.test answered through 127.0.0.1:8787 over h2; its certificate chains to /etc/credshim/ca.pem
 [ok  ] env      HTTPS_PROXY=http://127.0.0.1:8787
-[ok  ] env      SSL_CERT_FILE=~/.config/credshim/ca/bundle.pem includes the CA
+[ok  ] env      SSL_CERT_FILE=/etc/credshim/bundle.pem includes the CA
 [ok  ] curl     via the proxy, CA trusted, h2
 [ok  ] python   via the proxy, CA trusted, http/1.1
 [ok  ] node     via the proxy, CA trusted, http/1.1
 [ok  ] go       via the proxy, CA trusted, h2
-[ok  ] ssh      SSH_AUTH_SOCK=~/.config/credshim/ssh-agent.sock is the credshim agent (rules: github)
+[ok  ] ssh      SSH_AUTH_SOCK=/var/lib/credshim-ssh/agent.sock is the credshim agent (rules: github)
 [ok  ] openssh  /usr/bin/ssh is OpenSSH 9.9, which sends session-bind
 [ok  ] aws      the aws CLI reached credshim.test through the proxy and trusted the CA
 [ok  ] files    no private keys in ~/.ssh and no real AWS credentials in ~/.aws or the environment
@@ -107,7 +171,7 @@ PATH にある curl、python3、node、go をこのシェルの環境のまま�
 
 ## base URL モード
 
-CA を設定できないランタイムや、プロキシ変数を見ないクライアント向け。`http://127.0.0.1:8788/openai/...` を `https://api.openai.com/...` に固定で対応させるリバースプロキシで、同じルール（束縛、許可リスト、上限、スクラブ）がそのまま掛かる。
+CA を設定できないランタイムや、プロキシ変数を見ないクライアント向け。`http://127.0.0.1:8788/openai/...` を `https://api.openai.com/...` に固定で対応させるリバースプロキシで、同じルール（束縛、許可リスト、上限、スクラブ）がそのまま掛かる。`/var/lib/credshim/config.toml` に書く（管理者のセッションで `sudo -u $user vi /var/lib/credshim/config.toml` など）。
 
 ```toml
 [listen]
@@ -121,17 +185,20 @@ base_url_addr = "127.0.0.1:8788"
 OPENAI_BASE_URL=http://127.0.0.1:8788/openai/v1 OPENAI_API_KEY=sk-credshim-openai-... python app.py
 ```
 
-`credshim env` は base URL を `# base URL for openai: http://127.0.0.1:8788/openai` のようにコメントで出す。対応表に無いパス、`..` や `%2f` を含むパス、ループバック以外を名乗る Host は拒否する。ダミーを含まない要求はそのまま上流へ転送する（本物は使わない）。
+`/etc/credshim/env` には base URL が `# base URL for openai: http://127.0.0.1:8788/openai` のようにコメントで入る。対応表に無いパス、`..` や `%2f` を含むパス、ループバック以外を名乗る Host は拒否する。ダミーを含まない要求はそのまま上流へ転送する（本物は使わない）。
 
 ## SSH エージェント
 
 CredShim は ssh-agent としても動く。鍵はプロキシの中で生成して秘密ストアにだけ置き、外へは公開鍵しか出さない。署名するのは、OpenSSH 8.9 以降の `ssh` が送る session-bind で検証できたサーバーのホスト鍵が設定の指紋に含まれ、許可したユーザー名でのログイン要求のときだけ。`ssh -A` の先からの要求、`ssh-keygen -Y sign`（コミット署名）、鍵の追加・削除は拒否する。
 
 ```sh
-credshim preset github-ssh >> ~/.config/credshim/config.toml   # GitHub のホスト鍵3種、ユーザー git
-credshim ssh keygen ssh-github                                  # 公開鍵を GitHub に登録する
-credshim run                                                    # 既定のソケットは ~/.config/credshim/ssh-agent.sock
-eval "$(credshim env)"                                          # SSH_AUTH_SOCK も出る
+# 管理者のセッション
+$bin preset github-ssh | sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/null   # GitHub のホスト鍵3種、ユーザー git
+svc ssh keygen ssh-github                    # 公開鍵を GitHub に登録する
+sudo $bin service install --user "$dev"
+
+# 開発ユーザーのセッション
+. /etc/credshim/env                          # SSH_AUTH_SOCK=/var/lib/credshim-ssh/agent.sock も入る
 ssh -T git@github.com
 ```
 
@@ -148,7 +215,7 @@ host_keys = ["SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU"]
 limits = { per_minute = 30, per_day = 500 }   # 署名の回数の上限（省略すると無制限）
 ```
 
-上限を超えた署名要求は拒否し、監査ログに `reason="limited"` を残す。agent は接続元の uid を確かめ、`client_uids` に無い接続はすぐに閉じる。
+上限を超えた署名要求は拒否し、監査ログに `reason="limited"` を残す。agent は接続元の uid を確かめ、`client_uids` に無い接続はすぐに閉じる。`service install` は `--user` の uid を新しく作る設定の `client_uids` に書く。設定がすでにあれば、足すべき行を表示する。agent のソケットのディレクトリ `/var/lib/credshim-ssh` は専用ユーザーの所有で、開発ユーザーは書けない。
 
 ProxyJump で踏み台にも同じ鍵で入るなら、踏み台のホスト鍵の指紋も `host_keys` に入れる。既存の `~/.ssh` の鍵は取り込まず、新しい鍵に入れ替えて古い鍵は無効化する。
 
@@ -157,19 +224,18 @@ ProxyJump で踏み台にも同じ鍵で入るなら、踏み台のホスト鍵�
 `~/.aws/credentials` にはダミーのアクセスキーだけを置く。`aws` コマンドはダミーで SigV4 署名した要求をプロキシへ送り、CredShim はアクセスキー ID でルールを引いて本物の認証情報で署名し直す。ダミーのシークレットは送信されないので、何を書いてもよい。
 
 ```sh
-credshim preset aws >> ~/.config/credshim/config.toml   # ダミーのアクセスキー ID は毎回ランダム
-credshim secret set aws-access-key-id                   # 本物のアクセスキー ID
-credshim secret set aws-secret-access-key               # 本物のシークレット
-credshim run
+# 管理者のセッション
+$bin preset aws | sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/null   # ダミーのアクセスキー ID は毎回ランダム
+svc secret set aws-access-key-id             # 本物のアクセスキー ID
+svc secret set aws-secret-access-key         # 本物のシークレット
+sudo $bin service install --user "$dev"
 
-# ~/.aws/credentials
-# [default]
-# aws_access_key_id = <preset が出した dummy_access_key_id>
-# aws_secret_access_key = dummy
-export HTTPS_PROXY=http://127.0.0.1:8787
-export AWS_CA_BUNDLE=~/.config/credshim/ca/bundle.pem   # 開発CA＋システムのルート（置き換えなので CA 単体は不可）
+# 開発ユーザーのセッション
+. /etc/credshim/env       # ダミーの AWS_ACCESS_KEY_ID・AWS_SECRET_ACCESS_KEY と、結合バンドルを指す AWS_CA_BUNDLE
 aws sts get-caller-identity
 ```
+
+AWS のルールが2つ以上あるときは、`/etc/credshim/env` のコメントにあるプロファイルを `~/.aws/credentials` に書く。`AWS_CA_BUNDLE` は信頼ストアを置き換えるので、CA 単体ではなく結合バンドル（開発CA＋システムのルート）を指す。
 
 ```toml
 [aws]
@@ -195,11 +261,17 @@ limits = { per_minute = 120, per_day = 5000, concurrent = 8 }
 SSO のロールも、`~/.aws` にはダミーの静的アクセスキーだけを置いて使う。ログインは `aws sso login` ではなく `credshim aws sso login` で人間が行い、SSO トークンは秘密ストアに、ロール認証情報はプロキシのメモリにだけ置く。プロキシは期限の10分前にロール認証情報と SSO トークンを取り直す（リフレッシュトークンがあれば）。
 
 ```sh
-credshim preset aws-sso >> ~/.config/credshim/config.toml   # start_url、region、アカウント、ロールを書き換える
-credshim run
-credshim aws sso login sso       # 表示された URL をブラウザで開いてコードを確かめ、承認する
-aws sts get-caller-identity      # ~/.aws/credentials はダミー（静的キーと同じ）
-credshim aws sso logout sso      # IAM Identity Center のセッションを終わらせ、保存したトークンを消す
+# 管理者のセッション
+$bin preset aws-sso | sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/null   # start_url、region、アカウント、ロールを書き換える
+sudo $bin service install --user "$dev"
+svc aws sso login sso            # 表示された URL をブラウザで開いてコードを確かめ、承認する
+
+# 開発ユーザーのセッション
+. /etc/credshim/env
+aws sts get-caller-identity      # 認証情報はダミー（静的キーと同じ）
+
+# 管理者のセッション
+svc aws sso logout sso           # IAM Identity Center のセッションを終わらせ、保存したトークンを消す
 ```
 
 ```toml
@@ -218,9 +290,11 @@ services = ["sts", "s3"]             # 省略すると全サービス（静的�
 regions = ["ap-northeast-1"]
 ```
 
-ログインしていない、または SSO トークンが切れて更新できないときは、要求を上流へ送らずに `CredShimSsoLoginRequired` のエラー（`credshim aws sso login <session>` を促すメッセージ付き）を返し、監査ログに `sso_login_required` を残す。実行中のプロキシは次の AWS の要求で新しいログインを読み込むので、再起動は要らない。`logout` のあとも、プロキシがすでに持っているロール認証情報は取り直しの時期まで使われる。`login` は端末から実行する（stdin が TTY でなければ拒否）。
+ログインしていない、または SSO トークンが切れて更新できないときは、要求を上流へ送らずに `CredShimSsoLoginRequired` のエラー（`credshim aws sso login <session>` を促すメッセージ付き）を返し、監査ログに `sso_login_required` を残す。実行中のプロキシは次の AWS の要求で新しいログインを読み込むので、再起動は要らない。`logout` のあとも、プロキシがすでに持っているロール認証情報は取り直しの時期まで使われる。`login` は端末から実行する（stdin が TTY でなければ拒否）。`sudo` は端末をそのまま渡すので、`svc` でも通る。
 
 ## 監査ログと状態
+
+`service install` が作る設定には、監査ログ `/var/lib/credshim/audit.jsonl` と状態のソケット `/var/lib/credshim/status.sock` が入っている。
 
 ```toml
 [audit]
@@ -230,50 +304,16 @@ path = "/path/to/audit.jsonl"
 socket = "/path/to/status.sock"
 ```
 
-`credshim tail` が監査ログをライブ表示し、エージェントが今どこを叩いているかが見える。`credshim status` はルールごとのカウンタを出す。どちらにも秘密やダミーの値は出ない。
+管理者のセッションで `svc tail` を実行すると監査ログがライブ表示され、エージェントが今どこを叩いているかが見える。`svc status` はルールごとのカウンタを出す。どちらにも秘密やダミーの値は出ない。どちらも専用ユーザーだけが読める場所にあるので、開発ユーザーからは見えない。
 
 ```text
 2026-09-30T03:31:37.5Z inject      200 POST https://api.openai.com:443/v1/chat/completions [openai] via connect
 2026-09-30T03:31:40.1Z deny        403 POST https://attacker.example:443/collect [openai] via connect
 ```
 
-## 別ユーザーでの常駐（段階B）
-
-同じOSユーザーでエージェントとプロキシが動く限り、エージェントは秘密ストアや設定に手が届く。実運用ではプロキシを専用ユーザーで常駐させ、開発ユーザーには sudo を与えない。
-
-```sh
-# /path/to/credshim は root 所有で、開発ユーザーが書き換えられないディレクトリに置いたバイナリ
-sudo /path/to/credshim service install   # Linux は systemd（ユーザー credshim）、macOS は launchd（ユーザー _credshim）
-/path/to/credshim service install --print # 実行前に中身を確認する
-```
-
-管理者になる操作（`su`、`sudo`）と専用ユーザーとしての操作（秘密の入力、SSO のログイン）は、開発ユーザーが持つ端末では行わない。開発ユーザーのプロセスはその端末に打ち込まれた文字を読めるので、管理者のパスワードや登録する秘密を盗める。別のコンソール、管理者ユーザーでの SSH ログイン、別の GUI ユーザーのセッションから行う。最初の `service install` も、開発ユーザーが書き換えられない場所にあるバイナリをフルパスで指定する。
-
-状態は `/var/lib/credshim`（専用ユーザーだけが読める）、公開用の CA 証明書・結合バンドル・シェル用の変数は `/etc/credshim` に置かれる。ルールと秘密の登録は専用ユーザーとして行い、ルールを変えたらインストール済みのバイナリで `service install` をもう一度実行して `/etc/credshim/env` を更新する（開発ユーザーが書き換えられるバイナリを sudo で動かさない）。別のバイナリで置き換えるときは `--upgrade` を付ける。
-
-```sh
-/usr/local/libexec/credshim/credshim preset openai | sudo -u credshim tee -a /var/lib/credshim/config.toml
-sudo -u credshim /usr/local/libexec/credshim/credshim secret set openai --config /var/lib/credshim/config.toml
-sudo /usr/local/libexec/credshim/credshim service install   # macOS は /Library/CredShim/bin/credshim
-
-# 開発ユーザーのシェルで
-. /etc/credshim/env && credshim doctor
-```
-
-SSH の鍵の生成と SSO のログインも専用ユーザーとして行う（秘密ストアが専用ユーザーの側にあるため）。`sudo` は端末をそのまま渡すので、`aws sso login` の TTY の確認も通る。
-
-```sh
-sudo -u credshim HOME=/var/lib/credshim /usr/local/libexec/credshim/credshim ssh keygen ssh-github --config /var/lib/credshim/config.toml
-sudo -u credshim HOME=/var/lib/credshim /usr/local/libexec/credshim/credshim aws sso login sso --config /var/lib/credshim/config.toml
-```
-
-agent のソケットは `/var/lib/credshim-ssh/agent.sock`（ディレクトリは専用ユーザーの所有で 0755）。接続できるのは `[ssh] client_uids` の uid だけで、`service install` は開発ユーザー（`--user` か、`sudo` を実行したユーザー）の uid を新しく作る設定に書く。設定がすでにあれば、足すべき行を表示する。`/etc/credshim/env` に `SSH_AUTH_SOCK` と `AWS_CA_BUNDLE` が入る。
-
-`scripts/stage-b/verify.sh` を開発ユーザーとして実行すると、設定・秘密（ロックファイルを含む）・CA鍵を読めず書けないこと、agent のディレクトリに書けないこと、agent から鍵の一覧を取れること、`/etc/credshim/env` の `AWS_CA_BUNDLE`・`SSH_AUTH_SOCK` が公開の場所を指すことを確かめる。
-
 ## コンテナ分離（段階C）
 
-エージェントとアプリを devcontainer に入れ、プロキシはホスト（段階Bの専用ユーザー）で動かす。コンテナの外向きの通信をプロキシだけに絞ると、SSO OIDC やポータルへの直接の接続も含めて、すべてがプロキシの判定と監査を通る。
+エージェントとアプリを devcontainer に入れ、プロキシはホストで段階Bのとおり専用ユーザーとして動かす。コンテナの外向きの通信をプロキシだけに絞ると、SSO OIDC やポータルへの直接の接続も含めて、すべてがプロキシの判定と監査を通る。
 
 ```toml
 [listen]
@@ -310,8 +350,8 @@ Host github.com
 
 移行前の鍵やキーはエージェントにすでに読まれた前提で扱い、取り込まずに作り直して古いものを無効にする。`credshim doctor` が残っているものを報告する。
 
-- **SSH。** `credshim ssh keygen` で新しい鍵を作って公開鍵をサーバー（GitHub など）に登録し、`ssh -T` で通ることを確かめてから、古い公開鍵をサーバーから外し、`~/.ssh` の古い秘密鍵を削除する。
-- **AWS の静的キー。** IAM で新しいアクセスキーを作って `credshim secret set` で登録し、`~/.aws/credentials` をダミーに書き換える。動作を確かめたら古いキーを無効化（`aws iam update-access-key --status Inactive`）してから削除する。
+- **SSH。** `svc ssh keygen` で新しい鍵を作って公開鍵をサーバー（GitHub など）に登録し、`ssh -T` で通ることを確かめてから、古い公開鍵をサーバーから外し、`~/.ssh` の古い秘密鍵を削除する。
+- **AWS の静的キー。** IAM で新しいアクセスキーを作って `svc secret set` で登録し、`~/.aws/credentials` をダミーに書き換える。動作を確かめたら古いキーを無効化（`aws iam update-access-key --status Inactive`）してから削除する。
 - **AWS SSO。** CredShim に移す前に `aws sso logout` でキャッシュのトークンを失効させ、`~/.aws/sso/cache` と `~/.aws/cli/cache` を削除する。`~/.aws/config` の `sso_session`・`sso_start_url` のプロファイルは、ダミーの静的キーのプロファイルに置き換える。
 - **環境変数。** シェルの設定や `.env` に本物の `AWS_ACCESS_KEY_ID`・`AWS_SECRET_ACCESS_KEY`・`AWS_SESSION_TOKEN` が残っていれば消す。
 
