@@ -74,7 +74,9 @@ socket = "$state/status.sock"
 socket = "$agent/agent.sock"
 ${dev_uid:+client_uids = [$dev_uid]}
 
-# Add rules with: credshim preset openai | sudo -u $user tee -a $state/config.toml
+# Run every step below from a session the development user does not own (another console,
+# or an SSH login as the administrator): its processes can read what is typed into its terminals.
+# Add rules with: $bin preset openai | sudo -u $user tee -a $state/config.toml
 # then register the secret: sudo -u $user $bin secret set openai --config $state/config.toml
 # then rerun "sudo $bin service install" so $public/env carries the new dummies
 # SSH keys and AWS SSO logins are made as $user too:

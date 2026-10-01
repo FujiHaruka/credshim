@@ -66,7 +66,7 @@ check "service definition $service_file exists" test -f "$service_file"
 check "service definition and its directories are not writable" immutable_path "$service_file"
 check "state directory $state is not listable" cannot_list "$state"
 check "state directory $state is not writable" cannot_create_in "$state"
-for file in config.toml secrets.age secrets.age.lock secrets.key ca/ca-key.pem oauth-vault.age audit.jsonl; do
+for file in config.toml secrets.age secrets.lock secrets.key ca/ca-key.pem oauth-vault.age audit.jsonl; do
   check "cannot read $state/$file" cannot_read "$state/$file"
   check "cannot write $state/$file" cannot_write "$state/$file"
 done
