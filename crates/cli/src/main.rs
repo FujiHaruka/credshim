@@ -701,7 +701,7 @@ fn check_state_paths(config: &config::Config) -> anyhow::Result<()> {
     if !config.ssh_keys.is_empty()
         && let Some(dir) = config.ssh_socket()?.parent()
     {
-        harden::check_private(dir, "directory holding the ssh agent socket")?;
+        harden::check_private_dir(dir, "directory holding the ssh agent socket")?;
     }
     Ok(())
 }
