@@ -610,7 +610,9 @@ async fn doctor_passes_with_the_credshim_agent_and_a_clean_home() {
         panic!("ssh is not on PATH");
     };
     let socket_home = tempfile::Builder::new().prefix("cs").tempdir().unwrap();
-    let socket = socket_home.path().join("agent.sock");
+    let socket_dir = socket_home.path().join("s");
+    std::fs::create_dir(&socket_dir).unwrap();
+    let socket = socket_dir.join("agent.sock");
     let home = Home::new(&format!(
         "[ssh]\nsocket = \"{}\"\n\n{SSH_KEY_RULE}",
         socket.display()
