@@ -52,18 +52,29 @@ pub enum ConnectError {
     InvalidName(String),
     #[error("timed out connecting to upstream {host}:{port}")]
     Timeout { host: String, port: u16 },
-    #[error("upstream {host}:{port} resolves only to link-local or unspecified addresses")]
+    #[error(
+        "upstream {host}:{port} resolves only to link-local, unspecified or cloud metadata addresses"
+    )]
     OffLimits { host: String, port: u16 },
 }
 
-const AWS_IMDS_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254);
+const GCP_METADATA_V6: Ipv6Addr = Ipv6Addr::new(0xfd20, 0xce, 0, 0, 0, 0, 0, 0x254);
+
+fn is_aws_service_v6(v6: Ipv6Addr) -> bool {
+    v6.segments()[..2] == [0xfd00, 0xec2]
+}
 
 fn is_off_limits(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_link_local() || v4.octets()[0] == 0,
         IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
             Some(v4) => is_off_limits(IpAddr::V4(v4)),
-            None => v6.is_unspecified() || v6.is_unicast_link_local() || v6 == AWS_IMDS_V6,
+            None => {
+                v6.is_unspecified()
+                    || v6.is_unicast_link_local()
+                    || is_aws_service_v6(v6)
+                    || v6 == GCP_METADATA_V6
+            }
         },
     }
 }

@@ -327,7 +327,7 @@ impl Handler {
         let upstream = match self.connect_with_timeout(&host, port).await {
             Ok(tcp) => tcp,
             Err(err) if err.is_off_limits() => {
-                tracing::warn!(%host, port, "CONNECT to a link-local or unspecified address refused");
+                tracing::warn!(%host, port, "CONNECT to a link-local, unspecified or cloud metadata address refused");
                 self.audit_connect("tcp", &host, port, &Outcome::Blocked, StatusCode::FORBIDDEN);
                 return status(StatusCode::FORBIDDEN);
             }
@@ -381,6 +381,17 @@ impl Handler {
         .await
         {
             Ok(session) => session,
+            Err(ConnectError::OffLimits { .. }) => {
+                tracing::warn!(%host, port, "intercepted CONNECT to a link-local, unspecified or cloud metadata address refused");
+                self.audit_connect(
+                    "https",
+                    &host,
+                    port,
+                    &Outcome::Blocked,
+                    StatusCode::FORBIDDEN,
+                );
+                return status(StatusCode::FORBIDDEN);
+            }
             Err(err) => {
                 tracing::warn!(%host, port, error = %err, "intercepted upstream failed");
                 self.audit_connect(
@@ -494,7 +505,7 @@ impl Handler {
                 (Outcome::Pass, Response::from_parts(parts, body.boxed()))
             }
             Err(err) if TunnelError::off_limits_in(&err) => {
-                tracing::warn!(%authority, "request to a link-local or unspecified address refused");
+                tracing::warn!(%authority, "request to a link-local, unspecified or cloud metadata address refused");
                 (Outcome::Blocked, status(StatusCode::FORBIDDEN))
             }
             Err(err) => {
