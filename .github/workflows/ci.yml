@@ -79,6 +79,11 @@ jobs:
           sudo /usr/local/libexec/credshim/credshim service install --user devtest
           for _ in $(seq 50); do [ -S /var/lib/credshim-ssh/agent.sock ] && break; sleep 0.2; done
           sudo -u devtest bash -c '. /etc/credshim/env && ssh-add -l | grep -q credshim:github'
+      - name: the state files verify.sh checks exist (no OAuth provider here, so no vault)
+        run: |
+          for file in config.toml secrets.age secrets.lock secrets.key ca/ca-key.pem audit.jsonl; do
+            sudo test -e "/var/lib/credshim/$file" || { echo "missing /var/lib/credshim/$file" >&2; exit 1; }
+          done
       - run: install -m 0755 scripts/stage-b/verify.sh /tmp/verify.sh
       - name: a non-sudo development user cannot read or write the proxy's state
         run: sudo -u devtest /tmp/verify.sh

@@ -227,8 +227,9 @@ socket = "/path/to/status.sock"
 同じOSユーザーでエージェントとプロキシが動く限り、エージェントは秘密ストアや設定に手が届く。実運用ではプロキシを専用ユーザーで常駐させ、開発ユーザーには sudo を与えない。
 
 ```sh
-sudo ./target/release/credshim service install   # Linux は systemd（ユーザー credshim）、macOS は launchd（ユーザー _credshim）
-./target/release/credshim service install --print # 実行前に中身を確認する
+# /path/to/credshim は root 所有で、開発ユーザーが書き換えられないディレクトリに置いたバイナリ
+sudo /path/to/credshim service install   # Linux は systemd（ユーザー credshim）、macOS は launchd（ユーザー _credshim）
+/path/to/credshim service install --print # 実行前に中身を確認する
 ```
 
 管理者になる操作（`su`、`sudo`）と専用ユーザーとしての操作（秘密の入力、SSO のログイン）は、開発ユーザーが持つ端末では行わない。開発ユーザーのプロセスはその端末に打ち込まれた文字を読めるので、管理者のパスワードや登録する秘密を盗める。別のコンソール、管理者ユーザーでの SSH ログイン、別の GUI ユーザーのセッションから行う。最初の `service install` も、開発ユーザーが書き換えられない場所にあるバイナリをフルパスで指定する。
