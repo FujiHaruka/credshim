@@ -489,6 +489,39 @@ enum Format {
     Json(Map<String, Value>),
 }
 
+struct UniqueKeys(Map<String, Value>);
+
+impl<'de> serde::Deserialize<'de> for UniqueKeys {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = UniqueKeys;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON object without repeated keys")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut access: A,
+            ) -> Result<UniqueKeys, A::Error> {
+                let mut map = Map::new();
+                while let Some((key, value)) = access.next_entry::<String, Value>()? {
+                    if let Some(mut earlier) = map.insert(key, value) {
+                        zeroize_value(&mut earlier);
+                        map.values_mut().for_each(zeroize_value);
+                        return Err(serde::de::Error::custom("repeated key"));
+                    }
+                }
+                Ok(UniqueKeys(map))
+            }
+        }
+
+        deserializer.deserialize_map(Visitor)
+    }
+}
+
 struct Document {
     format: Format,
     touched: bool,
@@ -519,10 +552,7 @@ impl Document {
             _ => body.iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'{'),
         };
         let format = if json {
-            match serde_json::from_slice(body).ok()? {
-                Value::Object(map) => Format::Json(map),
-                _ => return None,
-            }
+            Format::Json(serde_json::from_slice::<UniqueKeys>(body).ok()?.0)
         } else {
             let text = std::str::from_utf8(body).ok()?.trim_ascii();
             if !text.contains('=') || text.contains(char::is_whitespace) {

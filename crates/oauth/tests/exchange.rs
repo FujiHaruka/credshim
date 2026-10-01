@@ -304,6 +304,23 @@ async fn client_ids_are_checked_wherever_they_appear() {
 }
 
 #[tokio::test]
+async fn json_bodies_with_a_repeated_key_never_leave_the_proxy() {
+    let oauth = oauth();
+    let (result, sent) = run_parts(
+        &oauth,
+        "a.example.test",
+        parts("/token", "application/json"),
+        r#"{"grant_type":"client_credentials","client_id":"client-z","client_id":"client-a"}"#,
+        json(StatusCode::OK, "{}"),
+    )
+    .await;
+
+    let err = result.unwrap_err();
+    assert!(matches!(err, ExchangeError::MalformedRequest), "{err:?}");
+    assert!(sent.lock().unwrap().is_none());
+}
+
+#[tokio::test]
 async fn a_revoke_endpoint_nested_under_the_token_endpoint_is_a_revoke() {
     let mut nested = spec("d", "d.example.test");
     nested.token_endpoint = "https://d.example.test/oauth2/token".into();
