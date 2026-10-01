@@ -104,10 +104,12 @@ pub(crate) fn decide<'r>(
             }
         }
     }
-    if let Some(edit) = edits
-        .iter()
-        .find(|edit| !edit.rule.policy().allows(&parts.method, parts.uri.path()))
-    {
+    if let Some(edit) = edits.iter().find(|edit| {
+        !edit
+            .rule
+            .policy()
+            .allows(&parts.method, parts.uri.path(), &parts.headers)
+    }) {
         return Decision::NotAllowed(edit.rule);
     }
     if edits.is_empty() {

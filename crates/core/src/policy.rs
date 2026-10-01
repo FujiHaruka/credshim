@@ -3,10 +3,16 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use http::Method;
+use http::{HeaderMap, Method};
 use serde::Deserialize;
 
 use crate::rule;
+
+const METHOD_OVERRIDES: [&str; 3] = [
+    "x-http-method-override",
+    "x-http-method",
+    "x-method-override",
+];
 
 const MINUTE: Duration = Duration::from_secs(60);
 const DAY_SECS: u64 = 24 * 60 * 60;
@@ -87,11 +93,13 @@ impl Policy {
         })
     }
 
-    pub fn allows(&self, method: &Method, path: &str) -> bool {
-        let method_ok = self
-            .methods
-            .as_ref()
-            .is_none_or(|methods| methods.contains(method));
+    pub fn allows(&self, method: &Method, path: &str, headers: &HeaderMap) -> bool {
+        let method_ok = self.methods.as_ref().is_none_or(|methods| {
+            methods.contains(method)
+                && !METHOD_OVERRIDES
+                    .iter()
+                    .any(|name| headers.contains_key(*name))
+        });
         let path_ok = self
             .paths
             .as_ref()

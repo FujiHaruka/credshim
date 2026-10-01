@@ -4,7 +4,7 @@ use credshim_core::{
     Destination, Injector, Limiter, Limits, Policy, PolicyError, RuleError, RuleSet, RuleSpec,
     Secrets, Verdict,
 };
-use http::{Method, Request};
+use http::{HeaderMap, Method, Request};
 use secrecy::SecretString;
 
 const DUMMY: &str = "sk-credshim-openai-AAAAAAAAAAAAAAAAAAAAAAAA";
@@ -79,6 +79,39 @@ allow_paths = ["/v1/chat/completions", "/v1/embeddings"]"#,
         apply(&injector, Method::GET, "/v1/chat/completions", true),
         Verdict::NotAllowed("openai".into())
     );
+}
+
+#[test]
+fn method_override_headers_are_refused_when_methods_are_listed() {
+    let listed = injector(r#"allow_methods = ["post"]"#);
+    let unlisted = injector(r#"allow_paths = ["/v1"]"#);
+    for name in [
+        "x-http-method-override",
+        "X-HTTP-Method",
+        "x-method-override",
+    ] {
+        let request = |injector: &Injector| {
+            let (mut parts, ()) = Request::builder()
+                .method(Method::POST)
+                .uri("/v1/files/abc")
+                .header("authorization", format!("Bearer {DUMMY}"))
+                .header(name, "DELETE")
+                .body(())
+                .unwrap()
+                .into_parts();
+            injector.apply(OPENAI, &mut parts).unwrap()
+        };
+        assert_eq!(
+            request(&listed),
+            Verdict::NotAllowed("openai".into()),
+            "{name}"
+        );
+        assert_eq!(
+            request(&unlisted),
+            Verdict::Injected(vec!["openai".into()]),
+            "{name}"
+        );
+    }
 }
 
 #[test]
@@ -230,5 +263,5 @@ fn a_refused_request_consumes_no_quota_of_other_rules() {
 #[test]
 fn policy_without_lists_allows_everything() {
     let policy = Policy::new(None, None, Limits::default()).unwrap();
-    assert!(policy.allows(&Method::DELETE, "/anything/../x"));
+    assert!(policy.allows(&Method::DELETE, "/anything/../x", &HeaderMap::new()));
 }
