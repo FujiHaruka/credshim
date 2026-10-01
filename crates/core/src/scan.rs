@@ -108,7 +108,7 @@ pub(crate) fn decode(raw: &str) -> Vec<u8> {
     percent_decode_str(raw).collect()
 }
 
-pub(crate) fn decode_basic(value: &HeaderValue) -> Option<Vec<u8>> {
+pub fn decode_basic(value: &HeaderValue) -> Option<Vec<u8>> {
     let value = value.to_str().ok()?;
     let (scheme, credentials) = value.trim().split_once(' ')?;
     if !scheme.eq_ignore_ascii_case("basic") {

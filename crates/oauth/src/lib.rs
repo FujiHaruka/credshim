@@ -81,14 +81,19 @@ impl OAuth {
         for provider in &self.providers {
             for (kind, endpoint) in provider.endpoint_kinds() {
                 let matched = endpoint.covers(host, port, &path);
-                if matched.raw && raw.is_none() {
-                    raw = Some((provider, kind));
+                let candidate = Some((provider, kind, endpoint.path.len()));
+                if matched.raw && raw.is_none_or(|(_, _, len)| endpoint.path.len() > len) {
+                    raw = candidate;
                 }
-                if matched.normalized && normalized.is_none() {
-                    normalized = Some((provider, kind));
+                if matched.normalized
+                    && normalized.is_none_or(|(_, _, len)| endpoint.path.len() > len)
+                {
+                    normalized = candidate;
                 }
             }
         }
+        let raw = raw.map(|(provider, kind, _)| (provider, kind));
+        let normalized = normalized.map(|(provider, kind, _)| (provider, kind));
         let (provider, kind) = raw.or(normalized)?;
         let disguised = match (raw, normalized) {
             (Some((a, x)), Some((b, y))) => !std::ptr::eq(a, b) || x != y,
