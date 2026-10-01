@@ -1,12 +1,17 @@
+pub mod aws;
 pub mod ca;
 pub mod logs;
 pub mod oauth;
 pub mod pattern;
+pub mod sshd;
+pub mod sso;
 pub mod upstream;
 
+pub use aws::{AwsKeys, ClientPayload, Keyring, KeyringEntry, MockAws};
 pub use ca::{LeafCert, LeafOptions, TestCa};
 pub use logs::{LogCapture, capture_logs, fake_secret};
 pub use oauth::{MockOAuth, MockOAuthConfig};
+pub use sso::{MockSso, MockSsoConfig, SsoCounts};
 pub use upstream::{
     Alpn, Echo, MOCK_COMPLETION, MockUpstream, RecordedRequest, SseTick, TRAILER_BODY,
     UploadSummary,

@@ -71,12 +71,15 @@ impl Home {
                 || ["SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"]
                     .contains(&name.as_str())
                 || name.starts_with("NODE_")
+                || name.starts_with("AWS_")
+                || name == "SSH_AUTH_SOCK"
             {
                 command.env_remove(name);
             }
         }
         command
             .env("PATH", path)
+            .env("HOME", self.path())
             .env("CREDSHIM", BIN)
             .env("CONFIG", self.config())
             .arg("-c")
@@ -89,6 +92,28 @@ impl Home {
             .await
             .unwrap()
     }
+}
+
+fn fake_program(bin: &Path, name: &str, script: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = bin.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn line_with(output: &Output, mark: &str, what: &str, needle: &str) -> bool {
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line.starts_with(&format!("[{mark:<4}] {what:<8} ")) && line.contains(needle))
+}
+
+const SSH_KEY_RULE: &str = "[[ssh_key]]\nname = \"github\"\nsecret = \"ssh-github\"\nusers = [\"git\"]\nhost_keys = [\"SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU\"]\n";
+const AWS_DUMMY: &str = "CREDSHIMAWSDOCTORTESTDUMMY0001";
+
+fn aws_key(name: &str, dummy: &str) -> String {
+    format!(
+        "[[aws_key]]\nname = \"{name}\"\ndummy_access_key_id = \"{dummy}\"\naccess_key_id = \"{name}-akid\"\nsecret_access_key = \"{name}-secret\"\n"
+    )
 }
 
 fn find_in_path(program: &str) -> Option<PathBuf> {
@@ -438,4 +463,251 @@ async fn service_install_needs_root_and_can_print_its_script() {
     let script = String::from_utf8(printed.stdout).unwrap();
     assert!(script.starts_with("#!/usr/bin/env bash"));
     assert!(script.contains("refuse_writable_ancestors"));
+}
+
+#[tokio::test]
+async fn env_exports_the_agent_socket_the_aws_bundle_and_a_lone_aws_dummy() {
+    let socket_home = tempfile::tempdir().unwrap();
+    let socket = socket_home.path().join("agent.sock");
+    let home = Home::new(&format!(
+        "[ssh]\nsocket = \"{}\"\n\n{SSH_KEY_RULE}\n{}",
+        socket.display(),
+        aws_key("aws", AWS_DUMMY)
+    ))
+    .await;
+    let env = output(home.path(), &["env", "--config", home.config()]).await;
+    assert!(env.status.success(), "{}", text(&env));
+    let stdout = String::from_utf8(env.stdout).unwrap();
+    let bundle = home.path().join("ca").join("bundle.pem");
+    for line in [
+        format!("export AWS_CA_BUNDLE='{}'", bundle.display()),
+        format!("export SSH_AUTH_SOCK='{}'", socket.display()),
+        format!("export AWS_ACCESS_KEY_ID='{AWS_DUMMY}'"),
+        "export AWS_SECRET_ACCESS_KEY='credshim-dummy'".to_string(),
+    ] {
+        assert!(
+            stdout.lines().any(|l| l == line),
+            "missing {line}\n{stdout}"
+        );
+    }
+
+    let second = "CREDSHIMAWSDOCTORTESTDUMMY0002";
+    let home = Home::new(&format!(
+        "{}\n{}",
+        aws_key("one", AWS_DUMMY),
+        aws_key("two", second)
+    ))
+    .await;
+    let env = output(home.path(), &["env", "--config", home.config()]).await;
+    assert!(env.status.success(), "{}", text(&env));
+    let stdout = String::from_utf8(env.stdout).unwrap();
+    assert!(!stdout.contains("AWS_ACCESS_KEY_ID"), "{stdout}");
+    assert!(!stdout.contains("SSH_AUTH_SOCK"), "{stdout}");
+    for (name, dummy) in [("one", AWS_DUMMY), ("two", second)] {
+        let line = format!(
+            "# aws profile for {name}: aws_access_key_id = {dummy}, aws_secret_access_key = credshim-dummy"
+        );
+        assert!(
+            stdout.lines().any(|l| l == line),
+            "missing {line}\n{stdout}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn doctor_reports_an_unreachable_agent_an_old_openssh_and_leftover_credentials() {
+    let home = Home::new("").await;
+    let _proxy = spawn_run(home.path(), &["--config", home.config()]).await;
+    let bin = home.bin_dir(&[]);
+    fake_program(
+        &bin,
+        "ssh",
+        "echo 'OpenSSH_8.2p1 Ubuntu-4ubuntu0.13, OpenSSL 1.1.1f' >&2",
+    );
+    let ssh_secret = credshim_testkit::fake_secret("ssh-key-body");
+    let aws_secret = credshim_testkit::fake_secret("aws-secret");
+    let token = credshim_testkit::fake_secret("sso-token");
+    let dot_ssh = home.path().join(".ssh");
+    std::fs::create_dir_all(&dot_ssh).unwrap();
+    std::fs::write(
+        dot_ssh.join("id_ed25519"),
+        format!(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n{ssh_secret}\n-----END OPENSSH PRIVATE KEY-----\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(dot_ssh.join("id_ed25519.pub"), "ssh-ed25519 AAAA me\n").unwrap();
+    std::fs::write(dot_ssh.join("known_hosts"), "github.com ssh-ed25519 AAAA\n").unwrap();
+    let dot_aws = home.path().join(".aws");
+    std::fs::create_dir_all(dot_aws.join("sso/cache")).unwrap();
+    std::fs::write(
+        dot_aws.join("credentials"),
+        format!(
+            "[default]\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = {aws_secret}\n\n[dummy]\naws_access_key_id = {AWS_DUMMY}\naws_secret_access_key = credshim-dummy\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dot_aws.join("config"),
+        "[profile work]\nsso_session = work\n\n[profile tool]\ncredential_process = /bin/false\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dot_aws.join("sso/cache/0123.json"),
+        format!("{{\"accessToken\": \"{token}\"}}"),
+    )
+    .unwrap();
+
+    let doctor = home
+        .fresh_shell(
+            &bin,
+            "SSH_AUTH_SOCK=\"$HOME/missing.sock\" AWS_SESSION_TOKEN=x \"$CREDSHIM\" doctor",
+        )
+        .await;
+
+    assert!(!doctor.status.success(), "{}", text(&doctor));
+    for (mark, what, needle) in [
+        ("ok", "proxy", "credshim.test"),
+        ("fail", "ssh", "missing.sock"),
+        ("warn", "openssh", "OpenSSH 8.2"),
+        ("skip", "aws", "not on PATH"),
+        ("fail", "files", "~/.ssh/id_ed25519 is a private key"),
+        (
+            "fail",
+            "files",
+            "~/.aws/credentials [default] holds a real AWS access key",
+        ),
+        (
+            "warn",
+            "files",
+            "~/.aws/config [profile work] signs in with `aws sso login`",
+        ),
+        (
+            "warn",
+            "files",
+            "~/.aws/config [profile tool] runs credential_process",
+        ),
+        ("fail", "files", "~/.aws/sso/cache holds 1 cached"),
+        ("fail", "files", "AWS_SESSION_TOKEN is set"),
+    ] {
+        assert!(
+            line_with(&doctor, mark, what, needle),
+            "{mark} {what} {needle}\n{}",
+            text(&doctor)
+        );
+    }
+    let all = text(&doctor);
+    assert!(!all.contains("id_ed25519.pub"), "{all}");
+    assert!(!all.contains("[dummy]"), "{all}");
+    for secret in [&ssh_secret, &aws_secret, &token] {
+        assert!(!all.contains(secret.as_str()), "{all}");
+    }
+}
+
+#[tokio::test]
+async fn doctor_passes_with_the_credshim_agent_and_a_clean_home() {
+    let Some(ssh) = find_in_path("ssh") else {
+        panic!("ssh is not on PATH");
+    };
+    let socket_home = tempfile::Builder::new().prefix("cs").tempdir().unwrap();
+    let socket_dir = socket_home.path().join("s");
+    std::fs::create_dir(&socket_dir).unwrap();
+    let socket = socket_dir.join("agent.sock");
+    let home = Home::new(&format!(
+        "[ssh]\nsocket = \"{}\"\n\n{SSH_KEY_RULE}",
+        socket.display()
+    ))
+    .await;
+    let generated = output(
+        home.path(),
+        &["ssh", "keygen", "ssh-github", "--config", home.config()],
+    )
+    .await;
+    assert!(generated.status.success(), "{}", text(&generated));
+    let _proxy = spawn_run(home.path(), &["--config", home.config()]).await;
+    for _ in 0..100 {
+        if socket.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let bin = home.bin_dir(&[]);
+    std::os::unix::fs::symlink(ssh, bin.join("ssh")).unwrap();
+
+    let doctor = home.fresh_shell(&bin, "\"$CREDSHIM\" doctor").await;
+
+    assert_ok_lines(&doctor, &["proxy", "ssh", "openssh", "files"]);
+    assert!(
+        line_with(&doctor, "ok", "ssh", "rules: github"),
+        "{}",
+        text(&doctor)
+    );
+    assert!(
+        !String::from_utf8_lossy(&doctor.stdout).contains("[warn]"),
+        "{}",
+        text(&doctor)
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs the aws CLI; run with `mise exec -- cargo test -p credshim --test dev_tools -- --ignored`"]
+async fn doctor_checks_that_the_aws_cli_goes_through_the_proxy_and_trusts_the_ca() {
+    let home = Home::new("").await;
+    let _proxy = spawn_run(home.path(), &["--config", home.config()]).await;
+    let bin = home.bin_dir(&["aws"]);
+
+    let doctor = home.fresh_shell(&bin, "\"$CREDSHIM\" doctor").await;
+    assert_ok_lines(&doctor, &["proxy", "aws", "files"]);
+
+    let proxy = format!("127.0.0.1:{}", home.port);
+    let bypass = home
+        .fresh_shell(
+            &bin,
+            &format!("unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy; \"$CREDSHIM\" doctor --proxy {proxy}"),
+        )
+        .await;
+    assert!(!bypass.status.success());
+    assert!(
+        line_with(&bypass, "fail", "aws", "Could not connect"),
+        "{}",
+        text(&bypass)
+    );
+    assert!(
+        text(&bypass).contains("the aws CLI did not use the proxy"),
+        "{}",
+        text(&bypass)
+    );
+
+    let other = home.path().join("other-ca");
+    let init = output(
+        home.path(),
+        &["ca", "init", "--dir", other.to_str().unwrap()],
+    )
+    .await;
+    assert!(init.status.success());
+    let untrusted = home
+        .fresh_shell(
+            &bin,
+            &format!(
+                "AWS_CA_BUNDLE='{}' \"$CREDSHIM\" doctor",
+                other.join("ca.pem").display()
+            ),
+        )
+        .await;
+    assert!(!untrusted.status.success());
+    assert!(
+        line_with(&untrusted, "warn", "env", "AWS_CA_BUNDLE"),
+        "{}",
+        text(&untrusted)
+    );
+    assert!(
+        line_with(&untrusted, "fail", "aws", ""),
+        "{}",
+        text(&untrusted)
+    );
+    assert!(
+        text(&untrusted).contains("the aws CLI does not trust the CA"),
+        "{}",
+        text(&untrusted)
+    );
 }

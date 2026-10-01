@@ -2,6 +2,7 @@
 set -uo pipefail
 
 state=${CREDSHIM_STATE:-/var/lib/credshim}
+agent=${CREDSHIM_AGENT_DIR:-/var/lib/credshim-ssh}
 public=${CREDSHIM_PUBLIC:-/etc/credshim}
 addr=${CREDSHIM_ADDR:-127.0.0.1:8787}
 failures=0
@@ -65,13 +66,32 @@ check "service definition $service_file exists" test -f "$service_file"
 check "service definition and its directories are not writable" immutable_path "$service_file"
 check "state directory $state is not listable" cannot_list "$state"
 check "state directory $state is not writable" cannot_create_in "$state"
-for file in config.toml secrets.age secrets.key ca/ca-key.pem oauth-vault.age audit.jsonl; do
+for file in config.toml secrets.age secrets.age.lock secrets.key ca/ca-key.pem oauth-vault.age audit.jsonl; do
   check "cannot read $state/$file" cannot_read "$state/$file"
   check "cannot write $state/$file" cannot_write "$state/$file"
 done
+check "ssh agent directory $agent exists" test -d "$agent"
+check "ssh agent directory $agent is owned by $service_user" test "$(owner_of "$agent" 2>/dev/null)" = "$service_user"
+check "ssh agent directory $agent is not writable" immutable_path "$agent"
+if [[ -S $agent/agent.sock ]]; then
+  check "ssh agent socket is owned by $service_user" test "$(owner_of "$agent/agent.sock")" = "$service_user"
+  agent_reachable() {
+    SSH_AUTH_SOCK="$agent/agent.sock" ssh-add -l >/dev/null 2>&1
+    [[ $? -ne 2 ]]
+  }
+  check "development user can list the ssh agent's keys" agent_reachable
+else
+  echo "SKIP  no ssh agent socket in $agent (no [[ssh_key]] rules)"
+fi
 check "public CA certificate is readable" test -r "$public/ca.pem"
 check "trust bundle is readable" test -r "$public/bundle.pem"
 check "shell environment file is readable" test -r "$public/env"
+env_value() { sed -n "s/^export $1='\(.*\)'\$/\1/p" "$public/env"; }
+check "shell environment points AWS_CA_BUNDLE at the readable trust bundle" \
+  bash -c "[[ -r '$(env_value AWS_CA_BUNDLE)' && '$(env_value AWS_CA_BUNDLE)' == '$public/bundle.pem' ]]"
+if grep -q '^export SSH_AUTH_SOCK=' "$public/env"; then
+  check "shell environment points SSH_AUTH_SOCK at the agent socket" test "$(env_value SSH_AUTH_SOCK)" = "$agent/agent.sock"
+fi
 check "public CA directory holds no private key" bash -c "! grep -q 'PRIVATE KEY' '$public'/*.pem"
 
 pid=$(pgrep -u "$service_user" -f 'credshim run' | head -n 1)

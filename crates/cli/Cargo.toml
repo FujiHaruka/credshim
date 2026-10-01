@@ -15,10 +15,12 @@ testing = ["credshim-mitm/testing"]
 [dependencies]
 anyhow.workspace = true
 clap = { version = "4", features = ["derive"] }
+credshim-aws.workspace = true
 credshim-core.workspace = true
 credshim-mitm.workspace = true
 credshim-oauth.workspace = true
 credshim-secrets.workspace = true
+credshim-ssh.workspace = true
 rpassword = "7"
 rustix.workspace = true
 rustls.workspace = true

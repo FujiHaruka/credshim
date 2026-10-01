@@ -2,6 +2,7 @@ mod config;
 mod doctor;
 mod env;
 mod harden;
+mod leftovers;
 mod preset;
 mod service;
 mod tail;
@@ -16,12 +17,15 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
+use credshim_aws::{Aws, AwsCredentials, Signer, SsoOptions, SsoProvider, SsoSession};
 use credshim_core::{BaseUrls, Injector, Rule, RuleSet, Secrets};
 use credshim_mitm::{
     AUDIT_TARGET, CertificateAuthority, Intercept, Proxy, ProxyConfig, Stats, Upstream,
+    UpstreamTransport,
 };
 use credshim_oauth::{DEFAULT_MAX_BODY, OAuth, Provider, Vault};
 use credshim_secrets::SecretStore;
+use credshim_ssh::{Agent, SigningKey, SshRule};
 use secrecy::SecretString;
 use tracing_subscriber::filter::{EnvFilter, Targets};
 use tracing_subscriber::layer::SubscriberExt;
@@ -63,7 +67,7 @@ enum Command {
     },
     Preset {
         #[arg(value_parser = clap::builder::PossibleValuesParser::new(
-            preset::PRESETS.iter().map(|preset| preset.name)
+            preset::names()
         ))]
         name: String,
     },
@@ -99,6 +103,45 @@ enum Command {
         #[command(subcommand)]
         command: ServiceCommand,
     },
+    Ssh {
+        #[command(subcommand)]
+        command: SshCommand,
+    },
+    Aws {
+        #[command(subcommand)]
+        command: AwsCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AwsCommand {
+    Sso {
+        #[command(subcommand)]
+        command: SsoCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SsoCommand {
+    Login {
+        session: String,
+        #[arg(long, value_name = "FILE")]
+        config: Option<PathBuf>,
+    },
+    Logout {
+        session: String,
+        #[arg(long, value_name = "FILE")]
+        config: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SshCommand {
+    Keygen {
+        name: String,
+        #[arg(long, value_name = "FILE")]
+        config: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -108,6 +151,8 @@ enum ServiceCommand {
         print: bool,
         #[arg(long)]
         upgrade: bool,
+        #[arg(long, value_name = "NAME")]
+        user: Option<String>,
     },
 }
 
@@ -172,8 +217,8 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Status { config } => status(config.as_deref()).await,
         Command::Preset { name } => {
-            let preset = preset::find(&name).context("unknown preset")?;
-            write!(std::io::stdout(), "{}", preset.render())?;
+            let rendered = preset::render(&name).context("unknown preset")?;
+            write!(std::io::stdout(), "{rendered}")?;
             Ok(())
         }
         Command::Env {
@@ -204,8 +249,37 @@ async fn main() -> anyhow::Result<()> {
             tail::run(&path, lines, !no_follow).await
         }
         Command::Service {
-            command: ServiceCommand::Install { print, upgrade },
-        } => service::install(print, upgrade),
+            command:
+                ServiceCommand::Install {
+                    print,
+                    upgrade,
+                    user,
+                },
+        } => service::install(print, upgrade, user),
+        Command::Ssh {
+            command: SshCommand::Keygen { name, config },
+        } => {
+            init_logging(None)?;
+            ssh_keygen(config.as_deref(), &name)
+        }
+        Command::Aws {
+            command:
+                AwsCommand::Sso {
+                    command: SsoCommand::Login { session, config },
+                },
+        } => {
+            init_logging(None)?;
+            aws_sso_login(config.as_deref(), &session).await
+        }
+        Command::Aws {
+            command:
+                AwsCommand::Sso {
+                    command: SsoCommand::Logout { session, config },
+                },
+        } => {
+            init_logging(None)?;
+            aws_sso_logout(config.as_deref(), &session).await
+        }
     }
 }
 
@@ -364,8 +438,20 @@ async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::
     if !proxy_config.scrub {
         tracing::warn!("response scrubbing is disabled");
     }
-    if !rules.is_empty() || !config.oauth.is_empty() {
-        let store = config.secrets()?.open()?;
+    let intercepts = !rules.is_empty() || !config.oauth.is_empty() || config.has_aws();
+    let store: Option<Arc<dyn SecretStore>> = if intercepts || !config.ssh_keys.is_empty() {
+        Some(Arc::from(config.secrets()?.open()?))
+    } else {
+        None
+    };
+    let upstream = Upstream::new()?;
+    let _agent = match &store {
+        Some(store) if !config.ssh_keys.is_empty() => {
+            Some(start_ssh_agent(&config, store.as_ref())?)
+        }
+        _ => None,
+    };
+    if let Some(store) = store.filter(|_| intercepts) {
         let oauth = if config.oauth.is_empty() {
             None
         } else {
@@ -376,7 +462,16 @@ async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::
         }
         let rules = RuleSet::from_rules(rules)?;
         let secrets = load_secrets(store.as_ref(), &rules)?;
-        let mut injector = Injector::new(rules, secrets)?;
+        let aws = load_aws(&config, &store, &upstream)?;
+        let mut injector = Injector::new(rules, secrets)?.also_scrub(
+            aws.iter()
+                .flat_map(|(aws, _)| aws.signer().scrub_pairs())
+                .collect(),
+        );
+        if let Some((_, Some(sso))) = &aws {
+            injector = injector.with_scrub_source(sso.clone());
+        }
+        let aws = aws.map(|(aws, _)| aws);
         for rule in injector.unscrubbable_rules() {
             tracing::warn!(
                 %rule,
@@ -392,17 +487,28 @@ async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::
             .rules()
             .hosts()
             .chain(oauth.iter().flat_map(|oauth| oauth.hosts()));
-        proxy_config.intercept = Some(Intercept::new(ca, hosts));
+        let mut intercept = Intercept::new(ca, hosts);
+        if aws.is_some() {
+            intercept = intercept.with_domains([credshim_aws::AWS_DOMAIN]);
+        }
+        proxy_config.intercept = Some(intercept);
         proxy_config.injector = Arc::new(injector);
         proxy_config.oauth = oauth;
+        proxy_config.aws = aws.map(Arc::new);
     }
+    let aws_rules = proxy_config
+        .aws
+        .iter()
+        .flat_map(|aws| aws.rules())
+        .map(|rule| rule.name().to_string());
     proxy_config.stats = Arc::new(Stats::new(
         proxy_config
             .injector
             .rules()
             .rules()
             .iter()
-            .map(|rule| rule.name().to_string()),
+            .map(|rule| rule.name().to_string())
+            .chain(aws_rules),
     ));
     let _status = config
         .status
@@ -414,11 +520,167 @@ async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::
                 .with_context(|| format!("could not open status socket {}", path.display()))
         })
         .transpose()?;
-    let proxy = Proxy::bind(proxy_config, Upstream::new()?).await?;
+    let proxy = Proxy::bind(proxy_config, upstream).await?;
     tokio::select! {
         _ = proxy.wait() => {}
         _ = tokio::signal::ctrl_c() => tracing::info!("shutting down"),
     }
+    Ok(())
+}
+
+fn load_aws(
+    config: &config::Config,
+    store: &Arc<dyn SecretStore>,
+    upstream: &Upstream,
+) -> anyhow::Result<Option<(Aws, Option<Arc<SsoProvider>>)>> {
+    if !config.has_aws() {
+        return Ok(None);
+    }
+    let (sessions, rules) = config.aws_rules()?;
+    let mut signer = Signer::default();
+    let mut roles = Vec::new();
+    for rule in &rules {
+        match rule.source() {
+            credshim_aws::Source::Static {
+                access_key_id,
+                secret_access_key,
+            } => {
+                let credentials = AwsCredentials::new(
+                    required_secret(store.as_ref(), access_key_id)?,
+                    required_secret(store.as_ref(), secret_access_key)?,
+                    None,
+                )
+                .with_context(|| format!("aws_key {:?} cannot be used", rule.name()))?;
+                signer.insert(rule.name(), rule.dummy(), credentials);
+            }
+            credshim_aws::Source::Sso(role) => roles.push((
+                rule.name().to_string(),
+                role.clone(),
+                rule.dummy().to_string(),
+            )),
+        }
+    }
+    let sso = (!roles.is_empty()).then(|| {
+        Arc::new(SsoProvider::new(
+            sessions,
+            roles,
+            store.clone(),
+            Arc::new(UpstreamTransport::new(upstream.clone())),
+            SsoOptions::default(),
+        ))
+    });
+    let max_body = config
+        .aws
+        .max_body_bytes
+        .unwrap_or(credshim_aws::DEFAULT_MAX_BODY);
+    let mut aws = Aws::new(rules, signer).with_max_body(max_body);
+    if let Some(sso) = &sso {
+        aws = aws.with_sso(sso.clone());
+    }
+    Ok(Some((aws, sso)))
+}
+
+fn sso_session(config: &config::Config, name: &str) -> anyhow::Result<SsoSession> {
+    let (sessions, _) = config.aws_rules()?;
+    sessions
+        .into_iter()
+        .find(|session| session.name() == name)
+        .with_context(|| format!("no [[aws_sso_session]] is named {name:?}"))
+}
+
+async fn aws_sso_login(config_path: Option<&Path>, name: &str) -> anyhow::Result<()> {
+    if !std::io::stdin().is_terminal() {
+        bail!("`credshim aws sso login` is for a person at a terminal; stdin is not a TTY");
+    }
+    let config = load_config(config_path)?.config;
+    let session = sso_session(&config, name)?;
+    let store = config.secrets()?.open()?;
+    let transport = UpstreamTransport::new(Upstream::new()?);
+    credshim_aws::sso::login(&session, &transport, store.as_ref(), |prompt| {
+        let url = prompt
+            .verification_uri_complete
+            .as_deref()
+            .unwrap_or(&prompt.verification_uri);
+        let _ = writeln!(
+            std::io::stderr(),
+            "Open {url} in a browser and confirm the code {code}.\nWaiting up to {minutes} minutes for the approval...",
+            code = prompt.user_code,
+            minutes = prompt.expires_in.as_secs().div_ceil(60),
+        );
+    })
+    .await?;
+    writeln!(
+        std::io::stderr(),
+        "logged in to AWS SSO session {name}; a running credshim uses it from its next AWS request"
+    )?;
+    Ok(())
+}
+
+async fn aws_sso_logout(config_path: Option<&Path>, name: &str) -> anyhow::Result<()> {
+    let config = load_config(config_path)?.config;
+    let session = sso_session(&config, name)?;
+    let store = config.secrets()?.open()?;
+    let transport = UpstreamTransport::new(Upstream::new()?);
+    let mut stderr = std::io::stderr();
+    match credshim_aws::sso::logout(&session, &transport, store.as_ref()).await? {
+        credshim_aws::sso::LogoutOutcome::NotLoggedIn => {
+            writeln!(stderr, "AWS SSO session {name} was not logged in")?
+        }
+        credshim_aws::sso::LogoutOutcome::Revoked => writeln!(
+            stderr,
+            "logged out of AWS SSO session {name}; role credentials a running credshim already holds stay valid until they expire"
+        )?,
+        credshim_aws::sso::LogoutOutcome::RemovedWithoutRevoking(reason) => writeln!(
+            stderr,
+            "removed the AWS SSO login for {name}, but IAM Identity Center did not confirm the logout ({reason}); sign out in the browser to end the session"
+        )?,
+    }
+    Ok(())
+}
+
+fn start_ssh_agent(
+    config: &config::Config,
+    store: &dyn SecretStore,
+) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+    let entries = SshRule::from_specs(&config.ssh_keys)?
+        .into_iter()
+        .map(|rule| {
+            let secret = required_secret(store, rule.secret_name())?;
+            let signer = SigningKey::from_secret(&secret).with_context(|| {
+                format!(
+                    "ssh_key {:?}: secret {:?} cannot be used",
+                    rule.name(),
+                    rule.secret_name()
+                )
+            })?;
+            Ok((rule, signer))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let path = config.ssh_socket()?;
+    let mut agent = Agent::new(entries);
+    if let Some(uids) = &config.ssh.client_uids {
+        agent = agent.with_clients(uids.clone());
+    }
+    Arc::new(agent)
+        .bind(&path)
+        .with_context(|| format!("could not open ssh agent socket {}", path.display()))
+}
+
+fn ssh_keygen(config_path: Option<&Path>, name: &str) -> anyhow::Result<()> {
+    credshim_secrets::check_name(name)?;
+    let store = load_config(config_path)?.config.secrets()?.open()?;
+    if store.get(name)?.is_some() {
+        bail!(
+            "secret {name:?} already exists; choose another name so the key in use is not replaced"
+        );
+    }
+    let (private, public) = SigningKey::generate(&format!("credshim:{name}"))?;
+    store.set(name, private)?;
+    writeln!(std::io::stdout(), "{}", public.to_openssh()?)?;
+    writeln!(
+        std::io::stderr(),
+        "stored {name}; register the public key above with the server, then point an [[ssh_key]] rule at secret {name:?}"
+    )?;
     Ok(())
 }
 
@@ -435,6 +697,11 @@ fn check_state_paths(config: &config::Config) -> anyhow::Result<()> {
     }
     if let Some(path) = &config.audit.path {
         harden::check_private(path, "audit log")?;
+    }
+    if !config.ssh_keys.is_empty()
+        && let Some(dir) = config.ssh_socket()?.parent()
+    {
+        harden::check_private_dir(dir, "directory holding the ssh agent socket")?;
     }
     Ok(())
 }

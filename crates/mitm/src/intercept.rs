@@ -6,35 +6,46 @@ use std::time::Duration;
 use http::header::{self, HeaderValue};
 use http::uri::{Authority, PathAndQuery};
 use http::{Method, Request, Response, StatusCode, Uri, Version};
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::upgrade::OnUpgrade;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_rustls::LazyConfigAcceptor;
 
+use credshim_aws::{Aws, CredentialError, Decision, Reason};
 use credshim_core::{Destination, InjectError, Injector, Permit, Verdict};
 use credshim_oauth::{Exchange, OAuth};
 
-use crate::audit::{self, Outcome, Stats};
+use crate::audit::{self, AwsLabels, Outcome, Stats};
 use crate::ca::CertificateAuthority;
 use crate::proxy::{ProxyBody, status, strip_hop_by_hop};
 use crate::scrub::{self, ScrubBody};
 use crate::upstream::{ALPN_H2, ConnectError, TargetConnector, Upstream};
 
 const HTTPS_PORT: u16 = 443;
+const BUFFER_WAIT: Duration = Duration::from_secs(30);
+const BUFFER_BUDGET_BODIES: usize = 4;
+
+pub(crate) fn aws_buffer_budget(aws: Option<&Aws>) -> Arc<Semaphore> {
+    let kib = aws.map_or(0, |aws| BUFFER_BUDGET_BODIES * (aws.max_body() / 1024 + 1));
+    Arc::new(Semaphore::new(kib.min(Semaphore::MAX_PERMITS)))
+}
 
 #[derive(Clone)]
 pub struct Intercept {
     ca: Arc<CertificateAuthority>,
     hosts: HashSet<String>,
+    domains: Vec<String>,
 }
 
 impl std::fmt::Debug for Intercept {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Intercept")
             .field("hosts", &self.hosts)
+            .field("domains", &self.domains)
             .finish_non_exhaustive()
     }
 }
@@ -51,7 +62,20 @@ impl Intercept {
                 .into_iter()
                 .map(|host| host.as_ref().to_ascii_lowercase())
                 .collect(),
+            domains: Vec::new(),
         }
+    }
+
+    pub fn with_domains<I, S>(mut self, domains: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.domains = domains
+            .into_iter()
+            .map(|domain| format!(".{}", domain.as_ref().to_ascii_lowercase()))
+            .collect();
+        self
     }
 
     pub(crate) fn ca(&self) -> Arc<CertificateAuthority> {
@@ -59,7 +83,12 @@ impl Intercept {
     }
 
     pub(crate) fn covers(&self, host: &str) -> bool {
-        self.hosts.contains(&host.to_ascii_lowercase())
+        let host = host.to_ascii_lowercase();
+        self.hosts.contains(&host)
+            || self
+                .domains
+                .iter()
+                .any(|domain| host.len() > domain.len() && host.ends_with(domain.as_str()))
     }
 }
 
@@ -141,6 +170,8 @@ fn inject(
 pub(crate) struct Services {
     pub(crate) injector: Arc<Injector>,
     pub(crate) oauth: Option<Arc<OAuth>>,
+    pub(crate) aws: Option<Arc<Aws>>,
+    pub(crate) aws_buffers: Arc<Semaphore>,
     pub(crate) scrub: bool,
     pub(crate) stats: Arc<Stats>,
 }
@@ -149,6 +180,8 @@ pub(crate) struct Session {
     target: VerifiedTarget,
     injector: Arc<Injector>,
     oauth: Option<Arc<OAuth>>,
+    aws: Option<Arc<Aws>>,
+    aws_buffers: Arc<Semaphore>,
     scrub: bool,
     stats: Arc<Stats>,
     ingress: Ingress,
@@ -190,6 +223,8 @@ impl Session {
             target: VerifiedTarget { host, port },
             injector: services.injector,
             oauth: services.oauth,
+            aws: services.aws,
+            aws_buffers: services.aws_buffers,
             scrub: services.scrub,
             stats: services.stats,
             ingress,
@@ -296,6 +331,7 @@ impl Session {
                 &parts.method,
                 parts.uri.path(),
                 &Outcome::Misdirected,
+                None,
                 &response,
             );
             return response;
@@ -310,8 +346,12 @@ impl Session {
     ) -> Response<ProxyBody> {
         let method = parts.method.clone();
         let path = parts.uri.path().to_string();
-        let (outcome, response) = self.relay(parts, body).await;
-        self.audit(&method, &path, &outcome, &response);
+        let Relayed {
+            outcome,
+            response,
+            aws,
+        } = self.relay(parts, body).await;
+        self.audit(&method, &path, &outcome, aws.as_ref(), &response);
         response
     }
 
@@ -320,6 +360,7 @@ impl Session {
         method: &Method,
         path: &str,
         outcome: &Outcome,
+        aws: Option<&AwsLabels>,
         response: &Response<ProxyBody>,
     ) {
         let entry = audit::Entry {
@@ -330,14 +371,10 @@ impl Session {
             method,
             path,
         };
-        audit::record(&entry, outcome, response.status(), &self.stats);
+        audit::record_labelled(&entry, aws, outcome, response.status(), &self.stats);
     }
 
-    async fn relay(
-        &self,
-        mut parts: http::request::Parts,
-        body: Incoming,
-    ) -> (Outcome, Response<ProxyBody>) {
+    async fn relay(&self, mut parts: http::request::Parts, body: Incoming) -> Relayed {
         let target = &self.target;
         tracing::debug!(
             method = %parts.method,
@@ -365,9 +402,10 @@ impl Session {
                         port = target.port,
                         "request exceeds a rule's limits"
                     );
-                    return (
+                    return Relayed::new(
                         Outcome::Limited(rule),
                         status(StatusCode::TOO_MANY_REQUESTS),
+                        None,
                     );
                 }
             },
@@ -380,7 +418,11 @@ impl Session {
                     path = parts.uri.path(),
                     "method or path is not in the rule's allow list"
                 );
-                return (Outcome::NotAllowed(rule), status(StatusCode::FORBIDDEN));
+                return Relayed::new(
+                    Outcome::NotAllowed(rule),
+                    status(StatusCode::FORBIDDEN),
+                    None,
+                );
             }
             Ok(Verdict::Denied(rule)) => {
                 tracing::warn!(
@@ -389,19 +431,28 @@ impl Session {
                     port = target.port,
                     "dummy credential sent to a destination its rule is not bound to"
                 );
-                return (Outcome::Denied(rule), status(StatusCode::FORBIDDEN));
+                return Relayed::new(Outcome::Denied(rule), status(StatusCode::FORBIDDEN), None);
             }
             Err(err) => {
                 tracing::error!(rule = %err.rule, "credential injection failed");
-                return (
+                return Relayed::new(
                     Outcome::Failed(err.rule),
                     status(StatusCode::INTERNAL_SERVER_ERROR),
+                    None,
                 );
             }
         };
         if let Some(exchange) = exchange {
-            return self.exchange(exchange, parts, body).await;
+            let (outcome, response) = self.exchange(exchange, parts, body).await;
+            return Relayed::new(outcome, response, None);
         }
+        let (outcome, body, aws, aws_permit) = match &self.aws {
+            Some(aws) => match self.through_aws(aws, &mut parts, body, outcome).await {
+                Ok(forward) => forward,
+                Err(refused) => return *refused,
+            },
+            None => (outcome, body.boxed(), None, None),
+        };
         if self.scrub {
             parts.headers.insert(
                 header::ACCEPT_ENCODING,
@@ -414,17 +465,210 @@ impl Session {
             None => self.forward(parts, body).await,
         };
         let response = self.scrubbed(&method, response);
-        let response = match permit {
-            Some(permit) => response.map(|body| {
-                Holding {
-                    body,
-                    _permit: permit,
-                }
-                .boxed()
-            }),
-            None => response,
+        let response = match (permit, aws_permit) {
+            (None, None) => response,
+            held => response.map(|body| Holding { body, _guard: held }.boxed()),
         };
-        (outcome, response)
+        Relayed::new(outcome, response, aws)
+    }
+
+    async fn reserve_buffer(
+        &self,
+        aws: &Aws,
+        parts: &http::request::Parts,
+    ) -> Option<OwnedSemaphorePermit> {
+        let declared = parts
+            .headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(usize::MAX);
+        let kib = u32::try_from(declared.min(aws.max_body()) / 1024 + 1).ok()?;
+        tokio::time::timeout(
+            BUFFER_WAIT,
+            self.aws_buffers.clone().acquire_many_owned(kib),
+        )
+        .await
+        .ok()?
+        .ok()
+    }
+
+    async fn through_aws(
+        &self,
+        aws: &Aws,
+        parts: &mut http::request::Parts,
+        body: Incoming,
+        outcome: Outcome,
+    ) -> Result<(Outcome, ProxyBody, Option<AwsLabels>, Option<Permit>), Box<Relayed>> {
+        let target = &self.target;
+        let rule_in = |parts: &http::request::Parts| aws.first_dummy_in(parts).map(str::to_string);
+        let (buffered, body) = if aws.needs_body(&target.host, parts) {
+            let Some(budget) = self.reserve_buffer(aws, parts).await else {
+                return Err(Box::new(Relayed::new(
+                    Outcome::Rejected,
+                    status(StatusCode::SERVICE_UNAVAILABLE),
+                    Some(AwsLabels::reason(Reason::BufferBusy)),
+                )));
+            };
+            match Limited::new(body, aws.max_body()).collect().await {
+                Ok(collected) => {
+                    let bytes = collected.to_bytes();
+                    let body = Holding {
+                        body: full(bytes.clone()),
+                        _guard: budget,
+                    };
+                    (Some(bytes), body.boxed())
+                }
+                Err(err) if err.downcast_ref::<LengthLimitError>().is_some() => {
+                    tracing::warn!(host = %target.host, limit = aws.max_body(), "AWS request body exceeds the limit");
+                    let outcome = rule_in(parts).map_or(Outcome::Blocked, Outcome::Denied);
+                    return Err(Box::new(Relayed::new(
+                        outcome,
+                        status(StatusCode::PAYLOAD_TOO_LARGE),
+                        Some(AwsLabels::reason(Reason::BodyTooLarge)),
+                    )));
+                }
+                Err(err) => {
+                    tracing::debug!(host = %target.host, error = %err, "could not read the AWS request body");
+                    return Err(Box::new(Relayed::new(
+                        Outcome::Rejected,
+                        status(StatusCode::BAD_REQUEST),
+                        None,
+                    )));
+                }
+            }
+        } else {
+            (None, body.boxed())
+        };
+        let aws_host = credshim_aws::is_aws_host(&target.host);
+        match aws.decide(&target.host, parts, buffered.as_deref()) {
+            Decision::Pass(labels) => {
+                let labels = aws_host.then(|| AwsLabels::new(&labels, None));
+                Ok((outcome, body, labels, None))
+            }
+            Decision::Deny(denial) => {
+                let rule = denial.rule.map(|rule| rule.name().to_string());
+                tracing::warn!(
+                    rule = rule.as_deref().unwrap_or_default(),
+                    host = %target.host,
+                    port = target.port,
+                    reason = denial.reason.name(),
+                    "AWS request refused"
+                );
+                let labels = Some(AwsLabels::new(&denial.labels, Some(denial.reason)));
+                if denial.reason == Reason::OperationNotAllowed {
+                    let rule = rule.unwrap_or_default();
+                    let operation = denial
+                        .labels
+                        .operation
+                        .as_deref()
+                        .unwrap_or("this operation");
+                    let scope = denial.labels.scope.as_ref();
+                    let response = credshim_aws::refusal::error_response(
+                        parts,
+                        scope.map(|scope| scope.service.as_str()),
+                        StatusCode::FORBIDDEN,
+                        "CredShimOperationNotAllowed",
+                        &format!(
+                            "credshim: {operation} is not in the operations of AWS rule {rule}"
+                        ),
+                    );
+                    return Err(Box::new(Relayed::new(
+                        Outcome::NotAllowed(rule),
+                        response.map(full),
+                        labels,
+                    )));
+                }
+                let code = match denial.reason {
+                    Reason::BadAuthorization | Reason::BadPayloadHash | Reason::SignedChunks => {
+                        StatusCode::BAD_REQUEST
+                    }
+                    _ => StatusCode::FORBIDDEN,
+                };
+                Err(Box::new(Relayed::new(
+                    rule.map_or(Outcome::Blocked, Outcome::Denied),
+                    status(code),
+                    labels,
+                )))
+            }
+            Decision::Resign(plan) => {
+                let rule = plan.rule.name().to_string();
+                let labels = AwsLabels::new(&plan.labels, None);
+                let Some(permit) = aws.admit(plan.rule) else {
+                    tracing::warn!(%rule, host = %target.host, "AWS request exceeds the rule's limits");
+                    let response = credshim_aws::refusal::error_response(
+                        parts,
+                        Some(plan.auth.scope.service.as_str()),
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "CredShimLimitExceeded",
+                        &format!("credshim: AWS rule {rule} is over its limits"),
+                    );
+                    return Err(Box::new(Relayed::new(
+                        Outcome::Limited(rule),
+                        response.map(full),
+                        Some(AwsLabels::new(&plan.labels, Some(Reason::Limited))),
+                    )));
+                };
+                let credentials = match aws.credentials(plan.rule).await {
+                    Ok(credentials) => credentials,
+                    Err(err) => {
+                        tracing::warn!(%rule, host = %target.host, error = %err, "no usable AWS credentials for the request");
+                        let (reason, code, outcome) = match &err {
+                            CredentialError::LoginRequired(_) => (
+                                Reason::SsoLoginRequired,
+                                StatusCode::FORBIDDEN,
+                                Outcome::Denied(rule),
+                            ),
+                            CredentialError::Refused { .. } => (
+                                Reason::SsoRefused,
+                                StatusCode::FORBIDDEN,
+                                Outcome::Denied(rule),
+                            ),
+                            _ => (
+                                Reason::SsoUnavailable,
+                                StatusCode::BAD_GATEWAY,
+                                Outcome::Failed(rule),
+                            ),
+                        };
+                        let response = credshim_aws::refusal::error_response(
+                            parts,
+                            Some(plan.auth.scope.service.as_str()),
+                            code,
+                            refusal_code(reason),
+                            &format!("credshim: {err}"),
+                        );
+                        return Err(Box::new(Relayed::new(
+                            outcome,
+                            response.map(full),
+                            Some(AwsLabels::new(&plan.labels, Some(reason))),
+                        )));
+                    }
+                };
+                let signed = credshim_aws::resign(
+                    &plan,
+                    &credentials,
+                    parts,
+                    &target.authority(),
+                    buffered.as_deref().unwrap_or_default(),
+                );
+                match signed {
+                    Ok(()) => Ok((Outcome::Resigned(rule), body, Some(labels), Some(permit))),
+                    Err(err) => {
+                        tracing::warn!(%rule, host = %target.host, error = %err, "AWS request could not be re-signed");
+                        let code = match err {
+                            credshim_aws::ResignError::Auth(_)
+                            | credshim_aws::ResignError::HeaderValue => StatusCode::BAD_REQUEST,
+                            _ => StatusCode::INTERNAL_SERVER_ERROR,
+                        };
+                        Err(Box::new(Relayed::new(
+                            Outcome::Failed(rule),
+                            status(code),
+                            Some(labels),
+                        )))
+                    }
+                }
+            }
+        }
     }
 
     fn scrubbed(&self, method: &Method, mut response: Response<ProxyBody>) -> Response<ProxyBody> {
@@ -494,9 +738,9 @@ impl Session {
         Response::from_parts(parts, full(body))
     }
 
-    async fn forward(&self, parts: http::request::Parts, body: Incoming) -> Response<ProxyBody> {
+    async fn forward(&self, parts: http::request::Parts, body: ProxyBody) -> Response<ProxyBody> {
         let target = &self.target;
-        match self.send(parts, body.boxed()).await {
+        match self.send(parts, body).await {
             Ok(res) => {
                 let (mut parts, body) = res.into_parts();
                 strip_hop_by_hop_keeping_trailers(&mut parts.headers);
@@ -571,7 +815,7 @@ impl Session {
     async fn upgrade(
         &self,
         mut parts: http::request::Parts,
-        body: Incoming,
+        body: ProxyBody,
         protocol: HeaderValue,
     ) -> Response<ProxyBody> {
         let target = &self.target;
@@ -586,7 +830,7 @@ impl Session {
         };
         parts.headers.insert(header::HOST, host);
         parts.uri = origin_form(&parts.uri);
-        let req = Request::from_parts(parts, body.boxed());
+        let req = Request::from_parts(parts, body);
         let mut res = match self.send_upgrade(req).await {
             Ok(res) => res,
             Err(err) => {
@@ -653,12 +897,28 @@ impl Session {
     }
 }
 
-struct Holding {
-    body: ProxyBody,
-    _permit: Permit,
+struct Relayed {
+    outcome: Outcome,
+    response: Response<ProxyBody>,
+    aws: Option<AwsLabels>,
 }
 
-impl http_body::Body for Holding {
+impl Relayed {
+    fn new(outcome: Outcome, response: Response<ProxyBody>, aws: Option<AwsLabels>) -> Self {
+        Self {
+            outcome,
+            response,
+            aws,
+        }
+    }
+}
+
+struct Holding<G> {
+    body: ProxyBody,
+    _guard: G,
+}
+
+impl<G: Unpin> http_body::Body for Holding<G> {
     type Data = bytes::Bytes;
     type Error = hyper::Error;
 
@@ -675,6 +935,14 @@ impl http_body::Body for Holding {
 
     fn size_hint(&self) -> http_body::SizeHint {
         self.body.size_hint()
+    }
+}
+
+fn refusal_code(reason: Reason) -> &'static str {
+    match reason {
+        Reason::SsoLoginRequired => "CredShimSsoLoginRequired",
+        Reason::SsoRefused => "CredShimSsoRoleRefused",
+        _ => "CredShimSsoUnavailable",
     }
 }
 
@@ -748,6 +1016,14 @@ fn origin_form(uri: &Uri) -> Uri {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aws_buffer_budget_holds_a_few_full_bodies() {
+        let aws = Aws::new(Vec::new(), credshim_aws::Signer::default()).with_max_body(64 * 1024);
+        let budget = aws_buffer_budget(Some(&aws));
+        assert_eq!(budget.available_permits(), BUFFER_BUDGET_BODIES * 65);
+        assert_eq!(aws_buffer_budget(None).available_permits(), 0);
+    }
 
     #[test]
     fn joined_cookie_stays_sensitive_when_any_crumb_was() {

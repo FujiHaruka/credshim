@@ -19,10 +19,11 @@ use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
+use credshim_aws::Aws;
 use credshim_core::{BaseUrls, Injector};
 use credshim_oauth::OAuth;
 
-use crate::audit::{self, Outcome, Stats};
+use crate::audit::{self, AwsLabels, Outcome, Stats};
 use crate::base_url::BaseUrlServer;
 use crate::ca::CertificateAuthority;
 use crate::doctor;
@@ -41,6 +42,7 @@ pub struct ProxyConfig {
     pub intercept: Option<Intercept>,
     pub injector: Arc<Injector>,
     pub oauth: Option<Arc<OAuth>>,
+    pub aws: Option<Arc<Aws>>,
     pub scrub: bool,
     pub stats: Arc<Stats>,
     pub purge_interval: Duration,
@@ -60,6 +62,7 @@ impl ProxyConfig {
             intercept: None,
             injector: Arc::new(Injector::default()),
             oauth: None,
+            aws: None,
             scrub: true,
             stats: Arc::default(),
             purge_interval: Duration::from_secs(60),
@@ -273,6 +276,8 @@ impl Handler {
             services: Services {
                 injector: config.injector.clone(),
                 oauth: config.oauth.clone(),
+                aws: config.aws.clone(),
+                aws_buffers: crate::intercept::aws_buffer_budget(config.aws.as_deref()),
                 scrub: config.scrub,
                 stats: config.stats.clone(),
             },
@@ -301,6 +306,20 @@ impl Handler {
             };
             doctor::serve_tls(hyper::upgrade::on(&mut req), ca, self.handshake_timeout);
             return Response::new(empty());
+        }
+        if let Some(blocked) = credshim_aws::blocked(&host) {
+            tracing::warn!(%host, port, "CONNECT to an AWS sign-in or SSO endpoint refused");
+            let labels = AwsLabels::reason(credshim_aws::Reason::BlockedHost(blocked));
+            audit::record_connect_labelled(
+                "tcp",
+                &host,
+                port,
+                Some(&labels),
+                &Outcome::Blocked,
+                StatusCode::FORBIDDEN,
+                &self.services.stats,
+            );
+            return status(StatusCode::FORBIDDEN);
         }
         if let Some(intercept) = self.intercept.as_ref().filter(|i| i.covers(&host)) {
             return self.intercept(req, intercept, host, port).await;
@@ -415,7 +434,26 @@ impl Handler {
             method: &method,
             path: &path,
         };
-        if let Some(rule) = self.injector.first_dummy_in(&parts) {
+        if let Some(blocked) = credshim_aws::blocked(authority.host()) {
+            tracing::warn!(%authority, "request to an AWS sign-in or SSO endpoint refused");
+            let labels = AwsLabels::reason(credshim_aws::Reason::BlockedHost(blocked));
+            audit::record_labelled(
+                &entry,
+                Some(&labels),
+                &Outcome::Blocked,
+                StatusCode::FORBIDDEN,
+                &self.services.stats,
+            );
+            return status(StatusCode::FORBIDDEN);
+        }
+        let dummy = self.injector.first_dummy_in(&parts).or_else(|| {
+            self.services
+                .aws
+                .as_ref()
+                .and_then(|aws| aws.first_dummy_in(&parts))
+                .map(str::to_string)
+        });
+        if let Some(rule) = dummy {
             tracing::warn!(
                 %rule,
                 %authority,

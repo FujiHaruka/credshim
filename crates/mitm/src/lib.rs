@@ -8,6 +8,7 @@ mod doctor;
 pub mod intercept;
 pub mod proxy;
 mod scrub;
+mod sso_transport;
 mod status;
 pub mod upstream;
 
@@ -16,6 +17,7 @@ pub use ca::{CaError, CertificateAuthority};
 pub use doctor::{DOCTOR_HOST, Probe, ProbeError, probe};
 pub use intercept::{Intercept, VerifiedTarget};
 pub use proxy::{BindError, Proxy, ProxyConfig};
+pub use sso_transport::UpstreamTransport;
 pub use status::serve_status;
 pub use upstream::Upstream;
 #[cfg(feature = "testing")]

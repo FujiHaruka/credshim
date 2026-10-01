@@ -24,6 +24,17 @@ pub struct SecretInfo {
 pub trait SecretStore: Send + Sync {
     fn get(&self, name: &str) -> Result<Option<SecretString>, StoreError>;
     fn set(&self, name: &str, value: SecretString) -> Result<(), StoreError>;
+    fn remove(&self, name: &str) -> Result<bool, StoreError>;
+    fn update(
+        &self,
+        name: &str,
+        change: &mut dyn FnMut(Option<&SecretString>) -> Option<SecretString>,
+    ) -> Result<bool, StoreError> {
+        match change(self.get(name)?.as_ref()) {
+            Some(value) => self.set(name, value).map(|()| true),
+            None => Ok(false),
+        }
+    }
     fn list(&self) -> Result<Vec<SecretInfo>, StoreError>;
 }
 

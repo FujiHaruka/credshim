@@ -40,12 +40,88 @@ pub const PRESETS: &[Preset] = &[
     },
 ];
 
-pub fn find(name: &str) -> Option<&'static Preset> {
-    PRESETS.iter().find(|preset| preset.name == name)
+pub struct SshPreset {
+    pub name: &'static str,
+    rule: &'static str,
+    users: &'static [&'static str],
+    host_keys: &'static [&'static str],
+}
+
+pub const SSH_PRESETS: &[SshPreset] = &[SshPreset {
+    name: "github-ssh",
+    rule: "github",
+    users: &["git"],
+    host_keys: &[
+        "SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU",
+        "SHA256:p2QAMXNIC1TJYWeIOttrVc98/R1BUFWu3/LiyKgUfQM",
+        "SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s",
+    ],
+}];
+
+pub const AWS_PRESET: &str = "aws";
+pub const AWS_SSO_PRESET: &str = "aws-sso";
+
+pub fn names() -> impl Iterator<Item = &'static str> {
+    PRESETS
+        .iter()
+        .map(|preset| preset.name)
+        .chain(SSH_PRESETS.iter().map(|preset| preset.name))
+        .chain([AWS_PRESET, AWS_SSO_PRESET])
+}
+
+pub fn render(name: &str) -> Option<String> {
+    if name == AWS_PRESET {
+        return Some(render_aws());
+    }
+    if name == AWS_SSO_PRESET {
+        return Some(render_aws_sso());
+    }
+    PRESETS
+        .iter()
+        .find(|preset| preset.name == name)
+        .map(Preset::render)
+        .or_else(|| {
+            SSH_PRESETS
+                .iter()
+                .find(|preset| preset.name == name)
+                .map(SshPreset::render)
+        })
+}
+
+fn render_aws() -> String {
+    format!(
+        "[[aws_key]]\nname = \"aws\"\ndummy_access_key_id = \"{dummy}\"\naccess_key_id = \"aws-access-key-id\"\nsecret_access_key = \"aws-secret-access-key\"\n",
+        dummy = dummy::generate("CREDSHIMAWS"),
+    )
+}
+
+fn render_aws_sso() -> String {
+    format!(
+        "[[aws_sso_session]]\nname = \"sso\"\nstart_url = \"https://your-portal.awsapps.com/start\"\nregion = \"us-east-1\"\n\n[[aws_sso_role]]\nname = \"aws-sso\"\ndummy_access_key_id = \"{dummy}\"\nsession = \"sso\"\naccount_id = \"123456789012\"\nrole_name = \"Developer\"\n",
+        dummy = dummy::generate("CREDSHIMAWS"),
+    )
+}
+
+impl SshPreset {
+    fn render(&self) -> String {
+        let quoted = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| format!("\"{value}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        format!(
+            "[[ssh_key]]\nname = \"{rule}\"\nsecret = \"ssh-{rule}\"\nusers = [{users}]\nhost_keys = [{host_keys}]\n",
+            rule = self.rule,
+            users = quoted(self.users),
+            host_keys = quoted(self.host_keys),
+        )
+    }
 }
 
 impl Preset {
-    pub fn render(&self) -> String {
+    fn render(&self) -> String {
         let dummy = dummy::generate(self.dummy_prefix);
         format!(
             "[[rule]]\nname = \"{name}\"\nhost = \"{host}\"\nsecret = \"{name}\"\ndummy = \"{dummy}\"\nenv = \"{env}\"\ninject = {inject}\nallow_methods = [\"GET\", \"POST\"]\nallow_paths = {allow_paths}\nbase_url_prefix = \"{base_url_prefix}\"\n",

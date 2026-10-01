@@ -23,6 +23,14 @@ pub fn check_private(path: &Path, what: &str) -> anyhow::Result<()> {
     check(path, what, 0o022)
 }
 
+pub fn check_private_dir(dir: &Path, what: &str) -> anyhow::Result<()> {
+    match std::fs::metadata(dir) {
+        Ok(metadata) => check_mode(dir, &metadata, what, 0o022),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("could not inspect {}", dir.display())),
+    }
+}
+
 pub fn check_secret(path: &Path, what: &str) -> anyhow::Result<()> {
     check(path, what, 0o066)
 }

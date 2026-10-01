@@ -3,9 +3,11 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
+use credshim_aws::{AwsKeySpec, AwsRule, AwsSsoRoleSpec, SsoSession, SsoSessionSpec};
 use credshim_core::RuleSpec;
 use credshim_oauth::ProviderSpec;
 use credshim_secrets::BackendConfig;
+use credshim_ssh::{SshKeySpec, SshRule};
 use serde::Deserialize;
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8787";
@@ -32,6 +34,31 @@ pub struct Config {
     pub scrub: ScrubConfig,
     #[serde(default)]
     pub status: StatusConfig,
+    #[serde(default)]
+    pub ssh: SshConfig,
+    #[serde(default, rename = "ssh_key")]
+    pub ssh_keys: Vec<SshKeySpec>,
+    #[serde(default)]
+    pub aws: AwsConfig,
+    #[serde(default, rename = "aws_key")]
+    pub aws_keys: Vec<AwsKeySpec>,
+    #[serde(default, rename = "aws_sso_session")]
+    pub aws_sso_sessions: Vec<SsoSessionSpec>,
+    #[serde(default, rename = "aws_sso_role")]
+    pub aws_sso_roles: Vec<AwsSsoRoleSpec>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AwsConfig {
+    pub max_body_bytes: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshConfig {
+    pub socket: Option<PathBuf>,
+    pub client_uids: Option<Vec<u32>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -103,6 +130,19 @@ pub fn load(explicit: Option<&Path>) -> anyhow::Result<Loaded> {
         toml::from_str(&text).with_context(|| format!("invalid config {}", path.display()))?;
     config
         .check_env_names()
+        .and_then(|()| Ok(SshRule::from_specs(&config.ssh_keys).map(drop)?))
+        .and_then(|()| {
+            anyhow::ensure!(
+                config
+                    .ssh
+                    .client_uids
+                    .as_ref()
+                    .is_none_or(|uids| !uids.is_empty()),
+                "[ssh] client_uids must list at least one uid"
+            );
+            Ok(())
+        })
+        .and_then(|()| config.check_aws_keys())
         .with_context(|| format!("invalid config {}", path.display()))?;
     Ok(Loaded {
         config,
@@ -137,6 +177,34 @@ impl Config {
         Ok(())
     }
 
+    pub fn aws_rules(&self) -> anyhow::Result<(Vec<SsoSession>, Vec<AwsRule>)> {
+        let sessions = SsoSession::from_specs(&self.aws_sso_sessions)?;
+        let rules = AwsRule::from_config(&self.aws_keys, &self.aws_sso_roles, &sessions)?;
+        Ok((sessions, rules))
+    }
+
+    pub fn has_aws(&self) -> bool {
+        !self.aws_keys.is_empty() || !self.aws_sso_roles.is_empty()
+    }
+
+    fn check_aws_keys(&self) -> anyhow::Result<()> {
+        let (_, aws) = self.aws_rules()?;
+        for key in &aws {
+            if let Some(rule) = self
+                .rules
+                .iter()
+                .find(|rule| credshim_aws::rule::overlaps(&rule.dummy, key.dummy()))
+            {
+                anyhow::bail!(
+                    "aws_key {:?} and rule {:?} have dummies where one contains the other",
+                    key.name(),
+                    rule.name
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub fn listen(&self) -> SocketAddr {
         self.listen.addr.unwrap_or_else(|| {
             DEFAULT_LISTEN
@@ -156,6 +224,13 @@ impl Config {
         match &self.vault.path {
             Some(path) => Ok(path.clone()),
             None => Ok(config_dir()?.join("oauth-vault.age")),
+        }
+    }
+
+    pub fn ssh_socket(&self) -> anyhow::Result<PathBuf> {
+        match &self.ssh.socket {
+            Some(path) => Ok(path.clone()),
+            None => Ok(config_dir()?.join("ssh-agent.sock")),
         }
     }
 

@@ -202,3 +202,51 @@ fn base64url_echoes_are_scrubbed_too() {
         );
     }
 }
+
+#[derive(Debug, Default)]
+struct Rotating {
+    generation: std::sync::atomic::AtomicU64,
+    pairs: std::sync::Mutex<Vec<(String, String)>>,
+}
+
+impl credshim_core::ScrubSource for Rotating {
+    fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn pairs(&self) -> Vec<(SecretString, String)> {
+        self.pairs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(real, dummy)| (SecretString::from(real.as_str()), dummy.clone()))
+            .collect()
+    }
+}
+
+#[test]
+fn a_scrub_source_is_reread_when_its_generation_moves() {
+    let source = Arc::new(Rotating::default());
+    let injector = credshim_core::Injector::new(
+        credshim_core::RuleSet::default(),
+        credshim_core::Secrets::new(),
+    )
+    .unwrap()
+    .with_scrub_source(source.clone());
+    assert!(injector.scrubber().is_empty());
+
+    source
+        .pairs
+        .lock()
+        .unwrap()
+        .push(("rotated-real-value-0001".into(), "DUMMY-ONE".into()));
+    assert!(injector.scrubber().is_empty());
+    source
+        .generation
+        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+
+    assert_eq!(
+        injector.scrubber().scrub(b"x rotated-real-value-0001 y"),
+        Some(b"x DUMMY-ONE y".to_vec())
+    );
+}

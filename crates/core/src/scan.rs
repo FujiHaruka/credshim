@@ -70,6 +70,10 @@ pub(crate) fn hits(dummy: &str, parts: &Parts) -> Vec<Hit> {
     hits
 }
 
+pub fn appears_in(dummy: &str, parts: &Parts) -> bool {
+    !hits(dummy, parts).is_empty()
+}
+
 pub(crate) fn issued_tokens(parts: &Parts) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     let mut collect = |haystack: &[u8]| {

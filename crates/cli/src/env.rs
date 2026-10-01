@@ -6,6 +6,8 @@ use credshim_core::BaseUrls;
 
 use crate::config::Config;
 
+const AWS_DUMMY_SECRET: &str = "credshim-dummy";
+
 pub struct CaFiles<'a> {
     pub cert: &'a Path,
     pub bundle: &'a Path,
@@ -22,6 +24,13 @@ pub fn render(config: &Config, base_urls: &BaseUrls, ca: &CaFiles<'_>) -> anyhow
         no_proxy.push(addr.ip().to_string());
     }
     let no_proxy = no_proxy.join(",");
+    let ssh_socket = if config.ssh_keys.is_empty() {
+        None
+    } else {
+        Some(config.ssh_socket()?)
+    };
+    let ssh_socket = ssh_socket.as_deref().map(utf8).transpose()?;
+    let (_, aws_rules) = config.aws_rules()?;
     let mut vars: Vec<(&str, &str)> = vec![
         ("HTTPS_PROXY", &proxy),
         ("https_proxy", &proxy),
@@ -34,7 +43,15 @@ pub fn render(config: &Config, base_urls: &BaseUrls, ca: &CaFiles<'_>) -> anyhow
         ("CURL_CA_BUNDLE", bundle),
         ("NODE_EXTRA_CA_CERTS", cert),
         ("NODE_USE_ENV_PROXY", "1"),
+        ("AWS_CA_BUNDLE", bundle),
     ];
+    if let Some(socket) = ssh_socket {
+        vars.push(("SSH_AUTH_SOCK", socket));
+    }
+    if let [only] = aws_rules.as_slice() {
+        vars.push(("AWS_ACCESS_KEY_ID", only.dummy()));
+        vars.push(("AWS_SECRET_ACCESS_KEY", AWS_DUMMY_SECRET));
+    }
     for rule in &config.rules {
         if let Some(name) = &rule.env {
             vars.push((name, &rule.dummy));
@@ -43,6 +60,16 @@ pub fn render(config: &Config, base_urls: &BaseUrls, ca: &CaFiles<'_>) -> anyhow
     let mut out = String::new();
     for (name, value) in vars {
         writeln!(out, "export {name}={}", quote(value))?;
+    }
+    if aws_rules.len() > 1 {
+        for rule in &aws_rules {
+            writeln!(
+                out,
+                "# aws profile for {}: aws_access_key_id = {}, aws_secret_access_key = {AWS_DUMMY_SECRET}",
+                rule.name(),
+                rule.dummy()
+            )?;
+        }
     }
     if let Some(addr) = config.listen.base_url_addr {
         for rule in &config.rules {
