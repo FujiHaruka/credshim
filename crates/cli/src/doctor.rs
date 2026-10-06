@@ -588,6 +588,7 @@ impl Runtime {
             (_, true, _) => format!("\n         {} did not use the proxy: check HTTPS_PROXY/https_proxy", self.name),
             ("node", _, true) => "\n         set NODE_EXTRA_CA_CERTS to the CA certificate".into(),
             ("python", _, true) => "\n         this Python's ssl module ignores SSL_CERT_FILE (Apple's /usr/bin/python3 does); requests and httpx read REQUESTS_CA_BUNDLE/SSL_CERT_FILE themselves".into(),
+            ("go", _, true) if cfg!(target_os = "macos") => "\n         Go on macOS verifies against the keychain and ignores SSL_CERT_FILE, unless the program was built with Go 1.27+ and either its go.mod says go 1.27+ or it runs with GODEBUG=x509sslcertoverrideplatform=1; see \"macOS の Go 製ツール\" in the README".into(),
             (_, _, true) => format!("\n         {} does not trust the CA: check SSL_CERT_FILE (and REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE)", self.name),
             _ => String::new(),
         }
@@ -615,5 +616,21 @@ mod tests {
         assert_eq!(openssh_version("Sun_SSH_1.1"), None);
         assert!(Some((8, 9)) >= Some(SESSION_BIND_OPENSSH));
         assert!((8, 8) < SESSION_BIND_OPENSSH);
+    }
+
+    #[test]
+    fn untrusted_go_on_macos_is_pointed_at_the_keychain_instead_of_ssl_cert_file() {
+        let go = RUNTIMES
+            .iter()
+            .find(|runtime| runtime.name == "go")
+            .unwrap();
+        let hint = go.hint(
+            "tls: failed to verify certificate: x509: \u{201c}credshim.test\u{201d} certificate is not trusted",
+        );
+        assert_eq!(hint.contains("keychain"), cfg!(target_os = "macos"));
+        assert_eq!(
+            hint.contains("check SSL_CERT_FILE"),
+            !cfg!(target_os = "macos")
+        );
     }
 }
