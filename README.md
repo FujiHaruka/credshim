@@ -165,9 +165,35 @@ PATH にある curl、python3、node、go をこのシェルの環境のまま�
 
 - **Node。** 組み込みの fetch は `NODE_USE_ENV_PROXY=1`（Node 24 以降）がないと `HTTPS_PROXY` を見ない。古い Node では undici の `EnvHttpProxyAgent` を dispatcher に渡す。doctor はプロキシを素通りした失敗（`ENOTFOUND credshim.test`）を見分けて案内する。
 - **Python。** Apple 同梱の `/usr/bin/python3` の ssl モジュールは `SSL_CERT_FILE` を読まない。requests と httpx は `REQUESTS_CA_BUNDLE`・`SSL_CERT_FILE` を自分で読むので動く。
+- **Go。** Linux では `SSL_CERT_FILE` を読む。macOS の Go は証明書の検証をキーチェーンに任せ、`SSL_CERT_FILE` を読まない。読むのは Go 1.27 以降でビルドしたプログラムが、go.mod の `go` 行が 1.27 以上のとき、または `GODEBUG=x509sslcertoverrideplatform=1` を付けて実行したときだけ。doctor は go.mod の無い一時ファイルを `go run` するので、macOS ではキーチェーンで信頼させていない限り失敗と報告する。対処は下の「macOS の Go 製ツール」。
 - **SSH。** `SSH_AUTH_SOCK` の agent に鍵の一覧を求め、CredShim の鍵（コメント `credshim:<ルール>`）が無ければ別の agent を指していると警告する。PATH の `ssh` が session-bind を送らない OpenSSH 8.9 より前なら報告する。
 - **AWS。** PATH の `aws` で `credshim.test` にダミーのキーの要求を送り、プロキシを通って CA を信頼しているかを見る（`AWS_CA_BUNDLE` は信頼ストアを置き換えるので結合バンドルを指す）。
 - **残った本物。** `~/.ssh` の秘密鍵、`~/.aws/credentials`・`~/.aws/config` の本物のアクセスキーと `credential_process`・SSO のプロファイル、`~/.aws/sso/cache`・`~/.aws/cli/cache`、環境変数の本物のキーとセッショントークンを、パスとプロファイル名だけで報告する（値は出さない）。移行の手順は下の「既存の認証情報からの移行」。
+
+### macOS の Go 製ツール
+
+開発CAが要るのは、ルールのあるホスト（AWS のルールがあれば `amazonaws.com` 全体）への通信だけ。それ以外のホストへの CONNECT は素のトンネルで中継され、本物の証明書が届くので、Go 製ツールでもそのまま動く。たとえば Terraform のレジストリやプロバイダーのダウンロードは通り、AWS のルールがあるときの AWS プロバイダーの API 呼び出しは開発CAを信頼できずに失敗する。
+
+順に試す。
+
+1. Go 1.27 以降でビルドされたツールなら、`GODEBUG=x509sslcertoverrideplatform=1` を付けて実行する（`GODEBUG` に他の設定があればカンマでつなぐ）。自分のプロジェクトなら go.mod の `go` 行を 1.27 以上にすれば付けなくてよい。
+2. ツールが API の接続先を変えられるなら、base URL モードを使う（開発CAが要らない）。
+3. どちらもできない場合（古い Go でビルドされた配布バイナリなど）に限り、開発ユーザーのログインキーチェーンで開発CAを信頼させる。管理者権限は要らず、パスワードの確認が出る。
+
+```sh
+security add-trusted-cert -r trustRoot -p ssl -k ~/Library/Keychains/login.keychain-db /etc/credshim/ca.pem
+```
+
+キーチェーンで信頼させると、守りの前提が変わる。
+
+- ブラウザを含め、その開発ユーザーのすべてのアプリが開発CAを信頼する。CA 鍵が漏れると、任意のサイトになりすましてそのユーザーの HTTPS 通信を読み書きできる。環境変数で渡すだけなら、影響はその変数を読み込んだプロセスに留まる。
+- 段階Bに限る。CA 鍵は専用ユーザーしか読めないので、開発ユーザーの権限で動くエージェントからは取り出せず、漏れるのは専用ユーザーか管理者の権限が奪われたとき。段階Aでは開発ユーザーが CA 鍵を読めるので、エージェントが任意のサイトの証明書を作れてしまう。
+- CA を作り直したら、古い CA の信頼を外してから新しいものを入れ直す。外すときは次のとおり。
+
+```sh
+security remove-trusted-cert /etc/credshim/ca.pem
+security delete-certificate -c "credshim development CA" ~/Library/Keychains/login.keychain-db
+```
 
 ## base URL モード
 
