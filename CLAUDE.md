@@ -1,6 +1,6 @@
 # CredShim
 
-開発用クレデンシャル注入プロキシ。計画と進捗は `docs/plan.md`（各フェーズの完了条件チェックボックスが進捗の正）、脅威モデルは `docs/threat-model.md`。
+開発用クレデンシャル注入プロキシ。脅威モデルは `docs/threat-model.md`。
 
 ## ルール
 

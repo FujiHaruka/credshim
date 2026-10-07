@@ -12,7 +12,7 @@
 - **開発ユーザーが管理者だと保証は崩れる。** エージェントは開発ユーザー（エージェントが動く OS ユーザー）の権限で、シェルの設定に仕込みをして sudo のパスワードを盗み、root から秘密を読める。開発ユーザーは管理者にしない（下の手順0）。
 - **プロキシを開発ユーザーのまま動かす試用の構成では守れない。** エージェントは秘密ストアと設定に手が届く。
 
-設計と脅威モデルは [docs/plan.md](docs/plan.md) と [docs/threat-model.md](docs/threat-model.md)。
+脅威モデルは [docs/threat-model.md](docs/threat-model.md)。
 
 ## 構成
 
@@ -381,7 +381,7 @@ docker run --rm \
   amazon/aws-cli sts get-caller-identity
 ```
 
-SSH は agent のソケットをコンテナにマウントし、22番ポートへの接続は既存の CONNECT トンネルで出す（プロキシはインターセプトしないホストへの CONNECT を素の TCP として中継し、監査ログに `tunnel` で残す）。agent は接続元の uid を見る。user namespace を使わない Linux の docker ではコンテナ内の uid がそのままホストの uid になるので、コンテナを開発ユーザーの uid で動かす（`--user "$(id -u)"`。OpenSSH はパスワードエントリの無い uid では動かないので、イメージにその uid のユーザーを作っておく）か、コンテナの uid を `client_uids` に入れる。Docker Desktop（macOS）はホストの Unix ソケットをバインドマウントで渡せないので、ホストの agent をコンテナへ中継する `/run/host-services/ssh-auth.sock` を使う。どちらの構成も手動で確かめる段階にあり（計画の Phase 11 の手動マイルストーン）、ここに書いたのはその出発点。
+SSH は agent のソケットをコンテナにマウントし、22番ポートへの接続は既存の CONNECT トンネルで出す（プロキシはインターセプトしないホストへの CONNECT を素の TCP として中継し、監査ログに `tunnel` で残す）。agent は接続元の uid を見る。user namespace を使わない Linux の docker ではコンテナ内の uid がそのままホストの uid になるので、コンテナを開発ユーザーの uid で動かす（`--user "$(id -u)"`。OpenSSH はパスワードエントリの無い uid では動かないので、イメージにその uid のユーザーを作っておく）か、コンテナの uid を `client_uids` に入れる。Docker Desktop（macOS）はホストの Unix ソケットをバインドマウントで渡せないので、ホストの agent をコンテナへ中継する `/run/host-services/ssh-auth.sock` を使う。どちらの構成もまだ手動では確かめておらず、ここに書いたのはその出発点。
 
 ```sh
 docker run --rm --user "$(id -u)" \
