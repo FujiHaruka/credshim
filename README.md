@@ -49,7 +49,7 @@
 # Linux は user=credshim bin=/usr/local/libexec/credshim/credshim
 user=_credshim bin=/Library/CredShim/bin/credshim dev=yourname   # dev は開発ユーザーの名前
 
-version=0.4.0
+version=0.4.1
 target=aarch64-apple-darwin
 base=https://github.com/FujiHaruka/credshim/releases/download/v$version
 curl -fsSLO "$base/credshim-$version-$target.tar.gz"
