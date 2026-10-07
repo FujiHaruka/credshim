@@ -13,7 +13,7 @@ pub struct CaFiles<'a> {
     pub bundle: &'a Path,
 }
 
-pub fn render(config: &Config, base_urls: &BaseUrls, ca: &CaFiles<'_>) -> anyhow::Result<String> {
+pub fn render(config: &Config, ca: &CaFiles<'_>) -> anyhow::Result<String> {
     let proxy = format!("http://{}", config.listen());
     let cert = utf8(ca.cert)?;
     let bundle = utf8(ca.bundle)?;
@@ -30,7 +30,6 @@ pub fn render(config: &Config, base_urls: &BaseUrls, ca: &CaFiles<'_>) -> anyhow
         Some(config.ssh_socket()?)
     };
     let ssh_socket = ssh_socket.as_deref().map(utf8).transpose()?;
-    let (_, aws_rules) = config.aws_rules()?;
     let mut vars: Vec<(&str, &str)> = vec![
         ("HTTPS_PROXY", &proxy),
         ("https_proxy", &proxy),
@@ -48,6 +47,16 @@ pub fn render(config: &Config, base_urls: &BaseUrls, ca: &CaFiles<'_>) -> anyhow
     if let Some(socket) = ssh_socket {
         vars.push(("SSH_AUTH_SOCK", socket));
     }
+    let mut out = String::new();
+    for (name, value) in vars {
+        writeln!(out, "export {name}={}", quote(value))?;
+    }
+    Ok(out)
+}
+
+pub fn render_keys(config: &Config, base_urls: &BaseUrls) -> anyhow::Result<String> {
+    let (_, aws_rules) = config.aws_rules()?;
+    let mut vars: Vec<(&str, &str)> = Vec::new();
     if let [only] = aws_rules.as_slice() {
         vars.push(("AWS_ACCESS_KEY_ID", only.dummy()));
         vars.push(("AWS_SECRET_ACCESS_KEY", AWS_DUMMY_SECRET));
@@ -59,7 +68,7 @@ pub fn render(config: &Config, base_urls: &BaseUrls, ca: &CaFiles<'_>) -> anyhow
     }
     let mut out = String::new();
     for (name, value) in vars {
-        writeln!(out, "export {name}={}", quote(value))?;
+        writeln!(out, "{name}={}", quote(value))?;
     }
     if aws_rules.len() > 1 {
         for rule in &aws_rules {

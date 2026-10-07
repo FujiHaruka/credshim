@@ -145,7 +145,7 @@ fn assert_ok_lines(output: &Output, names: &[&str]) {
 }
 
 #[tokio::test]
-async fn env_prints_proxy_ca_and_dummy_variables_for_a_shell() {
+async fn env_prints_proxy_and_ca_variables_and_keys_prints_dummies_for_a_dotenv() {
     let home = Home::new(&format!(
         "[[rule]]\nname = \"openai\"\nhost = \"api.openai.com\"\nsecret = \"openai\"\ndummy = \"{OPENAI_DUMMY}\"\nenv = \"OPENAI_API_KEY\"\ninject = {{ header = \"authorization\" }}\nbase_url_prefix = \"/openai/\"\n"
     ))
@@ -177,15 +177,26 @@ async fn env_prints_proxy_ca_and_dummy_variables_for_a_shell() {
             ca.join("ca.pem").display()
         ),
         "export NODE_USE_ENV_PROXY='1'".to_string(),
-        format!("export OPENAI_API_KEY='{OPENAI_DUMMY}'"),
-        "# base URL for openai: http://127.0.0.1:8788/openai".to_string(),
     ] {
         assert!(
             stdout.lines().any(|l| l == line),
             "missing {line}\n{stdout}"
         );
     }
+    assert!(!stdout.contains(OPENAI_DUMMY), "{stdout}");
+    assert!(!stdout.contains("base URL"), "{stdout}");
     assert!(String::from_utf8_lossy(&env.stderr).is_empty());
+
+    let keys = output(home.path(), &["env", "--keys", "--config", home.config()]).await;
+
+    assert!(keys.status.success(), "{}", text(&keys));
+    assert_eq!(
+        String::from_utf8(keys.stdout).unwrap(),
+        format!(
+            "OPENAI_API_KEY='{OPENAI_DUMMY}'\n# base URL for openai: http://127.0.0.1:8788/openai\n"
+        )
+    );
+    assert!(String::from_utf8_lossy(&keys.stderr).is_empty());
 }
 
 #[tokio::test]
@@ -220,11 +231,16 @@ async fn env_refuses_config_values_that_could_run_or_redirect_the_shell() {
     ] {
         let home = Home::new(&config).await;
 
-        let env = output(home.path(), &["env", "--config", home.config()]).await;
+        for args in [
+            vec!["env", "--config", home.config()],
+            vec!["env", "--keys", "--config", home.config()],
+        ] {
+            let env = output(home.path(), &args).await;
 
-        assert!(!env.status.success(), "{config}");
-        assert!(text(&env).contains(needle), "{needle}\n{}", text(&env));
-        assert!(env.stdout.is_empty());
+            assert!(!env.status.success(), "{args:?} {config}");
+            assert!(text(&env).contains(needle), "{needle}\n{}", text(&env));
+            assert!(env.stdout.is_empty());
+        }
     }
 }
 
@@ -244,6 +260,7 @@ async fn config_rejects_two_rules_exporting_the_same_env_variable() {
 
     for args in [
         vec!["env", "--config", home.config()],
+        vec!["env", "--keys", "--config", home.config()],
         vec!["run", "--listen", "127.0.0.1:0", "--config", home.config()],
     ] {
         let output = output(home.path(), &args).await;
@@ -466,7 +483,7 @@ async fn service_install_needs_root_and_can_print_its_script() {
 }
 
 #[tokio::test]
-async fn env_exports_the_agent_socket_the_aws_bundle_and_a_lone_aws_dummy() {
+async fn env_exports_the_agent_socket_and_the_aws_bundle_and_keys_prints_a_lone_aws_dummy() {
     let socket_home = tempfile::tempdir().unwrap();
     let socket = socket_home.path().join("agent.sock");
     let home = Home::new(&format!(
@@ -482,14 +499,19 @@ async fn env_exports_the_agent_socket_the_aws_bundle_and_a_lone_aws_dummy() {
     for line in [
         format!("export AWS_CA_BUNDLE='{}'", bundle.display()),
         format!("export SSH_AUTH_SOCK='{}'", socket.display()),
-        format!("export AWS_ACCESS_KEY_ID='{AWS_DUMMY}'"),
-        "export AWS_SECRET_ACCESS_KEY='credshim-dummy'".to_string(),
     ] {
         assert!(
             stdout.lines().any(|l| l == line),
             "missing {line}\n{stdout}"
         );
     }
+    assert!(!stdout.contains("AWS_ACCESS_KEY_ID"), "{stdout}");
+    let keys = output(home.path(), &["env", "--keys", "--config", home.config()]).await;
+    assert!(keys.status.success(), "{}", text(&keys));
+    assert_eq!(
+        String::from_utf8(keys.stdout).unwrap(),
+        format!("AWS_ACCESS_KEY_ID='{AWS_DUMMY}'\nAWS_SECRET_ACCESS_KEY='credshim-dummy'\n")
+    );
 
     let second = "CREDSHIMAWSDOCTORTESTDUMMY0002";
     let home = Home::new(&format!(
@@ -500,9 +522,11 @@ async fn env_exports_the_agent_socket_the_aws_bundle_and_a_lone_aws_dummy() {
     .await;
     let env = output(home.path(), &["env", "--config", home.config()]).await;
     assert!(env.status.success(), "{}", text(&env));
-    let stdout = String::from_utf8(env.stdout).unwrap();
+    assert!(!String::from_utf8_lossy(&env.stdout).contains("SSH_AUTH_SOCK"));
+    let keys = output(home.path(), &["env", "--keys", "--config", home.config()]).await;
+    assert!(keys.status.success(), "{}", text(&keys));
+    let stdout = String::from_utf8(keys.stdout).unwrap();
     assert!(!stdout.contains("AWS_ACCESS_KEY_ID"), "{stdout}");
-    assert!(!stdout.contains("SSH_AUTH_SOCK"), "{stdout}");
     for (name, dummy) in [("one", AWS_DUMMY), ("two", second)] {
         let line = format!(
             "# aws profile for {name}: aws_access_key_id = {dummy}, aws_secret_access_key = credshim-dummy"

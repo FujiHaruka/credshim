@@ -61,6 +61,7 @@ async fn every_config_reading_command_refuses_a_config_others_could_rewrite() {
         vec!["secret", "set", "openai", "--config", &config],
         vec!["secret", "list", "--config", &config],
         vec!["env", "--config", &config],
+        vec!["env", "--keys", "--config", &config],
         vec!["status", "--config", &config],
         vec!["tail", "--no-follow", "--config", &config],
     ] {

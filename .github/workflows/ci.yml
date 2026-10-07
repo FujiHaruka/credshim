@@ -79,6 +79,12 @@ jobs:
           sudo /usr/local/libexec/credshim/credshim service install --user devtest
           for _ in $(seq 50); do [ -S /var/lib/credshim-ssh/agent.sock ] && break; sleep 0.2; done
           sudo -u devtest bash -c '. /etc/credshim/env && ssh-add -l | grep -q credshim:github'
+      - name: dummy keys go to keys.env, not to the shell environment file
+        run: |
+          /usr/local/libexec/credshim/credshim preset openai | sudo -u credshim tee -a /var/lib/credshim/config.toml >/dev/null
+          sudo /usr/local/libexec/credshim/credshim service install --user devtest
+          sudo -u devtest grep -q '^OPENAI_API_KEY=' /etc/credshim/keys.env
+          ! sudo -u devtest grep -q OPENAI_API_KEY /etc/credshim/env
       - name: as the service user, the state directory wins over a HOME and XDG_CONFIG_HOME pointing elsewhere
         run: |
           sudo -u credshim env HOME=/home/devtest XDG_CONFIG_HOME=/home/devtest/.config \

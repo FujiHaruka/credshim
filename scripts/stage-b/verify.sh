@@ -86,6 +86,14 @@ fi
 check "public CA certificate is readable" test -r "$public/ca.pem"
 check "trust bundle is readable" test -r "$public/bundle.pem"
 check "shell environment file is readable" test -r "$public/env"
+check "dummy keys file is readable" test -r "$public/keys.env"
+keys_absent_from_env() {
+  local name
+  for name in $(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$public/keys.env"); do
+    if grep -q "^export $name=" "$public/env"; then return 1; fi
+  done
+}
+check "shell environment file exports none of the dummy keys" keys_absent_from_env
 env_value() { sed -n "s/^export $1='\(.*\)'\$/\1/p" "$public/env"; }
 check "shell environment points AWS_CA_BUNDLE at the readable trust bundle" \
   bash -c "[[ -r '$(env_value AWS_CA_BUNDLE)' && '$(env_value AWS_CA_BUNDLE)' == '$public/bundle.pem' ]]"
