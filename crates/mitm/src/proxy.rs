@@ -28,6 +28,7 @@ use crate::base_url::BaseUrlServer;
 use crate::ca::CertificateAuthority;
 use crate::doctor;
 use crate::intercept::{Ingress, Intercept, Services, Session};
+use crate::live::{Live, Routing};
 use crate::upstream::{ConnectError, Upstream};
 
 pub type ProxyBody = BoxBody<Bytes, hyper::Error>;
@@ -89,9 +90,86 @@ pub enum BindError {
     Io { addr: SocketAddr, source: io::Error },
 }
 
+#[derive(Clone, Debug)]
+pub struct Reload {
+    pub intercept: Option<Intercept>,
+    pub injector: Arc<Injector>,
+    pub oauth: Option<Arc<OAuth>>,
+    pub aws: Option<Arc<Aws>>,
+    pub scrub: bool,
+    pub base_urls: BaseUrls,
+}
+
+#[derive(Clone)]
+pub struct Reloader {
+    live: Live,
+    has_base_url_listener: bool,
+}
+
+impl Reloader {
+    pub fn reload(&self, reload: Reload) -> Result<(), BindError> {
+        check_routes(
+            reload.intercept.as_ref(),
+            &reload.injector,
+            reload.oauth.as_deref(),
+            &reload.base_urls,
+            self.has_base_url_listener,
+        )?;
+        self.live
+            .stats()
+            .set_rules(audit::rule_names(&reload.injector, reload.aws.as_deref()));
+        self.live.replace(Routing {
+            intercept: reload.intercept,
+            services: services(reload.injector, reload.oauth, reload.aws, reload.scrub),
+            base_urls: reload.base_urls,
+        });
+        Ok(())
+    }
+}
+
+fn services(
+    injector: Arc<Injector>,
+    oauth: Option<Arc<OAuth>>,
+    aws: Option<Arc<Aws>>,
+    scrub: bool,
+) -> Services {
+    Services {
+        aws_buffers: crate::intercept::aws_buffer_budget(aws.as_deref()),
+        injector,
+        oauth,
+        aws,
+        scrub,
+    }
+}
+
+fn check_routes(
+    intercept: Option<&Intercept>,
+    injector: &Injector,
+    oauth: Option<&OAuth>,
+    base_urls: &BaseUrls,
+    has_base_url_listener: bool,
+) -> Result<(), BindError> {
+    if !has_base_url_listener && !base_urls.is_empty() {
+        return Err(BindError::BaseUrlWithoutListener);
+    }
+    let covered = |host: &str| intercept.is_some_and(|i| i.covers(host));
+    if let Some(host) = injector.rules().hosts().find(|host| !covered(host)) {
+        return Err(BindError::RuleHostNotIntercepted(host.to_string()));
+    }
+    if let Some(host) = oauth
+        .iter()
+        .flat_map(|oauth| oauth.hosts())
+        .find(|host| !covered(host))
+    {
+        return Err(BindError::OAuthHostNotIntercepted(host.to_string()));
+    }
+    Ok(())
+}
+
 pub struct Proxy {
     addr: SocketAddr,
     base_url_addr: Option<SocketAddr>,
+    reloader: Reloader,
     accept_loop: JoinHandle<()>,
     base_url_loop: Option<JoinHandle<()>>,
     purge_loop: Option<JoinHandle<()>>,
@@ -122,38 +200,43 @@ impl Proxy {
         check_listen(config.listen, config.allow_non_loopback)?;
         if let Some(addr) = config.base_url_listen {
             check_listen(addr, config.allow_non_loopback)?;
-        } else if !config.base_urls.is_empty() {
-            return Err(BindError::BaseUrlWithoutListener);
         }
-        if let Some(host) = config
-            .injector
-            .rules()
-            .hosts()
-            .find(|host| !config.intercept.as_ref().is_some_and(|i| i.covers(host)))
-        {
-            return Err(BindError::RuleHostNotIntercepted(host.to_string()));
-        }
-        if let Some(host) = config
-            .oauth
-            .iter()
-            .flat_map(|oauth| oauth.hosts())
-            .find(|host| !config.intercept.as_ref().is_some_and(|i| i.covers(host)))
-        {
-            return Err(BindError::OAuthHostNotIntercepted(host.to_string()));
-        }
+        check_routes(
+            config.intercept.as_ref(),
+            &config.injector,
+            config.oauth.as_deref(),
+            &config.base_urls,
+            config.base_url_listen.is_some(),
+        )?;
         let (listener, addr) = listen(config.listen).await?;
         let base_url = match config.base_url_listen {
             Some(listen_addr) => Some(listen(listen_addr).await?),
             None => None,
         };
-        let handler = Arc::new(Handler::new(&config, upstream.clone()));
+        let live = Live::new(
+            Routing {
+                intercept: config.intercept.clone(),
+                services: services(
+                    config.injector.clone(),
+                    config.oauth.clone(),
+                    config.aws.clone(),
+                    config.scrub,
+                ),
+                base_urls: config.base_urls.clone(),
+            },
+            config.stats.clone(),
+        );
+        let reloader = Reloader {
+            live: live.clone(),
+            has_base_url_listener: base_url.is_some(),
+        };
+        let handler = Arc::new(Handler::new(&config, upstream.clone(), live.clone()));
         let base_url_addr = base_url.as_ref().map(|(_, addr)| *addr);
         let base_url_loop = base_url.map(|(listener, local)| {
             let server = Arc::new(BaseUrlServer::new(
-                config.base_urls.clone(),
                 local.ip(),
                 upstream,
-                handler.services.clone(),
+                live,
                 config.connect_timeout,
                 config.idle_timeout,
             ));
@@ -169,6 +252,7 @@ impl Proxy {
         Ok(Self {
             addr,
             base_url_addr,
+            reloader,
             accept_loop,
             base_url_loop,
             purge_loop,
@@ -181,6 +265,10 @@ impl Proxy {
 
     pub fn base_url_addr(&self) -> Option<SocketAddr> {
         self.base_url_addr
+    }
+
+    pub fn reloader(&self) -> Reloader {
+        self.reloader.clone()
     }
 
     pub async fn wait(mut self) {
@@ -249,14 +337,12 @@ struct Handler {
     connect_timeout: Duration,
     idle_timeout: Duration,
     handshake_timeout: Duration,
-    intercept: Option<Intercept>,
-    injector: Arc<Injector>,
-    services: Services,
+    live: Live,
     doctor_ca: Option<Arc<CertificateAuthority>>,
 }
 
 impl Handler {
-    fn new(config: &ProxyConfig, upstream: Upstream) -> Self {
+    fn new(config: &ProxyConfig, upstream: Upstream, live: Live) -> Self {
         let connector = Connector {
             upstream: upstream.clone(),
             timeout: config.connect_timeout,
@@ -271,16 +357,7 @@ impl Handler {
             connect_timeout: config.connect_timeout,
             idle_timeout: config.idle_timeout,
             handshake_timeout: config.header_read_timeout,
-            intercept: config.intercept.clone(),
-            injector: config.injector.clone(),
-            services: Services {
-                injector: config.injector.clone(),
-                oauth: config.oauth.clone(),
-                aws: config.aws.clone(),
-                aws_buffers: crate::intercept::aws_buffer_budget(config.aws.as_deref()),
-                scrub: config.scrub,
-                stats: config.stats.clone(),
-            },
+            live,
             doctor_ca: config.doctor_ca.clone(),
         }
     }
@@ -317,11 +394,12 @@ impl Handler {
                 Some(&labels),
                 &Outcome::Blocked,
                 StatusCode::FORBIDDEN,
-                &self.services.stats,
+                self.live.stats(),
             );
             return status(StatusCode::FORBIDDEN);
         }
-        if let Some(intercept) = self.intercept.as_ref().filter(|i| i.covers(&host)) {
+        let routing = self.live.current();
+        if let Some(intercept) = routing.intercept.as_ref().filter(|i| i.covers(&host)) {
             return self.intercept(req, intercept, host, port).await;
         }
         let upstream = match self.connect_with_timeout(&host, port).await {
@@ -371,7 +449,7 @@ impl Handler {
     ) -> Response<ProxyBody> {
         let session = match Session::open(
             self.upstream.clone(),
-            self.services.clone(),
+            self.live.clone(),
             Ingress::Connect,
             host.clone(),
             port,
@@ -420,7 +498,7 @@ impl Handler {
         outcome: &Outcome,
         status: StatusCode,
     ) {
-        audit::record_connect(scheme, host, port, outcome, status, &self.services.stats);
+        audit::record_connect(scheme, host, port, outcome, status, self.live.stats());
     }
 
     async fn connect_with_timeout(&self, host: &str, port: u16) -> Result<TcpStream, TunnelError> {
@@ -458,17 +536,23 @@ impl Handler {
                 Some(&labels),
                 &Outcome::Blocked,
                 StatusCode::FORBIDDEN,
-                &self.services.stats,
+                self.live.stats(),
             );
             return status(StatusCode::FORBIDDEN);
         }
-        let dummy = self.injector.first_dummy_in(&parts).or_else(|| {
-            self.services
-                .aws
-                .as_ref()
-                .and_then(|aws| aws.first_dummy_in(&parts))
-                .map(str::to_string)
-        });
+        let routing = self.live.current();
+        let dummy = routing
+            .services
+            .injector
+            .first_dummy_in(&parts)
+            .or_else(|| {
+                routing
+                    .services
+                    .aws
+                    .as_ref()
+                    .and_then(|aws| aws.first_dummy_in(&parts))
+                    .map(str::to_string)
+            });
         if let Some(rule) = dummy {
             tracing::warn!(
                 %rule,
@@ -479,7 +563,7 @@ impl Handler {
                 &entry,
                 &Outcome::Denied(rule),
                 StatusCode::FORBIDDEN,
-                &self.services.stats,
+                self.live.stats(),
             );
             return status(StatusCode::FORBIDDEN);
         }
@@ -513,7 +597,7 @@ impl Handler {
                 (Outcome::Pass, status(StatusCode::BAD_GATEWAY))
             }
         };
-        audit::record(&entry, &outcome, response.status(), &self.services.stats);
+        audit::record(&entry, &outcome, response.status(), self.live.stats());
         response
     }
 }

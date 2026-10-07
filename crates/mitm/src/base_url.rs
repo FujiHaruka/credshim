@@ -12,19 +12,17 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::net::TcpListener;
 use tokio::sync::OnceCell;
 
-use credshim_core::BaseUrls;
-
-use crate::intercept::{Ingress, Services, Session};
+use crate::intercept::{Ingress, Session};
+use crate::live::Live;
 use crate::proxy::{ProxyBody, status};
 use crate::upstream::Upstream;
 
 type SessionCell = Arc<OnceCell<Arc<Session>>>;
 
 pub(crate) struct BaseUrlServer {
-    routes: BaseUrls,
     listen_ip: IpAddr,
     upstream: Upstream,
-    services: Services,
+    live: Live,
     connect_timeout: Duration,
     idle_timeout: Duration,
     sessions: Mutex<HashMap<(String, u16), SessionCell>>,
@@ -32,18 +30,16 @@ pub(crate) struct BaseUrlServer {
 
 impl BaseUrlServer {
     pub(crate) fn new(
-        routes: BaseUrls,
         listen_ip: IpAddr,
         upstream: Upstream,
-        services: Services,
+        live: Live,
         connect_timeout: Duration,
         idle_timeout: Duration,
     ) -> Self {
         Self {
-            routes,
             listen_ip,
             upstream,
-            services,
+            live,
             connect_timeout,
             idle_timeout,
             sessions: Mutex::default(),
@@ -96,7 +92,8 @@ impl BaseUrlServer {
             tracing::warn!("base URL request names a host other than the loopback listener");
             return status(StatusCode::MISDIRECTED_REQUEST);
         }
-        let Some(route) = self.routes.resolve(parts.uri.path()) else {
+        let routing = self.live.current();
+        let Some(route) = routing.base_urls.resolve(parts.uri.path()) else {
             tracing::debug!(path = parts.uri.path(), "no base URL prefix matches");
             return status(StatusCode::NOT_FOUND);
         };
@@ -149,7 +146,7 @@ impl BaseUrlServer {
             .get_or_try_init(|| async {
                 Session::open(
                     self.upstream.clone(),
-                    self.services.clone(),
+                    self.live.clone(),
                     Ingress::BaseUrl,
                     host.clone(),
                     port,

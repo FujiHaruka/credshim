@@ -78,11 +78,13 @@ $bin preset openai | sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/nu
 # 本物のキーを登録する（端末から入力。argv や環境変数は経由しない）
 svc secret set openai
 
-# /etc/credshim/keys.env に新しいダミーを載せ、サービスを再起動する
-sudo $bin service install --user "$dev"
+# /etc/credshim/keys.env に新しいダミーを載せ、動いているプロキシに設定を読み直させる
+sudo $bin service reload
 ```
 
-ルールや秘密を変えたら、毎回インストール済みのバイナリで `service install` をもう一度実行する（開発ユーザーが書き換えられるバイナリを sudo で動かさない）。別のバイナリで置き換えるときは `--upgrade` を付ける。
+ルールや秘密を変えたら、インストール済みのバイナリで `service reload` を実行する（開発ユーザーが書き換えられるバイナリを sudo で動かさない）。プロセスは止まらず、処理中の要求（ストリーミング応答や WebSocket）は読み直す前の設定のまま最後まで流れ、次の要求から新しい設定が使われる。開いたままの接続の上の次の要求も同じ。上限のカウンタは引き継ぐ。`service reload` は先に専用ユーザーとして設定とルールの秘密を読めるか確かめ（`run --check`）、読めなければ何も変えずに失敗する。プロキシ側で読み直しに失敗したときも、動いている設定のまま続ける。結果はサービスのログ（macOS は `/var/lib/credshim/credshim.log`、Linux は `journalctl -u credshim`）に出る。
+
+読み直すのは `[[rule]]`、`[scrub]`、AWS（`[aws]`、`[[aws_key]]`、`[[aws_sso_session]]`、`[[aws_sso_role]]`）。`[listen]`、`[ca]`、`[secrets]`、`[audit]`、`[status]`、SSH（`[ssh]`、`[[ssh_key]]`）、OAuth（`[[oauth]]`、`[vault]`、`[limits]`）は再起動するまで変わらず、reload するとログに警告が出る。これらを変えたときと、バイナリを置き換えるときは `service install` をもう一度実行する（プロセスを再起動するので、処理中の接続は切れる。別のバイナリで置き換えるときは `--upgrade` を付ける）。ルールの無かったホストへの開いたままの接続は素のトンネルなので、そのホストに足したルールは、クライアントが接続し直すまで効かない。
 
 ### 3. 使う（開発ユーザーのセッション）
 
@@ -126,7 +128,7 @@ for chunk in openai.OpenAI().chat.completions.create(
 
 | 管理者のセッション（`svc` は専用ユーザーとして実行） | 開発ユーザーのセッション |
 | --- | --- |
-| ルールの追加（`preset` の追記）、`svc secret set`・`svc secret list`、`svc ssh keygen`、`svc aws sso login`・`logout`、`svc tail`、`svc status`、`sudo $bin service install` | `. /etc/credshim/env`、`credshim doctor`、アプリとエージェント |
+| ルールの追加（`preset` の追記）、`svc secret set`・`svc secret list`、`svc ssh keygen`、`svc aws sso login`・`logout`、`svc tail`、`svc status`、`sudo $bin service reload`・`service install` | `. /etc/credshim/env`、`credshim doctor`、アプリとエージェント |
 
 以下の節のコマンドはこの分け方で書く。
 
@@ -149,7 +151,7 @@ credshim doctor
 credshim env --keys      # ダミーキー。要る行をプロジェクトの .env に写す
 ```
 
-以下の節を段階Aで試すときは、`svc` を `credshim` に、`$bin preset X | sudo -u $user tee -a /var/lib/credshim/config.toml` を `credshim preset X >> ~/.config/credshim/config.toml` に、`sudo $bin service install` を `credshim run` の再起動に、`. /etc/credshim/env` を `eval "$(credshim env)"` に、`/etc/credshim/keys.env` を `credshim env --keys` の出力に読み替える。
+以下の節を段階Aで試すときは、`svc` を `credshim` に、`$bin preset X | sudo -u $user tee -a /var/lib/credshim/config.toml` を `credshim preset X >> ~/.config/credshim/config.toml` に、`sudo $bin service reload` を `pkill -HUP -f 'credshim run'`（動いている `credshim run` に SIGHUP を送る。結果は `credshim run` の端末に出る）に、`sudo $bin service install` を `credshim run` の再起動に、`. /etc/credshim/env` を `eval "$(credshim env)"` に、`/etc/credshim/keys.env` を `credshim env --keys` の出力に読み替える。
 
 ## credshim doctor
 
@@ -262,7 +264,7 @@ ProxyJump で踏み台にも同じ鍵で入るなら、踏み台のホスト鍵�
 $bin preset aws | sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/null   # ダミーのアクセスキー ID は毎回ランダム
 svc secret set aws-access-key-id             # 本物のアクセスキー ID
 svc secret set aws-secret-access-key         # 本物のシークレット
-sudo $bin service install --user "$dev"
+sudo $bin service reload
 
 # 開発ユーザーのセッション
 . /etc/credshim/env       # 結合バンドルを指す AWS_CA_BUNDLE
@@ -298,7 +300,7 @@ SSO のロールも、`~/.aws` にはダミーの静的アクセスキーだけ�
 ```sh
 # 管理者のセッション
 $bin preset aws-sso | sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/null   # start_url、region、アカウント、ロールを書き換える
-sudo $bin service install --user "$dev"
+sudo $bin service reload
 svc aws sso login sso            # 表示された URL をブラウザで開いてコードを確かめ、承認する
 
 # 開発ユーザーのセッション

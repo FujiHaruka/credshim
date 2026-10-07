@@ -2,6 +2,7 @@
 
 use std::path::Path;
 use std::process::{Output, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -29,6 +30,23 @@ pub async fn output(home: &Path, args: &[&str]) -> Output {
 pub struct Running {
     pub child: Child,
     pub addr: String,
+    pub stderr: Arc<Mutex<String>>,
+}
+
+impl Running {
+    pub async fn wait_for_stderr(&self, needle: &str) -> String {
+        for _ in 0..200 {
+            let stderr = self.stderr.lock().unwrap().clone();
+            if stderr.contains(needle) {
+                return stderr;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!(
+            "the proxy never logged {needle:?}:\n{}",
+            self.stderr.lock().unwrap()
+        );
+    }
 }
 
 pub async fn spawn_run(home: &Path, args: &[&str]) -> Running {
@@ -50,8 +68,20 @@ pub async fn spawn_run(home: &Path, args: &[&str]) -> Running {
     })
     .await
     .expect("proxy never reported its listen address");
-    tokio::spawn(async move { while let Ok(Some(_)) = stderr.next_line().await {} });
-    Running { child, addr }
+    let collected = Arc::new(Mutex::new(String::new()));
+    let sink = collected.clone();
+    tokio::spawn(async move {
+        while let Ok(Some(line)) = stderr.next_line().await {
+            let mut sink = sink.lock().unwrap();
+            sink.push_str(&line);
+            sink.push('\n');
+        }
+    });
+    Running {
+        child,
+        addr,
+        stderr: collected,
+    }
 }
 
 pub const OPENAI_DUMMY: &str = "sk-credshim-openai-EEEEEEEEEEEEEEEEEEEEEEEEEEEEEE";

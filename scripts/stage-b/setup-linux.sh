@@ -78,7 +78,8 @@ ${dev_uid:+client_uids = [$dev_uid]}
 # or an SSH login as the administrator): its processes can read what is typed into its terminals.
 # Add rules with: $bin preset openai | sudo -u $user tee -a $state/config.toml
 # then register the secret: sudo -u $user $bin secret set openai
-# then rerun "sudo $bin service install" so $public/keys.env carries the new dummies
+# then run "sudo $bin service reload" so $public/keys.env carries the new dummies
+# and the proxy picks them up without dropping open connections
 # SSH keys and AWS SSO logins are made as $user too:
 #   sudo -u $user $bin ssh keygen ssh-github
 #   sudo -u $user $bin aws sso login <session>
@@ -118,6 +119,7 @@ User=$user
 Group=$user
 Environment=HOME=$state
 ExecStart=$bin run --config $state/config.toml
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 UMask=0077
 LimitCORE=0

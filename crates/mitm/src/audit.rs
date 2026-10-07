@@ -103,6 +103,23 @@ pub struct Counts {
     pub failed: u64,
 }
 
+pub fn rule_names(
+    injector: &credshim_core::Injector,
+    aws: Option<&credshim_aws::Aws>,
+) -> Vec<String> {
+    injector
+        .rules()
+        .rules()
+        .iter()
+        .map(|rule| rule.name().to_string())
+        .chain(
+            aws.iter()
+                .flat_map(|aws| aws.rules())
+                .map(|rule| rule.name().to_string()),
+        )
+        .collect()
+}
+
 #[derive(Debug, Default)]
 pub struct Stats {
     rules: Mutex<BTreeMap<String, Counts>>,
@@ -122,6 +139,23 @@ impl Stats {
                     .collect(),
             ),
         }
+    }
+
+    pub fn set_rules<I, S>(&self, rules: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut counts = self.lock();
+        let previous = std::mem::take(&mut *counts);
+        *counts = rules
+            .into_iter()
+            .map(|name| {
+                let name = name.into();
+                let kept = previous.get(&name).copied().unwrap_or_default();
+                (name, kept)
+            })
+            .collect();
     }
 
     pub fn snapshot(&self) -> BTreeMap<String, Counts> {

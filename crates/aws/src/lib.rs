@@ -32,7 +32,7 @@ pub struct Aws {
     signer: Signer,
     sso: Option<Arc<SsoProvider>>,
     max_body: usize,
-    limiter: Limiter,
+    limiter: Arc<Limiter>,
 }
 
 impl Aws {
@@ -42,13 +42,22 @@ impl Aws {
             signer,
             sso: None,
             max_body: DEFAULT_MAX_BODY,
-            limiter: Limiter::default(),
+            limiter: Arc::default(),
         }
     }
 
     pub fn with_sso(mut self, sso: Arc<SsoProvider>) -> Self {
         self.sso = Some(sso);
         self
+    }
+
+    pub fn with_limiter(mut self, limiter: Arc<Limiter>) -> Self {
+        self.limiter = limiter;
+        self
+    }
+
+    pub fn limiter(&self) -> Arc<Limiter> {
+        self.limiter.clone()
     }
 
     pub async fn credentials(

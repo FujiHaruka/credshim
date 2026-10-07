@@ -98,7 +98,7 @@ pub struct Injector {
     also_scrub: Vec<(SecretString, String)>,
     scrub_source: Option<Arc<dyn ScrubSource>>,
     scrubber: Mutex<Option<(u64, Arc<Scrubber>)>>,
-    limiter: Limiter,
+    limiter: Arc<Limiter>,
 }
 
 impl Injector {
@@ -122,7 +122,7 @@ impl Injector {
             also_scrub: Vec::new(),
             scrub_source: None,
             scrubber: Mutex::default(),
-            limiter: Limiter::default(),
+            limiter: Arc::default(),
         })
     }
 
@@ -139,6 +139,15 @@ impl Injector {
     pub fn with_scrub_source(mut self, source: Arc<dyn ScrubSource>) -> Self {
         self.scrub_source = Some(source);
         self
+    }
+
+    pub fn with_limiter(mut self, limiter: Arc<Limiter>) -> Self {
+        self.limiter = limiter;
+        self
+    }
+
+    pub fn limiter(&self) -> Arc<Limiter> {
+        self.limiter.clone()
     }
 
     pub fn rules(&self) -> &RuleSet {
