@@ -19,8 +19,9 @@ use credshim_aws::{Aws, CredentialError, Decision, Reason};
 use credshim_core::{Destination, InjectError, Injector, Permit, Verdict};
 use credshim_oauth::{Exchange, OAuth};
 
-use crate::audit::{self, AwsLabels, Outcome, Stats};
+use crate::audit::{self, AwsLabels, Outcome};
 use crate::ca::CertificateAuthority;
+use crate::live::Live;
 use crate::proxy::{ProxyBody, status, strip_hop_by_hop};
 use crate::scrub::{self, ScrubBody};
 use crate::upstream::{ALPN_H2, ConnectError, TargetConnector, Upstream};
@@ -167,24 +168,17 @@ fn inject(
     injector.apply(target.destination(), parts)
 }
 
-#[derive(Clone)]
 pub(crate) struct Services {
     pub(crate) injector: Arc<Injector>,
     pub(crate) oauth: Option<Arc<OAuth>>,
     pub(crate) aws: Option<Arc<Aws>>,
     pub(crate) aws_buffers: Arc<Semaphore>,
     pub(crate) scrub: bool,
-    pub(crate) stats: Arc<Stats>,
 }
 
 pub(crate) struct Session {
     target: VerifiedTarget,
-    injector: Arc<Injector>,
-    oauth: Option<Arc<OAuth>>,
-    aws: Option<Arc<Aws>>,
-    aws_buffers: Arc<Semaphore>,
-    scrub: bool,
-    stats: Arc<Stats>,
+    live: Live,
     ingress: Ingress,
     connector: TargetConnector,
     client: Client<TargetConnector, ProxyBody>,
@@ -208,7 +202,7 @@ impl Ingress {
 impl Session {
     pub(crate) async fn open(
         upstream: Upstream,
-        services: Services,
+        live: Live,
         ingress: Ingress,
         host: String,
         port: u16,
@@ -222,12 +216,7 @@ impl Session {
             .build(connector.clone());
         Ok(Self {
             target: VerifiedTarget { host, port },
-            injector: services.injector,
-            oauth: services.oauth,
-            aws: services.aws,
-            aws_buffers: services.aws_buffers,
-            scrub: services.scrub,
-            stats: services.stats,
+            live,
             ingress,
             connector,
             client,
@@ -243,7 +232,7 @@ impl Session {
         tokio::spawn(async move {
             let host = self.target.host.clone();
             let port = self.target.port;
-            let stats = self.stats.clone();
+            let stats = self.live.stats().clone();
             match tokio::time::timeout(handshake_timeout, self.accept(on_upgrade, &ca)).await {
                 Ok(Ok(())) => return,
                 Ok(Err(reason)) => tracing::warn!(%host, port, %reason, "MITM session rejected"),
@@ -347,11 +336,12 @@ impl Session {
     ) -> Response<ProxyBody> {
         let method = parts.method.clone();
         let path = parts.uri.path().to_string();
+        let routing = self.live.current();
         let Relayed {
             outcome,
             response,
             aws,
-        } = self.relay(parts, body).await;
+        } = self.relay(&routing.services, parts, body).await;
         self.audit(&method, &path, &outcome, aws.as_ref(), &response);
         response
     }
@@ -372,10 +362,15 @@ impl Session {
             method,
             path,
         };
-        audit::record_labelled(&entry, aws, outcome, response.status(), &self.stats);
+        audit::record_labelled(&entry, aws, outcome, response.status(), self.live.stats());
     }
 
-    async fn relay(&self, mut parts: http::request::Parts, body: Incoming) -> Relayed {
+    async fn relay(
+        &self,
+        services: &Services,
+        mut parts: http::request::Parts,
+        body: Incoming,
+    ) -> Relayed {
         let target = &self.target;
         tracing::debug!(
             method = %parts.method,
@@ -384,14 +379,14 @@ impl Session {
             path = parts.uri.path(),
             "intercepted request"
         );
-        let exchange = self
+        let exchange = services
             .oauth
             .as_deref()
             .and_then(|oauth| oauth.exchange(&target.host, target.port, &parts));
         let mut permit = None;
-        let outcome = match inject(target, &self.injector, &mut parts) {
+        let outcome = match inject(target, &services.injector, &mut parts) {
             Ok(Verdict::Pass) => Outcome::Pass,
-            Ok(Verdict::Injected(rules)) => match self.injector.admit(&rules) {
+            Ok(Verdict::Injected(rules)) => match services.injector.admit(&rules) {
                 Ok(held) => {
                     permit = Some(held);
                     Outcome::Injected(rules)
@@ -444,17 +439,20 @@ impl Session {
             }
         };
         if let Some(exchange) = exchange {
-            let (outcome, response) = self.exchange(exchange, parts, body).await;
+            let (outcome, response) = self.exchange(services, exchange, parts, body).await;
             return Relayed::new(outcome, response, None);
         }
-        let (outcome, body, aws, aws_permit) = match &self.aws {
-            Some(aws) => match self.through_aws(aws, &mut parts, body, outcome).await {
+        let (outcome, body, aws, aws_permit) = match &services.aws {
+            Some(aws) => match self
+                .through_aws(services, aws, &mut parts, body, outcome)
+                .await
+            {
                 Ok(forward) => forward,
                 Err(refused) => return *refused,
             },
             None => (outcome, body.boxed(), None, None),
         };
-        if self.scrub {
+        if services.scrub {
             parts.headers.insert(
                 header::ACCEPT_ENCODING,
                 HeaderValue::from_static("identity"),
@@ -465,7 +463,7 @@ impl Session {
             Some(protocol) => self.upgrade(parts, body, protocol).await,
             None => self.forward(parts, body).await,
         };
-        let response = self.scrubbed(&method, response);
+        let response = self.scrubbed(services, &method, response);
         let response = match (permit, aws_permit) {
             (None, None) => response,
             held => response.map(|body| Holding { body, _guard: held }.boxed()),
@@ -475,6 +473,7 @@ impl Session {
 
     async fn reserve_buffer(
         &self,
+        services: &Services,
         aws: &Aws,
         parts: &http::request::Parts,
     ) -> Option<OwnedSemaphorePermit> {
@@ -487,7 +486,7 @@ impl Session {
         let kib = u32::try_from(declared.min(aws.max_body()) / 1024 + 1).ok()?;
         tokio::time::timeout(
             BUFFER_WAIT,
-            self.aws_buffers.clone().acquire_many_owned(kib),
+            services.aws_buffers.clone().acquire_many_owned(kib),
         )
         .await
         .ok()?
@@ -496,6 +495,7 @@ impl Session {
 
     async fn through_aws(
         &self,
+        services: &Services,
         aws: &Aws,
         parts: &mut http::request::Parts,
         body: Incoming,
@@ -504,7 +504,7 @@ impl Session {
         let target = &self.target;
         let rule_in = |parts: &http::request::Parts| aws.first_dummy_in(parts).map(str::to_string);
         let (buffered, body) = if aws.needs_body(&target.host, parts) {
-            let Some(budget) = self.reserve_buffer(aws, parts).await else {
+            let Some(budget) = self.reserve_buffer(services, aws, parts).await else {
                 return Err(Box::new(Relayed::new(
                     Outcome::Rejected,
                     status(StatusCode::SERVICE_UNAVAILABLE),
@@ -672,14 +672,19 @@ impl Session {
         }
     }
 
-    fn scrubbed(&self, method: &Method, mut response: Response<ProxyBody>) -> Response<ProxyBody> {
+    fn scrubbed(
+        &self,
+        services: &Services,
+        method: &Method,
+        mut response: Response<ProxyBody>,
+    ) -> Response<ProxyBody> {
         response
             .extensions_mut()
             .remove::<hyper::ext::ReasonPhrase>();
-        if !self.scrub {
+        if !services.scrub {
             return response;
         }
-        let scrubber = self.injector.scrubber();
+        let scrubber = services.injector.scrubber();
         if scrubber.is_empty() {
             return response;
         }
@@ -706,14 +711,15 @@ impl Session {
 
     fn scrubbed_full(
         &self,
+        services: &Services,
         mut parts: http::response::Parts,
         body: bytes::Bytes,
     ) -> Response<ProxyBody> {
         parts.extensions.remove::<hyper::ext::ReasonPhrase>();
-        if !self.scrub {
+        if !services.scrub {
             return Response::from_parts(parts, full(body));
         }
-        let scrubber = self.injector.scrubber();
+        let scrubber = services.injector.scrubber();
         if scrub::is_encoded(&parts.headers) && !scrubber.is_empty() {
             tracing::warn!(
                 host = %self.target.host,
@@ -776,6 +782,7 @@ impl Session {
 
     async fn exchange(
         &self,
+        services: &Services,
         exchange: Exchange<'_>,
         parts: http::request::Parts,
         body: Incoming,
@@ -792,7 +799,10 @@ impl Session {
                 let (mut parts, body) = res.into_parts();
                 strip_hop_by_hop(&mut parts.headers);
                 parts.version = Version::HTTP_11;
-                (Outcome::Exchanged(rule), self.scrubbed_full(parts, body))
+                (
+                    Outcome::Exchanged(rule),
+                    self.scrubbed_full(services, parts, body),
+                )
             }
             Err(err) => {
                 tracing::warn!(

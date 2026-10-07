@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -8,9 +9,13 @@ use anyhow::{Context, bail};
 #[cfg(target_os = "linux")]
 const SETUP: &str = include_str!("../../../scripts/stage-b/setup-linux.sh");
 #[cfg(target_os = "linux")]
+const RELOAD: &str = include_str!("../../../scripts/stage-b/reload-linux.sh");
+#[cfg(target_os = "linux")]
 pub const INSTALLED: &str = "/usr/local/libexec/credshim/credshim";
 #[cfg(target_os = "macos")]
 const SETUP: &str = include_str!("../../../scripts/stage-b/setup-macos.sh");
+#[cfg(target_os = "macos")]
+const RELOAD: &str = include_str!("../../../scripts/stage-b/reload-macos.sh");
 #[cfg(target_os = "macos")]
 pub const INSTALLED: &str = "/Library/CredShim/bin/credshim";
 
@@ -44,19 +49,49 @@ pub fn install(print: bool, upgrade: bool, user: Option<String>) -> anyhow::Resu
             "credshim: no development user given (--user, or run through sudo); the ssh agent will accept only its own user"
         );
     }
+    run_script(
+        SETUP,
+        "credshim-service-install",
+        std::iter::once(binary.as_os_str()).chain(user.as_deref().map(OsStr::new)),
+    )
+    .context("service setup failed")
+}
+
+pub fn reload(print: bool) -> anyhow::Result<()> {
+    if print {
+        std::io::stdout().write_all(RELOAD.as_bytes())?;
+        return Ok(());
+    }
+    if !rustix::process::geteuid().is_root() {
+        bail!(
+            "`credshim service reload` signals the system service; run it with sudo (review it first with `credshim service reload --print`)"
+        );
+    }
+    run_script(
+        RELOAD,
+        "credshim-service-reload",
+        std::iter::empty::<&OsStr>(),
+    )
+    .context("service reload failed")
+}
+
+fn run_script<'a>(
+    script: &str,
+    name: &str,
+    args: impl IntoIterator<Item = &'a OsStr>,
+) -> anyhow::Result<()> {
     let status = Command::new("/bin/bash")
         .arg("-c")
-        .arg(SETUP)
-        .arg("credshim-service-install")
-        .arg(&binary)
-        .args(user)
+        .arg(script)
+        .arg(name)
+        .args(args)
         .env_clear()
         .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
         .stdin(Stdio::null())
         .status()
         .context("could not start bash")?;
     if !status.success() {
-        bail!("service setup failed ({status})");
+        bail!("{status}");
     }
     Ok(())
 }

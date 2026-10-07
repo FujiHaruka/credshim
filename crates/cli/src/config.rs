@@ -109,6 +109,7 @@ pub struct AuditConfig {
 
 pub struct Loaded {
     pub config: Config,
+    pub table: toml::Table,
     pub source: Option<PathBuf>,
 }
 
@@ -122,12 +123,15 @@ pub fn load(explicit: Option<&Path>) -> anyhow::Result<Loaded> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound && !required => {
             return Ok(Loaded {
                 config: Config::default(),
+                table: toml::Table::new(),
                 source: None,
             });
         }
         Err(err) => return Err(err).with_context(|| format!("could not read {}", path.display())),
     };
     let config: Config =
+        toml::from_str(&text).with_context(|| format!("invalid config {}", path.display()))?;
+    let table: toml::Table =
         toml::from_str(&text).with_context(|| format!("invalid config {}", path.display()))?;
     config
         .check_env_names()
@@ -147,6 +151,7 @@ pub fn load(explicit: Option<&Path>) -> anyhow::Result<Loaded> {
         .with_context(|| format!("invalid config {}", path.display()))?;
     Ok(Loaded {
         config,
+        table,
         source: Some(path),
     })
 }

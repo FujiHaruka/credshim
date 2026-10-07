@@ -4,6 +4,7 @@ mod env;
 mod harden;
 mod leftovers;
 mod preset;
+mod routing;
 mod service;
 mod tail;
 
@@ -18,14 +19,15 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use credshim_aws::{Aws, AwsCredentials, Signer, SsoOptions, SsoProvider, SsoSession};
-use credshim_core::{BaseUrls, Injector, Rule, RuleSet, Secrets};
+use credshim_core::{BaseUrls, Rule, RuleSet, Secrets};
 use credshim_mitm::{
-    AUDIT_TARGET, CertificateAuthority, Intercept, Proxy, ProxyConfig, Stats, Upstream,
+    AUDIT_TARGET, CertificateAuthority, Proxy, ProxyConfig, Reloader, Stats, Upstream,
     UpstreamTransport,
 };
 use credshim_oauth::{DEFAULT_MAX_BODY, OAuth, Provider, Vault};
 use credshim_secrets::SecretStore;
 use credshim_ssh::{Agent, SigningKey, SshRule};
+use routing::Sources;
 use secrecy::SecretString;
 use tracing_subscriber::filter::{EnvFilter, Targets};
 use tracing_subscriber::layer::SubscriberExt;
@@ -52,6 +54,8 @@ enum Command {
         config: Option<PathBuf>,
         #[arg(long)]
         listen: Option<SocketAddr>,
+        #[arg(long, conflicts_with = "listen")]
+        check: bool,
     },
     Ca {
         #[command(subcommand)]
@@ -156,6 +160,10 @@ enum ServiceCommand {
         #[arg(long, value_name = "NAME")]
         user: Option<String>,
     },
+    Reload {
+        #[arg(long)]
+        print: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -192,7 +200,15 @@ async fn main() -> anyhow::Result<()> {
         .install_default()
         .map_err(|_| anyhow::anyhow!("a rustls crypto provider is already installed"))?;
     match Cli::parse().command {
-        Command::Run { config, listen } => run(config.as_deref(), listen).await,
+        Command::Run {
+            config,
+            check: true,
+            ..
+        } => {
+            init_logging(None)?;
+            check(config.as_deref())
+        }
+        Command::Run { config, listen, .. } => run(config.as_deref(), listen).await,
         Command::Ca {
             command: CaCommand::Init { dir },
         } => {
@@ -265,6 +281,9 @@ async fn main() -> anyhow::Result<()> {
                     user,
                 },
         } => service::install(print, upgrade, user),
+        Command::Service {
+            command: ServiceCommand::Reload { print },
+        } => service::reload(print),
         Command::Ssh {
             command: SshCommand::Keygen { name, config },
         } => {
@@ -427,113 +446,40 @@ async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::
         None => tracing::info!("no config file; running without rules"),
     }
 
-    let mut rules = config
-        .rules
-        .iter()
-        .cloned()
-        .map(Rule::from_spec)
-        .collect::<Result<Vec<_>, _>>()?;
+    let upstream = Upstream::new()?;
+    let mut sources = Sources::new(backend, &config, upstream.clone())?;
     let mut proxy_config = ProxyConfig::new(listen.unwrap_or_else(|| config.listen()));
     proxy_config.allow_non_loopback = config.listen.allow_non_loopback;
-    let ca_dir = config.ca_dir()?;
-    let ca = if ca_dir.join(credshim_mitm::ca::KEY_FILE).exists() {
-        Some(Arc::new(CertificateAuthority::load(&ca_dir)?))
-    } else {
+    proxy_config.base_url_listen = config.listen.base_url_addr;
+    proxy_config.doctor_ca = sources.ca()?;
+    if proxy_config.doctor_ca.is_none() {
         tracing::info!(
             "no CA yet, so `credshim doctor` cannot check TLS; create one with `credshim ca init`"
         );
-        None
-    };
-    proxy_config.doctor_ca = ca.clone();
-    let base_urls = BaseUrls::from_specs(&config.rules)?;
-    match config.listen.base_url_addr {
-        Some(addr) => {
-            proxy_config.base_url_listen = Some(addr);
-            proxy_config.base_urls = base_urls;
-        }
-        None if !base_urls.is_empty() => {
-            tracing::info!(
-                "rules name a base_url_prefix but [listen] base_url_addr is not set; base URL mode is off"
-            )
-        }
-        None => {}
     }
-    proxy_config.scrub = config.scrub.enabled.unwrap_or(true);
-    if !proxy_config.scrub {
+    let _agent = if config.ssh_keys.is_empty() {
+        None
+    } else {
+        Some(start_ssh_agent(&config, sources.store()?.as_ref())?)
+    };
+    if !config.oauth.is_empty() {
+        let oauth = load_oauth(&config, sources.store()?.as_ref())?;
+        sources.set_oauth(Arc::new(oauth));
+    }
+    let routing = sources.build(&config)?;
+    if !routing.scrub {
         tracing::warn!("response scrubbing is disabled");
     }
-    let intercepts = !rules.is_empty() || !config.oauth.is_empty() || config.has_aws();
-    let store: Option<Arc<dyn SecretStore>> = if intercepts || !config.ssh_keys.is_empty() {
-        Some(Arc::from(backend.open()?))
-    } else {
-        None
-    };
-    let upstream = Upstream::new()?;
-    let _agent = match &store {
-        Some(store) if !config.ssh_keys.is_empty() => {
-            Some(start_ssh_agent(&config, store.as_ref())?)
-        }
-        _ => None,
-    };
-    if let Some(store) = store.filter(|_| intercepts) {
-        let oauth = if config.oauth.is_empty() {
-            None
-        } else {
-            Some(Arc::new(load_oauth(&config, store.as_ref())?))
-        };
-        if let Some(oauth) = &oauth {
-            rules.extend(oauth.client_secret_rules()?);
-        }
-        let rules = RuleSet::from_rules(rules)?;
-        let secrets = load_secrets(store.as_ref(), &rules)?;
-        let aws = load_aws(&config, &store, &upstream)?;
-        let mut injector = Injector::new(rules, secrets)?.also_scrub(
-            aws.iter()
-                .flat_map(|(aws, _)| aws.signer().scrub_pairs())
-                .collect(),
-        );
-        if let Some((_, Some(sso))) = &aws {
-            injector = injector.with_scrub_source(sso.clone());
-        }
-        let aws = aws.map(|(aws, _)| aws);
-        for rule in injector.unscrubbable_rules() {
-            tracing::warn!(
-                %rule,
-                "secret is shorter than {} bytes, so responses echoing it cannot be scrubbed",
-                credshim_core::scrub::MIN_SCRUB_LEN
-            );
-        }
-        if let Some(oauth) = &oauth {
-            injector = injector.with_tokens(oauth.clone());
-        }
-        let ca = ca.context("rules need a CA; create one with `credshim ca init`")?;
-        let hosts = injector
-            .rules()
-            .hosts()
-            .chain(oauth.iter().flat_map(|oauth| oauth.hosts()));
-        let mut intercept = Intercept::new(ca, hosts);
-        if aws.is_some() {
-            intercept = intercept.with_domains([credshim_aws::AWS_DOMAIN]);
-        }
-        proxy_config.intercept = Some(intercept);
-        proxy_config.injector = Arc::new(injector);
-        proxy_config.oauth = oauth;
-        proxy_config.aws = aws.map(Arc::new);
-    }
-    let aws_rules = proxy_config
-        .aws
-        .iter()
-        .flat_map(|aws| aws.rules())
-        .map(|rule| rule.name().to_string());
-    proxy_config.stats = Arc::new(Stats::new(
-        proxy_config
-            .injector
-            .rules()
-            .rules()
-            .iter()
-            .map(|rule| rule.name().to_string())
-            .chain(aws_rules),
-    ));
+    proxy_config.stats = Arc::new(Stats::new(credshim_mitm::audit::rule_names(
+        &routing.injector,
+        routing.aws.as_deref(),
+    )));
+    proxy_config.intercept = routing.intercept;
+    proxy_config.injector = routing.injector;
+    proxy_config.oauth = routing.oauth;
+    proxy_config.aws = routing.aws;
+    proxy_config.scrub = routing.scrub;
+    proxy_config.base_urls = routing.base_urls;
     let _status = config
         .status
         .socket
@@ -544,11 +490,66 @@ async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::
                 .with_context(|| format!("could not open status socket {}", path.display()))
         })
         .transpose()?;
+    let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        .context("could not listen for SIGHUP")?;
     let proxy = Proxy::bind(proxy_config, upstream).await?;
-    tokio::select! {
-        _ = proxy.wait() => {}
-        _ = tokio::signal::ctrl_c() => tracing::info!("shutting down"),
+    let reloader = proxy.reloader();
+    let stopped = proxy.wait();
+    tokio::pin!(stopped);
+    loop {
+        tokio::select! {
+            _ = &mut stopped => break,
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("shutting down");
+                break;
+            }
+            _ = hangup.recv() => {
+                let reloaded = tokio::task::block_in_place(|| {
+                    reload(config_path, &mut sources, &reloader, &loaded.table)
+                });
+                if let Err(err) = reloaded {
+                    tracing::error!(error = format!("{err:#}"), "reload failed; keeping the running config");
+                }
+            }
+        }
     }
+    Ok(())
+}
+
+fn reload(
+    config_path: Option<&Path>,
+    sources: &mut Sources,
+    reloader: &Reloader,
+    running: &toml::Table,
+) -> anyhow::Result<()> {
+    let loaded = load_config(config_path)?;
+    let routing = sources.build(&loaded.config)?;
+    let aws_rules = routing.aws.as_ref().map_or(0, |aws| aws.rules().len());
+    reloader.reload(routing)?;
+    for section in routing::restart_only_changes(running, &loaded.table) {
+        tracing::warn!(
+            section,
+            "this section changed, but it takes effect only after a restart"
+        );
+    }
+    tracing::info!(
+        rules = loaded.config.rules.len(),
+        aws_rules,
+        "reloaded config"
+    );
+    Ok(())
+}
+
+fn check(config_path: Option<&Path>) -> anyhow::Result<()> {
+    let config = load_config(config_path)?.config;
+    let backend = config.secrets()?.with_resolved_program()?;
+    check_state_paths(&config, &backend)?;
+    let mut sources = Sources::new(backend, &config, Upstream::new()?)?;
+    sources.build(&config)?;
+    writeln!(
+        std::io::stderr(),
+        "credshim: the config and the secrets its rules use load"
+    )?;
     Ok(())
 }
 

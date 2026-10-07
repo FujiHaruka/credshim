@@ -96,9 +96,20 @@ jobs:
         run: sudo -u devtest bash -c '. /etc/credshim/env && /usr/local/libexec/credshim/credshim doctor --no-runtimes'
       - name: verify flags a development user who can sudo
         run: "! /tmp/verify.sh"
-      - name: dummy keys go to keys.env, not to the shell environment file
+      - name: service reload applies the config in the running process
+        run: |
+          pid=$(systemctl show -p MainPID --value credshim.service)
+          sudo /usr/local/libexec/credshim/credshim service reload
+          for _ in $(seq 50); do sudo journalctl -u credshim --no-pager | grep -q 'reloaded config' && break; sleep 0.2; done
+          sudo journalctl -u credshim --no-pager | grep -q 'reloaded config'
+          [ "$(systemctl show -p MainPID --value credshim.service)" = "$pid" ]
+      - name: service reload refuses a rule whose secret is not set, and the proxy keeps running
         run: |
           /usr/local/libexec/credshim/credshim preset openai | sudo -u credshim tee -a /var/lib/credshim/config.toml >/dev/null
+          ! sudo /usr/local/libexec/credshim/credshim service reload
+          systemctl is-active --quiet credshim.service
+      - name: dummy keys go to keys.env, not to the shell environment file
+        run: |
           sudo /usr/local/libexec/credshim/credshim service install --user devtest
           sudo -u devtest grep -q '^OPENAI_API_KEY=' /etc/credshim/keys.env
           ! sudo -u devtest grep -q OPENAI_API_KEY /etc/credshim/env
