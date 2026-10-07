@@ -46,15 +46,15 @@
 管理者のセッションで1行実行する。`yourname` は開発ユーザーの名前。
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/FujiHaruka/credshim/main/scripts/install.sh | sudo bash -s -- --user yourname
+curl -fsSL https://raw.githubusercontent.com/FujiHaruka/credshim/83353062716569add394c33181e1e3af76885c2d/scripts/install.sh | sudo bash -s -- --user yourname
 ```
 
-[Releases](https://github.com/FujiHaruka/credshim/releases) から最新のビルド済みバイナリと `SHA256SUMS` を root だけが読み書きできる一時ディレクトリに取得し、ハッシュと `--version` を確かめてから、そのバイナリの `service install` で専用ユーザー、状態、CA、サービスを作り、バイナリをインストール先に置く。取得はプロキシを通らない（プロキシの環境変数を消して実行する）。版を固定するなら `--user yourname 0.6.0` のように末尾に付ける。対応するのは Linux の x86_64 と aarch64（どちらも glibc 2.35 以降）、Apple シリコンの macOS。Intel の Mac では、`cargo install --locked --path crates/cli`（Rust が要る）でビルドしたバイナリで `sudo ./credshim service install --user yourname` を実行する。そのバイナリは開発ユーザーが書き換えられない場所に置く。
+[Releases](https://github.com/FujiHaruka/credshim/releases) から最新のビルド済みバイナリと `SHA256SUMS` を root だけが読み書きできる一時ディレクトリに取得し、ハッシュと `--version` を確かめてから、そのバイナリの `service install` で専用ユーザー、状態、CA、サービスを作り、バイナリをインストール先に置く。取得はプロキシを通らない（プロキシの環境変数を消して実行する）。URL はスクリプトのコミットに固定してあるので、main に入ったリリース前の変更は届かない。版を固定するなら `--user yourname 0.6.0` のように末尾に付ける。対応するのは Linux の x86_64 と aarch64（どちらも glibc 2.35 以降）、Apple シリコンの macOS。Intel の Mac では、`cargo install --locked --path crates/cli`（Rust が要る）でビルドしたバイナリで `sudo ./credshim service install --user yourname` を実行する。そのバイナリは開発ユーザーが書き換えられない場所に置く。
 
 実行する前に中身を読むなら、取得してから実行する。
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/FujiHaruka/credshim/main/scripts/install.sh
+curl -fsSLO https://raw.githubusercontent.com/FujiHaruka/credshim/83353062716569add394c33181e1e3af76885c2d/scripts/install.sh
 less install.sh
 sudo bash install.sh --user yourname
 ```
