@@ -65,6 +65,7 @@ refuse_writable_ancestors /Library/CredShim/bin
 [[ $binary -ef $bin ]] || install -m 0755 -o root -g wheel "$binary" "$bin"
 
 if [[ ! -e $state/config.toml ]]; then
+  [[ -n $dev_uid ]] || echo "note: no development user given (--user, or run through sudo); the ssh agent will accept only $user" >&2
   cat > "$tmp/config.toml" <<TOML
 [listen]
 addr = "127.0.0.1:8787"

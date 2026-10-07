@@ -483,6 +483,26 @@ async fn service_install_needs_root_and_can_print_its_script() {
 }
 
 #[tokio::test]
+async fn service_upgrade_needs_root_and_can_print_its_script() {
+    let home = tempfile::tempdir().unwrap();
+
+    let refused = output(home.path(), &["service", "upgrade", "0.5.0"]).await;
+    let printed = output(home.path(), &["service", "upgrade", "--print"]).await;
+
+    assert!(!refused.status.success());
+    assert!(
+        text(&refused).contains("run it with sudo"),
+        "{}",
+        text(&refused)
+    );
+    assert!(printed.status.success());
+    let script = String::from_utf8(printed.stdout).unwrap();
+    assert!(script.starts_with("#!/usr/bin/env bash"));
+    assert!(script.contains("SHA256SUMS"));
+    assert!(script.contains("service install --upgrade"));
+}
+
+#[tokio::test]
 async fn env_exports_the_agent_socket_and_the_aws_bundle_and_keys_prints_a_lone_aws_dummy() {
     let socket_home = tempfile::tempdir().unwrap();
     let socket = socket_home.path().join("agent.sock");
