@@ -151,6 +151,10 @@ cat > "$tmp/$label.plist" <<PLIST
 PLIST
 install -m 0644 -o root -g wheel "$tmp/$label.plist" "$plist"
 launchctl bootout "system/$label" 2>/dev/null || true
+for _ in $(seq 100); do
+  launchctl print "system/$label" >/dev/null 2>&1 || break
+  sleep 0.1
+done
 launchctl bootstrap system "$plist"
 
 cat <<DONE
