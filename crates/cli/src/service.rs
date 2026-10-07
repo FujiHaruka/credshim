@@ -6,20 +6,17 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, bail};
 
+const UPGRADE: &str = include_str!("../../../scripts/install.sh");
 #[cfg(target_os = "linux")]
 const SETUP: &str = include_str!("../../../scripts/stage-b/setup-linux.sh");
 #[cfg(target_os = "linux")]
 const RELOAD: &str = include_str!("../../../scripts/stage-b/reload-linux.sh");
-#[cfg(target_os = "linux")]
-const UPGRADE: &str = include_str!("../../../scripts/stage-b/upgrade-linux.sh");
 #[cfg(target_os = "linux")]
 pub const INSTALLED: &str = "/usr/local/libexec/credshim/credshim";
 #[cfg(target_os = "macos")]
 const SETUP: &str = include_str!("../../../scripts/stage-b/setup-macos.sh");
 #[cfg(target_os = "macos")]
 const RELOAD: &str = include_str!("../../../scripts/stage-b/reload-macos.sh");
-#[cfg(target_os = "macos")]
-const UPGRADE: &str = include_str!("../../../scripts/stage-b/upgrade-macos.sh");
 #[cfg(target_os = "macos")]
 pub const INSTALLED: &str = "/Library/CredShim/bin/credshim";
 

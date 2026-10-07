@@ -67,7 +67,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked --release -p credshim
       - run: sudo useradd --create-home devtest
-      - run: sudo target/release/credshim service install --user devtest
+      - name: install.sh piped into sudo bash installs a release from a mirror, and is a no-op when rerun
+        run: |
+          version=$(cargo pkgid -p credshim | sed 's/.*[#@]//')
+          release=/tmp/releases/download/v$version
+          mkdir -p "$release"
+          tar -czf "$release/credshim-$version-x86_64-unknown-linux-gnu.tar.gz" -C target/release credshim
+          (cd "$release" && sha256sum *.tar.gz > SHA256SUMS)
+          python3 -m http.server 8000 --bind 127.0.0.1 --directory /tmp/releases >/dev/null 2>&1 &
+          for _ in $(seq 50); do curl -fs http://127.0.0.1:8000/ >/dev/null && break; sleep 0.2; done
+          mirror="sudo env CREDSHIM_RELEASES=http://127.0.0.1:8000 bash"
+          ! $mirror scripts/install.sh "$version" || exit 1
+          ! sudo test -e /usr/local/libexec/credshim/credshim || exit 1
+          cat scripts/install.sh | $mirror -s -- --user devtest "$version"
+          systemctl is-active --quiet credshim.service
+          $mirror scripts/install.sh "$version" | grep -q "credshim $version is already installed"
       - name: setup is idempotent when rerun with the installed binary
         run: sudo /usr/local/libexec/credshim/credshim service install --user devtest
       - name: a different binary does not replace the installed one without --upgrade

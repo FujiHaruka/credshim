@@ -43,36 +43,39 @@
 
 ### 1. サービスを作る（管理者のセッション）
 
-[Releases](https://github.com/FujiHaruka/credshim/releases) にビルド済みのバイナリがある。`target` は `x86_64-unknown-linux-gnu`、`aarch64-unknown-linux-gnu`（どちらも glibc 2.35 以降）、`aarch64-apple-darwin`（Apple シリコン）のどれか。Intel の Mac ではソースからビルドする。
+管理者のセッションで1行実行する。`yourname` は開発ユーザーの名前。
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/FujiHaruka/credshim/main/scripts/install.sh | sudo bash -s -- --user yourname
+```
+
+[Releases](https://github.com/FujiHaruka/credshim/releases) から最新のビルド済みバイナリと `SHA256SUMS` を root だけが読み書きできる一時ディレクトリに取得し、ハッシュと `--version` を確かめてから、そのバイナリの `service install` で専用ユーザー、状態、CA、サービスを作り、バイナリをインストール先に置く。取得はプロキシを通らない（プロキシの環境変数を消して実行する）。版を固定するなら `--user yourname 0.6.0` のように末尾に付ける。対応するのは Linux の x86_64 と aarch64（どちらも glibc 2.35 以降）、Apple シリコンの macOS。Intel の Mac では、`cargo install --locked --path crates/cli`（Rust が要る）でビルドしたバイナリで `sudo ./credshim service install --user yourname` を実行する。そのバイナリは開発ユーザーが書き換えられない場所に置く。
+
+実行する前に中身を読むなら、取得してから実行する。
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/FujiHaruka/credshim/main/scripts/install.sh
+less install.sh
+sudo bash install.sh --user yourname
+```
+
+`--user` は開発ユーザーの uid を SSH エージェントの接続許可に書くためのもの。sudo した管理者自身ではなく、エージェントが動くユーザーを渡す。
+
+以降の手順はインストール先のバイナリを使う。
 
 ```sh
 # Linux は user=credshim bin=/usr/local/libexec/credshim/credshim
 user=_credshim bin=/Library/CredShim/bin/credshim dev=yourname   # dev は開発ユーザーの名前
-
-version=0.6.0
-target=aarch64-apple-darwin
-base=https://github.com/FujiHaruka/credshim/releases/download/v$version
-curl -fsSLO "$base/credshim-$version-$target.tar.gz"
-curl -fsSLO "$base/SHA256SUMS"
-grep " credshim-$version-$target.tar.gz\$" SHA256SUMS | shasum -a 256 -c
-tar -xzf "credshim-$version-$target.tar.gz"
-
-./credshim service install --print            # 実行する内容を確かめる
-sudo ./credshim service install --user "$dev"  # 専用ユーザー、状態、CA、サービスを作り、バイナリを $bin に置く
 ```
 
-macOS のバイナリは Apple の署名と公証を受けていない。curl で取得すれば Gatekeeper には止められないが、ブラウザでダウンロードした場合は `xattr -d com.apple.quarantine credshim` で隔離属性を外す。ソースからビルドするなら `cargo install --locked --path crates/cli`（Rust が要る）でできたバイナリを使う。どちらでも、`service install` に渡すバイナリは開発ユーザーが書き換えられない場所に置く。
-
-`--user` は開発ユーザーの uid を SSH エージェントの接続許可に書くためのもの。管理者のセッションで sudo すると、省略時は管理者自身が開発ユーザーとみなされる。
-
-新しいリリースへ上げるときは、インストール済みのバイナリで `service upgrade` を実行する（0.5.0 以前には無いので、そこからは上の手順で取得したバイナリで `sudo ./credshim service install --upgrade` を一度実行する）。
+新しいリリースへ上げるときは、インストール済みのバイナリで `service upgrade` を実行する（0.5.0 以前には無いので、そこからは上のインストールの1行をもう一度実行する）。
 
 ```sh
 $bin service upgrade --print        # 実行する内容を確かめる
 sudo $bin service upgrade           # 最新のリリースへ。sudo $bin service upgrade 0.6.0 のように版も指定できる
 ```
 
-Releases から自分の環境のアーカイブと `SHA256SUMS` を root だけが読み書きできる一時ディレクトリに取得し、ハッシュと `--version` を確かめてから、取得したバイナリの `service install --upgrade` で `$bin` を置き換えてサービスを再起動する（処理中の接続は切れる）。設定、秘密、CA はそのまま使う。すでにその版なら何もしない。取得はプロキシを通らない（環境変数を消して実行する）。
+中身はインストールの1行と同じスクリプトで、すでにその版なら何もせず、違えば取得したバイナリの `service install --upgrade` で `$bin` を置き換えてサービスを再起動する（処理中の接続は切れる）。設定、秘密、CA はそのまま使う。
 
 ### 2. ルールと秘密を登録する（管理者のセッション）
 
