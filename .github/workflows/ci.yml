@@ -3,7 +3,13 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore: ['docs/**', '**.md', 'LICENSE-*']
   pull_request:
+    paths-ignore: ['docs/**', '**.md', 'LICENSE-*']
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -33,7 +39,6 @@ jobs:
       - run: cargo test --locked --workspace
       - run: ./scripts/check-secret-exposure.sh
       - run: ./scripts/check-secret-exposure-selftest.sh
-      - run: ./scripts/check-release-excludes-testing.sh
 
   sdk-e2e:
     runs-on: ubuntu-latest
@@ -66,6 +71,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked --release -p credshim
+      - run: ./scripts/check-release-excludes-testing.sh
       - run: sudo useradd --create-home devtest
       - name: install.sh piped into sudo bash installs a release from a mirror, and is a no-op when rerun
         run: |
