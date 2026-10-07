@@ -78,6 +78,8 @@ enum Command {
         ca_cert: Option<PathBuf>,
         #[arg(long, value_name = "FILE")]
         bundle: Option<PathBuf>,
+        #[arg(long, conflicts_with_all = ["ca_cert", "bundle"])]
+        keys: bool,
     },
     Doctor {
         #[arg(long, value_name = "FILE")]
@@ -225,7 +227,14 @@ async fn main() -> anyhow::Result<()> {
             config,
             ca_cert,
             bundle,
-        } => print_env(config.as_deref(), ca_cert, bundle),
+            keys,
+        } => {
+            if keys {
+                print_keys(config.as_deref())
+            } else {
+                print_env(config.as_deref(), ca_cert, bundle)
+            }
+        }
         Command::Doctor {
             config,
             proxy,
@@ -283,17 +292,31 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+fn load_env_config(config_path: Option<&Path>) -> anyhow::Result<(config::Config, BaseUrls)> {
+    let config = load_config(config_path)?.config;
+    for spec in &config.rules {
+        Rule::from_spec(spec.clone())?;
+    }
+    let base_urls = BaseUrls::from_specs(&config.rules)?;
+    Ok((config, base_urls))
+}
+
+fn print_keys(config_path: Option<&Path>) -> anyhow::Result<()> {
+    let (config, base_urls) = load_env_config(config_path)?;
+    write!(
+        std::io::stdout(),
+        "{}",
+        env::render_keys(&config, &base_urls)?
+    )?;
+    Ok(())
+}
+
 fn print_env(
     config_path: Option<&Path>,
     ca_cert: Option<PathBuf>,
     bundle: Option<PathBuf>,
 ) -> anyhow::Result<()> {
-    let loaded = load_config(config_path)?;
-    let config = loaded.config;
-    for spec in &config.rules {
-        Rule::from_spec(spec.clone())?;
-    }
-    let base_urls = BaseUrls::from_specs(&config.rules)?;
+    let (config, _) = load_env_config(config_path)?;
     let ca_dir = config.ca_dir()?;
     let cert = ca_cert.unwrap_or_else(|| ca_dir.join(credshim_mitm::ca::CERT_FILE));
     let bundle = bundle.unwrap_or_else(|| ca_dir.join(credshim_mitm::ca::BUNDLE_FILE));
@@ -312,7 +335,6 @@ fn print_env(
     }
     let rendered = env::render(
         &config,
-        &base_urls,
         &env::CaFiles {
             cert: &cert,
             bundle: &bundle,

@@ -78,7 +78,7 @@ $bin preset openai | sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/nu
 # 本物のキーを登録する（端末から入力。argv や環境変数は経由しない）
 svc secret set openai
 
-# /etc/credshim/env に新しいダミーを載せ、サービスを再起動する
+# /etc/credshim/keys.env に新しいダミーを載せ、サービスを再起動する
 sudo $bin service install --user "$dev"
 ```
 
@@ -87,9 +87,10 @@ sudo $bin service install --user "$dev"
 ### 3. 使う（開発ユーザーのセッション）
 
 ```sh
-. /etc/credshim/env                          # プロキシ、CA、ダミーキーの変数
+. /etc/credshim/env                          # プロキシと CA の変数（ダミーキーは入らない）
 export PATH="/Library/CredShim/bin:$PATH"    # Linux は /usr/local/libexec/credshim
 credshim doctor                              # このシェルのランタイムがプロキシと CA を本当に使っているか
+set -a; . /etc/credshim/keys.env; set +a     # 試しにこのシェルでダミーキーも使う
 
 # ストリーミングで叩く（$OPENAI_API_KEY はダミー）
 curl -N https://api.openai.com/v1/chat/completions \
@@ -109,11 +110,17 @@ for chunk in openai.OpenAI().chat.completions.create(
 '
 ```
 
-`/etc/credshim/env`（`credshim env` の出力）にあるのは `HTTPS_PROXY`・`HTTP_PROXY`（小文字も）、`NO_PROXY`、結合バンドルを指す `SSL_CERT_FILE`・`REQUESTS_CA_BUNDLE`・`CURL_CA_BUNDLE`、開発CAを指す `NODE_EXTRA_CA_CERTS`、`NODE_USE_ENV_PROXY=1`、`aws` コマンド向けに結合バンドルを指す `AWS_CA_BUNDLE`、ルールに `env` がある場合はそのダミーキー（`OPENAI_API_KEY` など）。`[[ssh_key]]` があれば agent のソケットを指す `SSH_AUTH_SOCK`、AWS のルールがちょうど1つならそのダミーの `AWS_ACCESS_KEY_ID` と `AWS_SECRET_ACCESS_KEY`（2つ以上なら `~/.aws/credentials` に書くプロファイルをコメントで出す）。ダミーなので .env にそのまま書いてよい。
+`/etc/credshim/env`（`credshim env` の出力）にあるのは `HTTPS_PROXY`・`HTTP_PROXY`（小文字も）、`NO_PROXY`、結合バンドルを指す `SSL_CERT_FILE`・`REQUESTS_CA_BUNDLE`・`CURL_CA_BUNDLE`、開発CAを指す `NODE_EXTRA_CA_CERTS`、`NODE_USE_ENV_PROXY=1`、`aws` コマンド向けに結合バンドルを指す `AWS_CA_BUNDLE`、`[[ssh_key]]` があれば agent のソケットを指す `SSH_AUTH_SOCK`。ダミーを含まない通信はプロキシを素通りするので、どのシェルで読み込んでもよい。
+
+ダミーキーは `/etc/credshim/keys.env`（`credshim env --keys` の出力）に別にある。ルールに `env` がある場合はそのダミーキー（`OPENAI_API_KEY` など）、AWS のルールがちょうど1つならそのダミーの `AWS_ACCESS_KEY_ID` と `AWS_SECRET_ACCESS_KEY`（2つ以上なら `~/.aws/credentials` に書くプロファイルをコメントで出す）。python-dotenv、Node の dotenv、Next.js、Vite などはシェルにある変数を .env で上書きしないので、ダミーキーを全シェルに入れると、リポジトリの .env に書いた別のキーが黙って使われなくなる。AWS も環境変数のキーが `AWS_PROFILE` より優先される。そこでダミーキーはプロジェクトごとに選んで渡す。
+
+- 要るキーの行だけプロジェクトの .env に写す（`KEY='値'` の形なので、そのまま貼れる。ダミーなのでコミットしてもよい）
+- direnv なら `.envrc` に `dotenv /etc/credshim/keys.env`
+- そのシェルで全部使うなら `set -a; . /etc/credshim/keys.env; set +a`
 
 ### 4. 分離を確かめる（開発ユーザーのセッション）
 
-リポジトリの `scripts/stage-b/verify.sh` を開発ユーザーとして実行すると、開発ユーザーが管理者でないこと、設定・秘密（ロックファイルを含む）・CA鍵を読めず書けないこと、サービスの定義とプロキシのバイナリを書き換えられないこと、agent のディレクトリに書けないこと、agent から鍵の一覧を取れること、`/etc/credshim/env` の `AWS_CA_BUNDLE`・`SSH_AUTH_SOCK` が公開の場所を指すことを確かめる。
+リポジトリの `scripts/stage-b/verify.sh` を開発ユーザーとして実行すると、開発ユーザーが管理者でないこと、設定・秘密（ロックファイルを含む）・CA鍵を読めず書けないこと、サービスの定義とプロキシのバイナリを書き換えられないこと、agent のディレクトリに書けないこと、agent から鍵の一覧を取れること、`/etc/credshim/env` の `AWS_CA_BUNDLE`・`SSH_AUTH_SOCK` が公開の場所を指し、`/etc/credshim/keys.env` のダミーキーを含まないことを確かめる。
 
 ### どのコマンドをどちらで実行するか
 
@@ -139,9 +146,10 @@ credshim run
 # 別のシェルで
 eval "$(credshim env)"
 credshim doctor
+credshim env --keys      # ダミーキー。要る行をプロジェクトの .env に写す
 ```
 
-以下の節を段階Aで試すときは、`svc` を `credshim` に、`$bin preset X | sudo -u $user tee -a /var/lib/credshim/config.toml` を `credshim preset X >> ~/.config/credshim/config.toml` に、`sudo $bin service install` を `credshim run` の再起動に、`. /etc/credshim/env` を `eval "$(credshim env)"` に読み替える。
+以下の節を段階Aで試すときは、`svc` を `credshim` に、`$bin preset X | sudo -u $user tee -a /var/lib/credshim/config.toml` を `credshim preset X >> ~/.config/credshim/config.toml` に、`sudo $bin service install` を `credshim run` の再起動に、`. /etc/credshim/env` を `eval "$(credshim env)"` に、`/etc/credshim/keys.env` を `credshim env --keys` の出力に読み替える。
 
 ## credshim doctor
 
@@ -211,7 +219,7 @@ base_url_addr = "127.0.0.1:8788"
 OPENAI_BASE_URL=http://127.0.0.1:8788/openai/v1 OPENAI_API_KEY=sk-credshim-openai-... python app.py
 ```
 
-`/etc/credshim/env` には base URL が `# base URL for openai: http://127.0.0.1:8788/openai` のようにコメントで入る。対応表に無いパス、`..` や `%2f` を含むパス、ループバック以外を名乗る Host は拒否する。ダミーを含まない要求はそのまま上流へ転送する（本物は使わない）。
+`/etc/credshim/keys.env` には base URL が `# base URL for openai: http://127.0.0.1:8788/openai` のようにコメントで入る。対応表に無いパス、`..` や `%2f` を含むパス、ループバック以外を名乗る Host は拒否する。ダミーを含まない要求はそのまま上流へ転送する（本物は使わない）。
 
 ## SSH エージェント
 
@@ -257,11 +265,12 @@ svc secret set aws-secret-access-key         # 本物のシークレット
 sudo $bin service install --user "$dev"
 
 # 開発ユーザーのセッション
-. /etc/credshim/env       # ダミーの AWS_ACCESS_KEY_ID・AWS_SECRET_ACCESS_KEY と、結合バンドルを指す AWS_CA_BUNDLE
+. /etc/credshim/env       # 結合バンドルを指す AWS_CA_BUNDLE
+set -a; . /etc/credshim/keys.env; set +a   # ダミーの AWS_ACCESS_KEY_ID・AWS_SECRET_ACCESS_KEY
 aws sts get-caller-identity
 ```
 
-AWS のルールが2つ以上あるときは、`/etc/credshim/env` のコメントにあるプロファイルを `~/.aws/credentials` に書く。`AWS_CA_BUNDLE` は信頼ストアを置き換えるので、CA 単体ではなく結合バンドル（開発CA＋システムのルート）を指す。
+AWS のルールが2つ以上あるときは、`/etc/credshim/keys.env` のコメントにあるプロファイルを `~/.aws/credentials` に書く。`AWS_CA_BUNDLE` は信頼ストアを置き換えるので、CA 単体ではなく結合バンドル（開発CA＋システムのルート）を指す。
 
 ```toml
 [aws]
@@ -294,6 +303,7 @@ svc aws sso login sso            # 表示された URL をブラウザで開い�
 
 # 開発ユーザーのセッション
 . /etc/credshim/env
+set -a; . /etc/credshim/keys.env; set +a
 aws sts get-caller-identity      # 認証情報はダミー（静的キーと同じ）
 
 # 管理者のセッション

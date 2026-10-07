@@ -93,7 +93,7 @@ ${dev_uid:+client_uids = [$dev_uid]}
 # or an SSH login as the administrator): its processes can read what is typed into its terminals.
 # Add rules with: $bin preset openai | sudo -u $user tee -a $state/config.toml
 # then register the secret: sudo -u $user $bin secret set openai
-# then rerun "sudo $bin service install" so $public/env carries the new dummies
+# then rerun "sudo $bin service install" so $public/keys.env carries the new dummies
 # SSH keys and AWS SSO logins are made as $user too:
 #   sudo -u $user $bin ssh keygen ssh-github
 #   sudo -u $user $bin aws sso login <session>
@@ -118,7 +118,10 @@ sudo -u "$user" HOME="$state" "$bin" ca bundle --dir "$state/ca" > "$tmp/bundle.
 install -m 0644 -o root -g wheel "$tmp/bundle.pem" "$public/bundle.pem"
 sudo -u "$user" HOME="$state" "$bin" env --config "$state/config.toml" \
   --ca-cert "$public/ca.pem" --bundle "$public/bundle.pem" > "$tmp/env"
+echo "# dummy keys, for a project's .env or direnv: $public/keys.env" >> "$tmp/env"
 install -m 0644 -o root -g wheel "$tmp/env" "$public/env"
+sudo -u "$user" HOME="$state" "$bin" env --keys --config "$state/config.toml" > "$tmp/keys.env"
+install -m 0644 -o root -g wheel "$tmp/keys.env" "$public/keys.env"
 
 cat > "$tmp/$label.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -154,6 +157,7 @@ cat <<DONE
 credshim runs as '$user' and listens on 127.0.0.1:8787.
 For the development user:
   . $public/env && $bin doctor
+  copy the dummy keys a project needs from $public/keys.env into its .env
 Make sure the development user is not an administrator (no sudo), then check isolation as that user:
   scripts/stage-b/verify.sh
 DONE
