@@ -43,7 +43,7 @@
 
 ### 1. サービスを作る（管理者のセッション）
 
-[Releases](https://github.com/FujiHaruka/credshim/releases) にビルド済みのバイナリがある。`target` は `x86_64-unknown-linux-gnu`、`aarch64-unknown-linux-gnu`（どちらも glibc 2.35 以降）、`aarch64-apple-darwin`、`x86_64-apple-darwin` のどれか。
+[Releases](https://github.com/FujiHaruka/credshim/releases) にビルド済みのバイナリがある。`target` は `x86_64-unknown-linux-gnu`、`aarch64-unknown-linux-gnu`（どちらも glibc 2.35 以降）、`aarch64-apple-darwin`（Apple シリコン）のどれか。Intel の Mac ではソースからビルドする。
 
 ```sh
 # Linux は user=credshim bin=/usr/local/libexec/credshim/credshim
