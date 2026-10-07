@@ -119,7 +119,7 @@ User=$user
 Group=$user
 Environment=HOME=$state
 ExecStart=$bin run --config $state/config.toml
-ExecReload=/bin/kill -HUP $MAINPID
+ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
 UMask=0077
 LimitCORE=0
