@@ -65,6 +65,15 @@ macOS のバイナリは Apple の署名と公証を受けていない。curl �
 
 `--user` は開発ユーザーの uid を SSH エージェントの接続許可に書くためのもの。管理者のセッションで sudo すると、省略時は管理者自身が開発ユーザーとみなされる。
 
+新しいリリースへ上げるときは、インストール済みのバイナリで `service upgrade` を実行する（0.5.0 以前には無いので、そこからは上の手順で取得したバイナリで `sudo ./credshim service install --upgrade` を一度実行する）。
+
+```sh
+$bin service upgrade --print        # 実行する内容を確かめる
+sudo $bin service upgrade           # 最新のリリースへ。sudo $bin service upgrade 0.6.0 のように版も指定できる
+```
+
+Releases から自分の環境のアーカイブと `SHA256SUMS` を root だけが読み書きできる一時ディレクトリに取得し、ハッシュと `--version` を確かめてから、取得したバイナリの `service install --upgrade` で `$bin` を置き換えてサービスを再起動する（処理中の接続は切れる）。設定、秘密、CA はそのまま使う。すでにその版なら何もしない。取得はプロキシを通らない（環境変数を消して実行する）。
+
 ### 2. ルールと秘密を登録する（管理者のセッション）
 
 OpenAI を例にする。専用ユーザーとして実行した credshim は、`--config` が無くても `/var/lib/credshim/config.toml` を読む。
@@ -84,7 +93,7 @@ sudo $bin service reload
 
 ルールや秘密を変えたら、インストール済みのバイナリで `service reload` を実行する（開発ユーザーが書き換えられるバイナリを sudo で動かさない）。プロセスは止まらず、処理中の要求（ストリーミング応答や WebSocket）は読み直す前の設定のまま最後まで流れ、次の要求から新しい設定が使われる。開いたままの接続の上の次の要求も同じ。上限のカウンタは引き継ぐ。`service reload` は先に専用ユーザーとして設定とルールの秘密を読めるか確かめ（`run --check`）、読めなければ何も変えずに失敗する。プロキシ側で読み直しに失敗したときも、動いている設定のまま続ける。結果はサービスのログ（macOS は `/var/lib/credshim/credshim.log`、Linux は `journalctl -u credshim`）に出る。
 
-読み直すのは `[[rule]]`、`[scrub]`、AWS（`[aws]`、`[[aws_key]]`、`[[aws_sso_session]]`、`[[aws_sso_role]]`）。`[listen]`、`[ca]`、`[secrets]`、`[audit]`、`[status]`、SSH（`[ssh]`、`[[ssh_key]]`）、OAuth（`[[oauth]]`、`[vault]`、`[limits]`）は再起動するまで変わらず、reload するとログに警告が出る。これらを変えたときと、バイナリを置き換えるときは `service install` をもう一度実行する（プロセスを再起動するので、処理中の接続は切れる。別のバイナリで置き換えるときは `--upgrade` を付ける）。ルールの無かったホストへの開いたままの接続は素のトンネルなので、そのホストに足したルールは、クライアントが接続し直すまで効かない。
+読み直すのは `[[rule]]`、`[scrub]`、AWS（`[aws]`、`[[aws_key]]`、`[[aws_sso_session]]`、`[[aws_sso_role]]`）。`[listen]`、`[ca]`、`[secrets]`、`[audit]`、`[status]`、SSH（`[ssh]`、`[[ssh_key]]`）、OAuth（`[[oauth]]`、`[vault]`、`[limits]`）は再起動するまで変わらず、reload するとログに警告が出る。これらを変えたときは `service install` をもう一度実行する（プロセスを再起動するので、処理中の接続は切れる）。バイナリを新しいリリースに置き換えるときは `service upgrade`、手元でビルドしたものに置き換えるときはそのバイナリで `service install --upgrade` を実行する。ルールの無かったホストへの開いたままの接続は素のトンネルなので、そのホストに足したルールは、クライアントが接続し直すまで効かない。
 
 ### 3. 使う（開発ユーザーのセッション）
 
@@ -128,7 +137,7 @@ for chunk in openai.OpenAI().chat.completions.create(
 
 | 管理者のセッション（`svc` は専用ユーザーとして実行） | 開発ユーザーのセッション |
 | --- | --- |
-| ルールの追加（`preset` の追記）、`svc secret set`・`svc secret list`、`svc ssh keygen`、`svc aws sso login`・`logout`、`svc tail`、`svc status`、`sudo $bin service reload`・`service install` | `. /etc/credshim/env`、`credshim doctor`、アプリとエージェント |
+| ルールの追加（`preset` の追記）、`svc secret set`・`svc secret list`、`svc ssh keygen`、`svc aws sso login`・`logout`、`svc tail`、`svc status`、`sudo $bin service reload`・`service install`・`service upgrade` | `. /etc/credshim/env`、`credshim doctor`、アプリとエージェント |
 
 以下の節のコマンドはこの分け方で書く。
 

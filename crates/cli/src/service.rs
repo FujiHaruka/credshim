@@ -11,11 +11,15 @@ const SETUP: &str = include_str!("../../../scripts/stage-b/setup-linux.sh");
 #[cfg(target_os = "linux")]
 const RELOAD: &str = include_str!("../../../scripts/stage-b/reload-linux.sh");
 #[cfg(target_os = "linux")]
+const UPGRADE: &str = include_str!("../../../scripts/stage-b/upgrade-linux.sh");
+#[cfg(target_os = "linux")]
 pub const INSTALLED: &str = "/usr/local/libexec/credshim/credshim";
 #[cfg(target_os = "macos")]
 const SETUP: &str = include_str!("../../../scripts/stage-b/setup-macos.sh");
 #[cfg(target_os = "macos")]
 const RELOAD: &str = include_str!("../../../scripts/stage-b/reload-macos.sh");
+#[cfg(target_os = "macos")]
+const UPGRADE: &str = include_str!("../../../scripts/stage-b/upgrade-macos.sh");
 #[cfg(target_os = "macos")]
 pub const INSTALLED: &str = "/Library/CredShim/bin/credshim";
 
@@ -44,11 +48,6 @@ pub fn install(print: bool, upgrade: bool, user: Option<String>) -> anyhow::Resu
             .ok()
             .filter(|name| name != "root")
     });
-    if user.is_none() {
-        eprintln!(
-            "credshim: no development user given (--user, or run through sudo); the ssh agent will accept only its own user"
-        );
-    }
     run_script(
         SETUP,
         "credshim-service-install",
@@ -73,6 +72,21 @@ pub fn reload(print: bool) -> anyhow::Result<()> {
         std::iter::empty::<&OsStr>(),
     )
     .context("service reload failed")
+}
+
+pub fn upgrade(print: bool, version: Option<String>) -> anyhow::Result<()> {
+    if print {
+        std::io::stdout().write_all(UPGRADE.as_bytes())?;
+        return Ok(());
+    }
+    if !rustix::process::geteuid().is_root() {
+        bail!(
+            "`credshim service upgrade` replaces the installed binary and restarts the system service; run it with sudo (review it first with `credshim service upgrade --print`)"
+        );
+    }
+    let version = version.unwrap_or_else(|| "latest".to_owned());
+    run_script(UPGRADE, "credshim-service-upgrade", [OsStr::new(&version)])
+        .context("service upgrade failed")
 }
 
 fn run_script<'a>(

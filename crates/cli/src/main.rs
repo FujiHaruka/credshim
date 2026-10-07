@@ -164,6 +164,12 @@ enum ServiceCommand {
         #[arg(long)]
         print: bool,
     },
+    Upgrade {
+        #[arg(value_name = "VERSION")]
+        version: Option<String>,
+        #[arg(long)]
+        print: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -284,6 +290,9 @@ async fn main() -> anyhow::Result<()> {
         Command::Service {
             command: ServiceCommand::Reload { print },
         } => service::reload(print),
+        Command::Service {
+            command: ServiceCommand::Upgrade { version, print },
+        } => service::upgrade(print, version),
         Command::Ssh {
             command: SshCommand::Keygen { name, config },
         } => {
