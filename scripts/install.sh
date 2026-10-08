@@ -62,7 +62,7 @@ main() {
   curl -fsSL -o "$tmp/$archive" "$releases/download/v$version/$archive" || { echo "could not download $archive from release v$version" >&2; exit 1; }
   curl -fsSL -o "$tmp/SHA256SUMS" "$releases/download/v$version/SHA256SUMS"
   if command -v sha256sum >/dev/null; then
-    (cd "$tmp" && grep " $archive\$" SHA256SUMS | sha256sum -c)
+    (cd "$tmp" && grep " $archive\$" SHA256SUMS | sha256sum -c -)
   else
     (cd "$tmp" && grep " $archive\$" SHA256SUMS | shasum -a 256 -c)
   fi
