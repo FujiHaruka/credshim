@@ -34,13 +34,13 @@
 `yourname` を開発ユーザーの名前に変えて実行する。
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/FujiHaruka/credshim/83353062716569add394c33181e1e3af76885c2d/scripts/install.sh | sudo bash -s -- --user yourname
+curl -fsSL https://raw.githubusercontent.com/FujiHaruka/credshim/4406ce71c01c11d4c495af7427f313d8932f1c61/scripts/install.sh | sudo bash -s -- --user yourname
 ```
 
 実行する前に中身を読むなら、取得してから実行する。
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/FujiHaruka/credshim/83353062716569add394c33181e1e3af76885c2d/scripts/install.sh
+curl -fsSLO https://raw.githubusercontent.com/FujiHaruka/credshim/4406ce71c01c11d4c495af7427f313d8932f1c61/scripts/install.sh
 less install.sh
 sudo bash install.sh --user yourname
 ```
