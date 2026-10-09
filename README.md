@@ -46,7 +46,7 @@
 バイナリを取得する。
 
 ```sh
-v=0.6.1
+v=0.6.2
 target=aarch64-apple-darwin   # Linux は x86_64-unknown-linux-gnu か aarch64-unknown-linux-gnu
 curl -fsSL "https://github.com/FujiHaruka/credshim/releases/download/v$v/credshim-$v-$target.tar.gz" | tar -xzf - credshim
 mkdir -p ~/.local/bin && mv credshim ~/.local/bin/   # PATH の通った場所に置く
