@@ -710,7 +710,7 @@ dependencies = [
 
 [[package]]
 name = "credshim"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -737,7 +737,7 @@ dependencies = [
 
 [[package]]
 name = "credshim-aws"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "aws-credential-types",
  "aws-sigv4",
@@ -763,7 +763,7 @@ dependencies = [
 
 [[package]]
 name = "credshim-core"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "aho-corasick",
  "base64 0.22.1",
@@ -781,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "credshim-e2e"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "credshim-aws",
  "credshim-core",
@@ -795,7 +795,7 @@ dependencies = [
 
 [[package]]
 name = "credshim-mitm"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -838,7 +838,7 @@ dependencies = [
 
 [[package]]
 name = "credshim-oauth"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "age",
  "base64 0.22.1",
@@ -862,7 +862,7 @@ dependencies = [
 
 [[package]]
 name = "credshim-secrets"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "age",
  "credshim-testkit",
@@ -878,7 +878,7 @@ dependencies = [
 
 [[package]]
 name = "credshim-ssh"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "credshim-core",
  "credshim-testkit",
@@ -900,7 +900,7 @@ dependencies = [
 
 [[package]]
 name = "credshim-testkit"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "async-stream",
