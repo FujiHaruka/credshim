@@ -8,6 +8,7 @@ mod doctor;
 pub mod intercept;
 mod live;
 pub mod proxy;
+mod relay;
 mod scrub;
 mod sso_transport;
 mod status;

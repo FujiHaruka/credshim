@@ -29,6 +29,7 @@ use crate::ca::CertificateAuthority;
 use crate::doctor;
 use crate::intercept::{Ingress, Intercept, Services, Session};
 use crate::live::{Live, Routing};
+use crate::relay::relay;
 use crate::upstream::{ConnectError, Upstream};
 
 pub type ProxyBody = BoxBody<Bytes, hyper::Error>;
@@ -423,14 +424,12 @@ impl Handler {
         };
         self.audit_connect("tcp", &host, port, &Outcome::Tunnel, StatusCode::OK);
         let on_upgrade = hyper::upgrade::on(&mut req);
+        let idle_timeout = self.idle_timeout;
         tokio::spawn(async move {
-            let mut upstream = upstream;
             match on_upgrade.await {
                 Ok(upgraded) => {
-                    let mut downstream = TokioIo::new(upgraded);
-                    if let Err(err) =
-                        tokio::io::copy_bidirectional(&mut downstream, &mut upstream).await
-                    {
+                    let downstream = TokioIo::new(upgraded);
+                    if let Err(err) = relay(downstream, upstream, idle_timeout).await {
                         tracing::debug!(%host, port, error = %err, "tunnel closed with error");
                     }
                 }

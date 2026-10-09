@@ -2,6 +2,7 @@ mod common;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use common::{
     assert_large_bodies_intact, assert_sse_unbuffered, client_via, raw_exchange, read_head,
@@ -504,4 +505,86 @@ async fn request_values_never_reach_the_logs() {
         .unwrap();
 
     logs.assert_absent(&[&header_secret, &query_secret]);
+}
+
+async fn start_proxy_with_idle_timeout(idle_timeout: Duration) -> Proxy {
+    install_crypto_provider();
+    let mut config = ProxyConfig::new("127.0.0.1:0".parse().unwrap());
+    config.idle_timeout = idle_timeout;
+    Proxy::bind(config, Upstream::new().unwrap()).await.unwrap()
+}
+
+async fn tunnel_pair(proxy: &Proxy) -> (TcpStream, TcpStream) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = listener.local_addr().unwrap();
+    let mut client = TcpStream::connect(proxy.local_addr()).await.unwrap();
+    client
+        .write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let head = read_head(&mut client).await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    let (server, _) = listener.accept().await.unwrap();
+    (client, server)
+}
+
+async fn within<F: std::future::Future>(what: &str, future: F) -> F::Output {
+    tokio::time::timeout(Duration::from_secs(5), future)
+        .await
+        .unwrap_or_else(|_| panic!("{what} did not happen in time"))
+}
+
+#[tokio::test]
+async fn a_half_closed_tunnel_whose_far_side_never_closes_is_released() {
+    let proxy = start_proxy_with_idle_timeout(Duration::from_secs(1)).await;
+    let (mut client, mut server) = tunnel_pair(&proxy).await;
+    let mut byte = [0; 1];
+
+    client.shutdown().await.unwrap();
+
+    let forwarded = within("the half-close reaching upstream", server.read(&mut byte)).await;
+    assert_eq!(forwarded.unwrap(), 0);
+    let released = within("the proxy releasing the tunnel", client.read(&mut byte)).await;
+    assert_eq!(released.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn a_quiet_tunnel_stays_open_past_the_idle_timeout() {
+    let proxy = start_proxy_with_idle_timeout(Duration::from_secs(1)).await;
+    let (mut client, mut server) = tunnel_pair(&proxy).await;
+
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    client.write_all(b"ping").await.unwrap();
+    let mut ping = [0; 4];
+    within("upstream reading", server.read_exact(&mut ping))
+        .await
+        .unwrap();
+    server.write_all(b"pong").await.unwrap();
+    let mut pong = [0; 4];
+    within("client reading", client.read_exact(&mut pong))
+        .await
+        .unwrap();
+
+    assert_eq!(&ping, b"ping");
+    assert_eq!(&pong, b"pong");
+}
+
+#[tokio::test]
+async fn upstream_can_still_answer_after_the_client_half_closes() {
+    let proxy = start_proxy_with_idle_timeout(Duration::from_secs(1)).await;
+    let (mut client, mut server) = tunnel_pair(&proxy).await;
+    let mut byte = [0; 1];
+
+    client.shutdown().await.unwrap();
+    within("the half-close reaching upstream", server.read(&mut byte))
+        .await
+        .unwrap();
+    server.write_all(b"late reply").await.unwrap();
+    server.shutdown().await.unwrap();
+    let mut reply = Vec::new();
+    within("client reading", client.read_to_end(&mut reply))
+        .await
+        .unwrap();
+
+    assert_eq!(reply, b"late reply");
 }

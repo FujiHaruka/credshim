@@ -23,6 +23,7 @@ use crate::audit::{self, AwsLabels, Outcome};
 use crate::ca::CertificateAuthority;
 use crate::live::Live;
 use crate::proxy::{ProxyBody, status, strip_hop_by_hop};
+use crate::relay::relay;
 use crate::scrub::{self, ScrubBody};
 use crate::upstream::{ALPN_H2, ConnectError, TargetConnector, Upstream};
 
@@ -182,6 +183,7 @@ pub(crate) struct Session {
     ingress: Ingress,
     connector: TargetConnector,
     client: Client<TargetConnector, ProxyBody>,
+    idle_timeout: Duration,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -217,6 +219,7 @@ impl Session {
         Ok(Self {
             target: VerifiedTarget { host, port },
             live,
+            idle_timeout,
             ingress,
             connector,
             client,
@@ -859,14 +862,13 @@ impl Session {
         };
         let upstream = hyper::upgrade::on(&mut res);
         let host = target.host.clone();
+        let idle_timeout = self.idle_timeout;
         tokio::spawn(async move {
             match tokio::try_join!(downstream, upstream) {
                 Ok((downstream, upstream)) => {
-                    let mut downstream = TokioIo::new(downstream);
-                    let mut upstream = TokioIo::new(upstream);
-                    if let Err(err) =
-                        tokio::io::copy_bidirectional(&mut downstream, &mut upstream).await
-                    {
+                    let downstream = TokioIo::new(downstream);
+                    let upstream = TokioIo::new(upstream);
+                    if let Err(err) = relay(downstream, upstream, idle_timeout).await {
                         tracing::debug!(%host, error = %err, "upgraded connection closed with error");
                     }
                 }
