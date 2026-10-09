@@ -2,8 +2,12 @@ mod common;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::time::Duration;
 
-use common::{OPENAI_DUMMY, credshim, openai_rule, output, spawn_run, store_secret, write_config};
+use common::{
+    OPENAI_DUMMY, credshim, credshim_with_open_file_limit, openai_rule, output, spawn_run,
+    spawn_run_with, store_secret, write_config,
+};
 use credshim_testkit::{MockUpstream, fake_secret};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -346,4 +350,37 @@ async fn proxy_memory_and_environment_are_closed_to_the_same_user() {
         core.split_whitespace().filter(|v| *v == "0").count() >= 2,
         "{core}"
     );
+}
+
+#[tokio::test]
+async fn run_holds_more_tunnels_than_its_inherited_open_file_limit_allows() {
+    let (home, config) = ready_home().await;
+    let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = upstream.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = upstream.accept().await {
+            held.push(stream);
+        }
+    });
+    let proxy = spawn_run_with(
+        credshim_with_open_file_limit(home.path(), 40),
+        &["--listen", "127.0.0.1:0", "--config", &config],
+    )
+    .await;
+
+    let mut tunnels = Vec::new();
+    for n in 0..50 {
+        let mut tcp = TcpStream::connect(&proxy.addr).await.unwrap();
+        tcp.write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut status = [0; 12];
+        tokio::time::timeout(Duration::from_secs(5), tcp.read_exact(&mut status))
+            .await
+            .unwrap_or_else(|_| panic!("tunnel {n} got no answer"))
+            .unwrap_or_else(|err| panic!("tunnel {n}: {err}"));
+        assert_eq!(&status, b"HTTP/1.1 200", "tunnel {n}");
+        tunnels.push(tcp);
+    }
 }

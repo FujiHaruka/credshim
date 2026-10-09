@@ -2,7 +2,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
-use rustix::process::{Resource, Rlimit, geteuid, setrlimit};
+use rustix::process::{Resource, Rlimit, geteuid, getrlimit, setrlimit};
 
 pub fn disable_core_dumps() -> anyhow::Result<()> {
     setrlimit(
@@ -17,6 +17,37 @@ pub fn disable_core_dumps() -> anyhow::Result<()> {
     rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
         .context("could not mark the process non-dumpable")?;
     Ok(())
+}
+
+pub fn raise_open_file_limit() -> std::io::Result<()> {
+    let limit = getrlimit(Resource::Nofile);
+    let Some(current) = limit.current else {
+        return Ok(());
+    };
+    let ceiling = open_file_ceiling(limit.maximum);
+    if ceiling.is_some_and(|ceiling| ceiling <= current) {
+        return Ok(());
+    }
+    setrlimit(
+        Resource::Nofile,
+        Rlimit {
+            current: ceiling,
+            maximum: limit.maximum,
+        },
+    )?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn open_file_ceiling(hard: Option<u64>) -> Option<u64> {
+    // Not the hard limit itself: macOS setrlimit rejects a soft NOFILE above OPEN_MAX even when the hard limit is unlimited.
+    const OPEN_MAX: u64 = 10240;
+    Some(hard.map_or(OPEN_MAX, |hard| hard.min(OPEN_MAX)))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_file_ceiling(hard: Option<u64>) -> Option<u64> {
+    hard
 }
 
 const MAX_SYMLINK_HOPS: usize = 40;

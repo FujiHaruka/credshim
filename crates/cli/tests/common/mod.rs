@@ -9,7 +9,19 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
 pub fn credshim(home: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_credshim"));
+    with_test_env(Command::new(env!("CARGO_BIN_EXE_credshim")), home)
+}
+
+pub fn credshim_with_open_file_limit(home: &Path, soft: u64) -> Command {
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg(format!("ulimit -S -n {soft} && exec \"$0\" \"$@\""))
+        .arg(env!("CARGO_BIN_EXE_credshim"));
+    with_test_env(command, home)
+}
+
+fn with_test_env(mut command: Command, home: &Path) -> Command {
     command
         .env("XDG_CONFIG_HOME", home.join("config"))
         .env("HOME", home)
@@ -50,7 +62,11 @@ impl Running {
 }
 
 pub async fn spawn_run(home: &Path, args: &[&str]) -> Running {
-    let mut child = credshim(home)
+    spawn_run_with(credshim(home), args).await
+}
+
+pub async fn spawn_run_with(mut command: Command, args: &[&str]) -> Running {
+    let mut child = command
         .arg("run")
         .args(args)
         .stdin(Stdio::null())

@@ -445,6 +445,9 @@ async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::
         .map(open_audit_log)
         .transpose()?;
     init_logging(audit)?;
+    if let Err(err) = harden::raise_open_file_limit() {
+        tracing::warn!(error = %err, "could not raise the open file limit");
+    }
     match &loaded.source {
         Some(path) => tracing::info!(
             config = %path.display(),
