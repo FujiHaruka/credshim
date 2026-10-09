@@ -4,15 +4,15 @@
 
 本物の認証情報は、IAM ユーザーの静的なアクセスキーか、IAM Identity Center（SSO）のロールのどちらかで持つ。
 
-このページのコマンドは推奨構成で書いてあり、`$user`・`$bin`・`svc` は [導入手順の変数](install.md#変数を決める) を使う。お試し構成では [読み替え](install.md#お試し構成で読み替える) のとおりに読む。
+このページのコマンドは推奨構成で書いてあり、`$user`・`$bin`・`credshim-svc` は [導入手順の変数](install.md#変数を決める) を使う。お試し構成では [読み替え](install.md#お試し構成で読み替える) のとおりに読む。
 
 ## 静的アクセスキー
 
 ```sh
 # 管理者のセッション
 $bin preset aws | sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/null   # ダミーのアクセスキー ID は毎回ランダム
-svc secret set aws-access-key-id             # 本物のアクセスキー ID
-svc secret set aws-secret-access-key         # 本物のシークレット
+credshim-svc secret set aws-access-key-id      # 本物のアクセスキー ID
+credshim-svc secret set aws-secret-access-key  # 本物のシークレット
 sudo $bin service reload
 
 # 開発ユーザーのセッション
@@ -44,7 +44,7 @@ limits = { per_minute = 120, per_day = 5000, concurrent = 8 }
 
 - `services` は署名のスコープに入るサービス名で照合する。
 - `operations` は `<サービス>:<操作名>` の許可リスト。末尾の `*` は前方一致で、`s3:*` はそのサービスの全操作。許可リストに無い操作と、操作を特定できないリクエストは `CredShimOperationNotAllowed` の 403 になり、AWS には送らない。
-- 許可リストを作るには、まず `operations` を書かずに使い、`svc tail` の `operation` に出る操作名を集めるとよい。
+- 許可リストを作るには、まず `operations` を書かずに使い、`credshim-svc tail` の `operation` に出る操作名を集めるとよい。
 - 同じ形のリクエストに当てはまる操作が複数あるとき（たとえば `GetBucketLifecycle` と `GetBucketLifecycleConfiguration`）は、その両方を許可する必要がある。
 - `limits` を超えると `CredShimLimitExceeded` の 429。
 - `services`・`regions`・`operations`・`limits` は SSO のロールにも書ける。
@@ -66,7 +66,7 @@ SSO のロールも、`~/.aws` にはダミーの静的アクセスキーだけ�
 $bin preset aws-sso | sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/null
 sudo -u $user vi /var/lib/credshim/config.toml   # start_url、region、アカウント、ロールを書き換える
 sudo $bin service reload
-svc aws sso login sso            # 表示された URL をブラウザで開き、コードを確かめて承認する
+credshim-svc aws sso login sso   # 表示された URL をブラウザで開き、コードを確かめて承認する
 
 # 開発ユーザーのセッション
 . /etc/credshim/env
@@ -74,7 +74,7 @@ set -a; . /etc/credshim/keys.env; set +a
 aws sts get-caller-identity      # 認証情報はダミー（静的キーと同じ）
 
 # 使い終わったら（管理者のセッション）
-svc aws sso logout sso           # IAM Identity Center のセッションを終わらせ、保存したトークンを消す
+credshim-svc aws sso logout sso  # IAM Identity Center のセッションを終わらせ、保存したトークンを消す
 ```
 
 ```toml
@@ -96,5 +96,5 @@ regions = ["ap-northeast-1"]
 - ログインしていないか、SSO のトークンが切れて更新できないときは、リクエストを AWS へ送らずに `CredShimSsoLoginRequired` のエラー（`credshim aws sso login <session>` を促すメッセージ付き）を返し、監査ログに `sso_login_required` を残す。
 - 動いているプロキシは、次の AWS のリクエストで新しいログインを読み込むので、ログインし直したあとの再起動は要らない。
 - `logout` のあとも、プロキシがすでに持っているロールの認証情報は、取り直しの時期まで使われる。
-- `login` は端末から実行する（標準入力が端末でなければ拒否する）。`sudo` は端末をそのまま渡すので、`svc` でも動く。
+- `login` は端末から実行する（標準入力が端末でなければ拒否する）。`sudo` は端末をそのまま渡すので、`credshim-svc` でも動く。
 - 覚えのないデバイスコードの承認を求められたら承認しない。エージェントが自分でログインを始めて、人間に承認させようとしている可能性がある。

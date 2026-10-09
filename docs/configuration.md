@@ -2,7 +2,7 @@
 
 設定ファイルは TOML。推奨構成では `/var/lib/credshim/config.toml`（専用ユーザーだけが読み書きできる）、お試し構成では `~/.config/credshim/config.toml`。
 
-このページのコマンドは推奨構成で書いてあり、`$user`・`$bin`・`svc` は [導入手順の変数](install.md#変数を決める) を使う。お試し構成では [読み替え](install.md#お試し構成で読み替える) のとおりに読む。設定ファイルの編集は、管理者のセッションで `sudo -u $user vi /var/lib/credshim/config.toml` などで行う。
+このページのコマンドは推奨構成で書いてあり、`$user`・`$bin`・`credshim-svc` は [導入手順の変数](install.md#変数を決める) を使う。お試し構成では [読み替え](install.md#お試し構成で読み替える) のとおりに読む。設定ファイルの編集は、管理者のセッションで `sudo -u $user vi /var/lib/credshim/config.toml` などで行う。
 
 ## ルールを書く
 
@@ -24,7 +24,7 @@ limits = { per_minute = 60, per_day = 1000 }
 書いたら本物のキーを登録して反映する。
 
 ```sh
-svc secret set stripe
+credshim-svc secret set stripe
 sudo $bin service reload
 ```
 
@@ -34,7 +34,7 @@ sudo $bin service reload
 | `host` | ○ | 宛先のホスト名（小文字、ポートなし） |
 | `port` | | 宛先のポート。既定は 443 |
 | `path_prefix` | | 宛先をこのパスの下に絞る（`/v1` なら `/v1/...` だけ） |
-| `secret` | ○ | 本物の値を入れる秘密ストアの名前。`svc secret set <名前>` で登録する |
+| `secret` | ○ | 本物の値を入れる秘密ストアの名前。`credshim-svc secret set <名前>` で登録する |
 | `dummy` | ○ | アプリに渡すダミー。24〜256文字の英数字と `-`・`.`・`_`・`~`。ほかのルールのダミーを含んだり、含まれたりしてはいけない |
 | `inject` | ○ | ダミーを探して差し替える場所。`header = "<ヘッダー名>"`（値の中のダミーだけを置き換えるので `Bearer <ダミー>` の形でよい）、`query = "<パラメーター名>"`、`basic = true`（Basic 認証）のうち1つ以上 |
 | `allow_methods` | | 許可する HTTP メソッド。省略するとすべて |
@@ -109,7 +109,7 @@ resource_hosts = ["api.example.com"]                    # アクセストーク�
 max_token_body_bytes = 65536                            # 省略できる。トークンエンドポイントで読むボディの上限（既定 64KiB）
 ```
 
-本物のクライアントシークレットは `svc secret set example-client` で登録する。保管庫の暗号化の鍵は、初めて起動したときに秘密ストアに作られる。OAuth の設定を変えたら `sudo $bin service install` で再起動する。
+本物のクライアントシークレットは `credshim-svc secret set example-client` で登録する。保管庫の暗号化の鍵は、初めて起動したときに秘密ストアに作られる。OAuth の設定を変えたら `sudo $bin service install` で再起動する。
 
 ## 秘密ストア
 
@@ -121,7 +121,7 @@ max_token_body_bytes = 65536                            # 省略できる。ト�
 | `keychain` | macOS のキーチェーン（サービス名は既定で `credshim`） | お試し構成の macOS |
 | `command` | 外部コマンドの標準出力（`command = ["...", "{name}"]`、`{name}` は秘密の名前）。読み取り専用で、登録は外部のツールで行う | |
 
-`svc secret list` で、登録した秘密の名前と更新時刻を見られる（値は出ない）。値を取り出すコマンドは無い。
+`credshim-svc secret list` で、登録した秘密の名前と更新時刻を見られる（値は出ない）。値を取り出すコマンドは無い。
 
 ## 監査ログと状態
 
@@ -135,8 +135,8 @@ path = "/var/lib/credshim/audit.jsonl"
 socket = "/var/lib/credshim/status.sock"
 ```
 
-- `svc tail` は監査ログをライブで表示する。エージェントがいまどこを呼んでいるか、何が拒否されたかが分かる。
-- `svc status` はルールごとのカウンタを表示する。
+- `credshim-svc tail` は監査ログをライブで表示する。エージェントがいまどこを呼んでいるか、何が拒否されたかが分かる。
+- `credshim-svc status` はルールごとのカウンタを表示する。
 
 どちらにも秘密やダミーの値は出ない。どちらも専用ユーザーだけが読める場所にあるので、開発ユーザーからは見えない。
 

@@ -1,6 +1,6 @@
 # うまく動かないとき
 
-まず開発ユーザーのセッションで `credshim doctor` を実行する。拒否されたリクエストの理由は、管理者のセッションの `svc tail`（お試し構成では `credshim run` の端末）で見る。`svc` は [導入手順の変数](install.md#変数を決める) を参照。
+まず開発ユーザーのセッションで `credshim doctor` を実行する。拒否されたリクエストの理由は、管理者のセッションの `credshim-svc tail`（お試し構成では `credshim run` の端末）で見る。`credshim-svc` は [導入手順の変数](install.md#変数を決める) を参照。
 
 ## credshim doctor
 
@@ -39,7 +39,7 @@ CredShim が止めたリクエストは、上流へは何も送らずに 403 か
 | --- | --- | --- |
 | `deny` | 403 | ダミーが、そのルールの宛先ではないホストへ送られた。平文の HTTP で送った場合や、クラウドのメタデータのアドレスへの接続もこれ。宛先が正しいならルールの `host`・`port`・`path_prefix` を直す |
 | `not_allowed` | 403 | 宛先は合っているが、`allow_methods`・`allow_paths`（AWS は `operations`）の外。必要ならルールの許可リストに足す |
-| `limited` | 429 | `limits` の上限を超えた。`svc status` でカウンタを見る |
+| `limited` | 429 | `limits` の上限を超えた。`credshim-svc status` でカウンタを見る |
 | `misdirected` | 421 | 接続先と、リクエストの中の Host が食い違う |
 | `error` | 500・502 | 差し替えに失敗した（ルールの秘密が登録されていない、空など）か、AWS SSO のロールの認証情報を取れなかった。理由はサービスのログに出る |
 | `tunnel` | 502 | ルールの無いホストへの CONNECT で、プロキシが上流へ TCP で繋げなかった（名前解決できない、接続を拒否された、タイムアウト）。理由はサービスのログに出る |

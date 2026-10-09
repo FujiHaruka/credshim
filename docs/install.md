@@ -11,7 +11,7 @@
 
 ## 2つのセッションを使い分ける
 
-この構成では、コマンドを実行する場所が2つある（下の表の `$bin`・`svc` は [変数を決める](#変数を決める) で定義する）。
+この構成では、コマンドを実行する場所が2つある（下の表の `$bin`・`credshim-svc` は [変数を決める](#変数を決める) で定義する）。
 
 - **管理者のセッション。** 開発ユーザーが触れない経路で入った管理者の端末。ユーザーの切り替えで入った管理者の GUI セッション、管理者ユーザーでの SSH ログイン、別のコンソールのどれか。
 - **開発ユーザーのセッション。** 普段の作業とエージェントが動く端末。
@@ -20,7 +20,7 @@
 
 | 管理者のセッション | 開発ユーザーのセッション |
 | --- | --- |
-| インストールと更新、ルールの追加、本物のキーの登録（`svc secret set`）、SSH の鍵の生成、AWS SSO のログイン、監査ログ（`svc tail`）と状態（`svc status`）の確認、設定の反映（`sudo $bin service reload`） | 環境変数の読み込み（`. /etc/credshim/env`）、`credshim doctor`、アプリとエージェント |
+| インストールと更新、ルールの追加、本物のキーの登録（`credshim-svc secret set`）、SSH の鍵の生成、AWS SSO のログイン、監査ログ（`credshim-svc tail`）と状態（`credshim-svc status`）の確認、設定の反映（`sudo $bin service reload`） | 環境変数の読み込み（`. /etc/credshim/env`）、`credshim doctor`、アプリとエージェント |
 
 ## 1. 開発ユーザーを管理者でなくする
 
@@ -66,7 +66,7 @@ user=_credshim bin=/Library/CredShim/bin/credshim
 # Linux
 user=credshim bin=/usr/local/libexec/credshim/credshim
 
-alias svc="sudo -u $user $bin"   # 専用ユーザーとして credshim を実行する
+alias credshim-svc="sudo -u $user $bin"   # 専用ユーザーとして credshim を実行する
 ```
 
 専用ユーザーとして実行した credshim は、`--config` が無くても `/var/lib/credshim/config.toml` を読む。sudo で実行するのは常にインストール先のバイナリ `$bin` にする（開発ユーザーが書き換えられるバイナリを sudo で動かさない）。
@@ -80,7 +80,7 @@ OpenAI を例にする。ほかのサービスは [プリセット](../README.md
 $bin preset openai | sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/null
 
 # 本物のキーを登録する（端末から入力する。コマンドライン引数や環境変数は経由しない）
-svc secret set openai
+credshim-svc secret set openai
 
 # 動いているプロキシに設定を読み直させ、/etc/credshim/keys.env に新しいダミーを載せる
 sudo $bin service reload
@@ -154,9 +154,9 @@ for chunk in openai.OpenAI().chat.completions.create(
 
 CredShim を入れる前から手元にあった鍵やキーは、エージェントにすでに読まれた前提で扱う。取り込まずに新しく作り直し、古いものを無効にする。`credshim doctor` が、手元に残っているものを値を出さずに報告する。
 
-- **API キー。** 発行元で新しいキーを作って `svc secret set` で登録し、.env やシェルの設定に残った古いキーを消して、発行元で無効にする。お試し構成で登録したキーも同じように作り直す。
-- **SSH。** `svc ssh keygen` で新しい鍵を作って公開鍵をサーバー（GitHub など）に登録し、`ssh -T` で通ることを確かめてから、古い公開鍵をサーバーから外し、`~/.ssh` の古い秘密鍵を消す。手順は [SSH エージェント](ssh.md)。
-- **AWS の静的キー。** IAM で新しいアクセスキーを作って `svc secret set` で登録し、`~/.aws/credentials` をダミーに書き換える。動作を確かめたら、古いキーを無効にして（`aws iam update-access-key --status Inactive`）から消す。
+- **API キー。** 発行元で新しいキーを作って `credshim-svc secret set` で登録し、.env やシェルの設定に残った古いキーを消して、発行元で無効にする。お試し構成で登録したキーも同じように作り直す。
+- **SSH。** `credshim-svc ssh keygen` で新しい鍵を作って公開鍵をサーバー（GitHub など）に登録し、`ssh -T` で通ることを確かめてから、古い公開鍵をサーバーから外し、`~/.ssh` の古い秘密鍵を消す。手順は [SSH エージェント](ssh.md)。
+- **AWS の静的キー。** IAM で新しいアクセスキーを作って `credshim-svc secret set` で登録し、`~/.aws/credentials` をダミーに書き換える。動作を確かめたら、古いキーを無効にして（`aws iam update-access-key --status Inactive`）から消す。
 - **AWS SSO。** CredShim に移す前に `aws sso logout` でキャッシュのトークンを失効させ、`~/.aws/sso/cache` と `~/.aws/cli/cache` を消す。`~/.aws/config` の `sso_session`・`sso_start_url` のプロファイルは、ダミーの静的キーのプロファイルに置き換える。
 - **環境変数。** シェルの設定や .env に本物の `AWS_ACCESS_KEY_ID`・`AWS_SECRET_ACCESS_KEY`・`AWS_SESSION_TOKEN` が残っていれば消す。
 
@@ -201,7 +201,7 @@ sudo userdel credshim
 
 | 推奨構成 | お試し構成 |
 | --- | --- |
-| `svc` | `credshim` |
+| `credshim-svc` | `credshim` |
 | `$bin preset X \| sudo -u $user tee -a /var/lib/credshim/config.toml` | `credshim preset X >> ~/.config/credshim/config.toml` |
 | `/var/lib/credshim/config.toml` | `~/.config/credshim/config.toml` |
 | `sudo $bin service reload` | `pkill -HUP -f 'credshim run'`（結果は `credshim run` の端末に出る） |
