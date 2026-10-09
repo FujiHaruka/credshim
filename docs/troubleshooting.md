@@ -1,10 +1,10 @@
-# うまく動かないとき
+# Troubleshooting
 
-まず開発ユーザーのセッションで `credshim doctor` を実行する。拒否されたリクエストの理由は、管理者のセッションの `credshim-svc tail`（お試し構成では `credshim run` の端末）で見る。`credshim-svc` は [導入手順の変数](install.md#変数を決める) を参照。
+First run `credshim doctor` in the developer session. To see why a request was refused, use `credshim-svc tail` in the admin session (in the trial setup, the terminal running `credshim run`). For `credshim-svc`, see [the install variables](install.md#set-the-variables).
 
 ## credshim doctor
 
-このシェルの環境のまま、PATH にある curl、python3、node、go、ssh、aws がプロキシを通り、開発用の CA を信頼できているかを確かめる。
+Checks, with this shell's environment as is, that curl, python3, node, go, ssh, and aws on PATH go through the proxy and trust the development CA.
 
 ```text
 [ok  ] proxy    credshim.test answered through 127.0.0.1:8787 over h2; its certificate chains to /etc/credshim/ca.pem
@@ -20,53 +20,53 @@
 [ok  ] files    no private keys in ~/.ssh and no real AWS credentials in ~/.aws or the environment
 ```
 
-`credshim.test` はプロキシ自身が答える予約ホスト名で、DNS には存在しない。そこへ届けばプロキシを通っている、TLS が通れば CA を信頼している、と分かる。各言語から同じことを確かめるワンライナー（requests、httpx、Node の fetch、Go）は `credshim doctor --snippets` で表示できる。
+`credshim.test` is a reserved host name that the proxy itself answers; it does not exist in DNS. Reaching it shows that the traffic goes through the proxy, and a successful TLS handshake shows that the CA is trusted. `credshim doctor --snippets` prints one-liners that check the same thing from each language (requests, httpx, Node's fetch, Go).
 
-失敗したときに見るところ：
+What to check when something fails:
 
-- **Node。** 組み込みの fetch は `NODE_USE_ENV_PROXY=1`（Node 24 以降）がないと `HTTPS_PROXY` を見ない。古い Node では undici の `EnvHttpProxyAgent` を dispatcher に渡す。プロキシを通らずに失敗した（`ENOTFOUND credshim.test`）ときは、doctor がそう案内する。
-- **Python。** Apple 同梱の `/usr/bin/python3` の ssl モジュールは `SSL_CERT_FILE` を読まない。requests と httpx は `REQUESTS_CA_BUNDLE`・`SSL_CERT_FILE` を自分で読むので動く。
-- **Go。** Linux では `SSL_CERT_FILE` を読む。macOS では読まないことが多い（下の [macOS の Go 製ツール](#macos-の-go-製ツール)）。doctor は go.mod の無い一時ファイルを `go run` するので、macOS ではキーチェーンで CA を信頼させていない限り失敗と報告する。
-- **SSH。** `SSH_AUTH_SOCK` の先のエージェントに鍵の一覧を求め、CredShim の鍵（コメントが `credshim:<ルール名>`）が無ければ、別のエージェントを指していると警告する。PATH の `ssh` が OpenSSH 8.9 より前（session-bind を送らない）なら報告する。
-- **AWS。** PATH の `aws` で `credshim.test` にダミーのキーのリクエストを送り、プロキシを通って CA を信頼しているかを見る。`AWS_CA_BUNDLE` は信頼ストアを置き換えるので、結合バンドルを指している必要がある。
-- **残った本物（files）。** `~/.ssh` の秘密鍵、`~/.aws/credentials`・`~/.aws/config` の本物のアクセスキーと `credential_process`・SSO のプロファイル、`~/.aws/sso/cache`・`~/.aws/cli/cache`、環境変数の本物のキーとセッショントークンを、パスとプロファイル名だけで報告する（値は出さない）。片付け方は [既存の認証情報を入れ替える](install.md#6-既存の認証情報を入れ替える)。
+- **Node.** The built-in fetch does not look at `HTTPS_PROXY` without `NODE_USE_ENV_PROXY=1` (Node 24 and later). On older Node, pass undici's `EnvHttpProxyAgent` as the dispatcher. When the request failed without going through the proxy (`ENOTFOUND credshim.test`), doctor says so.
+- **Python.** The ssl module of Apple's bundled `/usr/bin/python3` does not read `SSL_CERT_FILE`. requests and httpx read `REQUESTS_CA_BUNDLE` and `SSL_CERT_FILE` themselves, so they work.
+- **Go.** On Linux, Go reads `SSL_CERT_FILE`. On macOS it often does not (see [Go tools on macOS](#go-tools-on-macos) below). doctor runs a temporary file with no go.mod through `go run`, so on macOS it reports a failure unless the CA is trusted in the keychain.
+- **SSH.** doctor asks the agent at `SSH_AUTH_SOCK` for its key list and, if there is no CredShim key (comment `credshim:<rule name>`), warns that it points at a different agent. It reports when `ssh` on PATH is older than OpenSSH 8.9 (which does not send session-bind).
+- **AWS.** doctor uses `aws` on PATH to send a request with the dummy key to `credshim.test`, and checks that it goes through the proxy and trusts the CA. `AWS_CA_BUNDLE` replaces the trust store, so it must point at the combined bundle.
+- **Leftover real credentials (files).** doctor reports private keys in `~/.ssh`, real access keys and `credential_process` and SSO profiles in `~/.aws/credentials` and `~/.aws/config`, `~/.aws/sso/cache` and `~/.aws/cli/cache`, and real keys and session tokens in environment variables, by path and profile name only (without printing the values). To clean them up, see [Replace existing credentials](install.md#6-replace-existing-credentials).
 
-## 403 や 429 が返る
+## 403 or 429 responses
 
-CredShim が止めたリクエストは、上流へは何も送らずに 403 か 429 を返す。ボディは空（AWS だけは AWS の形式のエラー）なので、理由は監査ログで見る。
+For a request that CredShim stops, it returns 403 or 429 and sends nothing upstream. The body is empty (except for AWS, which gets an error in the AWS format), so check the audit log for the reason.
 
-| 監査ログの判定 | 状態 | 意味と対処 |
+| Audit log verdict | Status | Meaning and fix |
 | --- | --- | --- |
-| `deny` | 403 | ダミーが、そのルールの宛先ではないホストへ送られた。平文の HTTP で送った場合や、クラウドのメタデータのアドレスへの接続もこれ。宛先が正しいならルールの `host`・`port`・`path_prefix` を直す |
-| `not_allowed` | 403 | 宛先は合っているが、`allow_methods`・`allow_paths`（AWS は `operations`）の外。必要ならルールの許可リストに足す |
-| `limited` | 429 | `limits` の上限を超えた。`credshim-svc status` でカウンタを見る |
-| `misdirected` | 421 | 接続先と、リクエストの中の Host が食い違う |
-| `error` | 500・502 | 差し替えに失敗した（ルールの秘密が登録されていない、空など）か、AWS SSO のロールの認証情報を取れなかった。理由はサービスのログに出る |
-| `tunnel` | 502 | ルールの無いホストへの CONNECT で、プロキシが上流へ TCP で繋げなかった（名前解決できない、接続を拒否された、タイムアウト）。理由はサービスのログに出る |
+| `deny` | 403 | A dummy was sent to a host that is not that rule's destination. Sending over plaintext HTTP and connecting to a cloud metadata address also land here. If the destination is correct, fix the rule's `host`, `port`, `path_prefix` |
+| `not_allowed` | 403 | The destination is right, but the request is outside `allow_methods`, `allow_paths` (`operations` for AWS). If needed, add it to the rule's allowlist |
+| `limited` | 429 | A limit in `limits` was exceeded. Check the counters with `credshim-svc status` |
+| `misdirected` | 421 | The connection target and the Host inside the request disagree |
+| `error` | 500, 502 | Replacing failed (the rule's secret is not registered, is empty, and so on), or the role credentials for AWS SSO could not be obtained. The reason is in the service log |
+| `tunnel` | 502 | On a CONNECT to a host with no rule, the proxy could not open a TCP connection upstream (name resolution failed, the connection was refused, timeout). The reason is in the service log |
 
-ルールのあるホストなのに `inject` も `deny` も出ず、アプリ側で TLS の証明書エラーになるときは、そのアプリがプロキシの環境変数か CA を読んでいない。`credshim doctor` で確かめる。
+If the host has a rule but neither `inject` nor `deny` appears, and the app gets a TLS certificate error, the app does not read the proxy environment variables or the CA. Check with `credshim doctor`.
 
-## macOS の Go 製ツール
+## Go tools on macOS
 
-開発用の CA が要るのは、ルールのあるホスト（AWS のルールがあれば `amazonaws.com` 全体）への通信だけ。それ以外のホストへの通信は中身を見ずに中継し、本物の証明書が届くので、Go 製ツールでもそのまま動く。たとえば Terraform のレジストリやプロバイダーのダウンロードは通るが、AWS のルールがあるときの AWS プロバイダーの API 呼び出しは、開発用の CA を信頼できずに失敗する。
+The development CA is needed only for traffic to hosts that have a rule (all of `amazonaws.com` if there is an AWS rule). Traffic to other hosts is relayed without being inspected and gets the real certificate, so Go tools work there unchanged. For example, Terraform registry and provider downloads go through, but when there is an AWS rule, the AWS provider's API calls fail because they cannot trust the development CA.
 
-macOS の Go は証明書の検証をキーチェーンに任せ、`SSL_CERT_FILE` を読まない。読むのは、Go 1.27 以降でビルドしたプログラムが go.mod の `go` 行が 1.27 以上のとき、または `GODEBUG=x509sslcertoverrideplatform=1` を付けて実行したときだけ。
+On macOS, Go leaves certificate verification to the keychain and does not read `SSL_CERT_FILE`. It reads it only when a program built with Go 1.27 or later has a `go` line of 1.27 or higher in its go.mod, or when the program runs with `GODEBUG=x509sslcertoverrideplatform=1`.
 
-次の順に試す。
+Try these in order.
 
-1. Go 1.27 以降でビルドされたツールなら、`GODEBUG=x509sslcertoverrideplatform=1` を付けて実行する（`GODEBUG` にほかの設定があればカンマでつなぐ）。自分のプロジェクトなら、go.mod の `go` 行を 1.27 以上にすれば付けなくてよい。
-2. ツールが API の接続先を変えられるなら、[base URL モード](configuration.md#base-url-モード) を使う（開発用の CA が要らない）。
-3. どちらもできない場合（古い Go でビルドされた配布バイナリなど）に限り、開発ユーザーのログインキーチェーンで開発用の CA を信頼させる。管理者権限は要らず、パスワードの確認が出る。
+1. If the tool was built with Go 1.27 or later, run it with `GODEBUG=x509sslcertoverrideplatform=1` (if `GODEBUG` already has other settings, join them with commas). For your own project, set the `go` line in go.mod to 1.27 or higher and you do not need it.
+2. If the tool lets you change the API endpoint, use [base URL mode](configuration.md#base-url-mode) (it does not need the development CA).
+3. Only if neither works (for example, a distributed binary built with an old Go), trust the development CA in the developer user's login keychain. This does not need admin rights; it asks for your password.
 
 ```sh
 security add-trusted-cert -r trustRoot -p ssl -k ~/Library/Keychains/login.keychain-db /etc/credshim/ca.pem
 ```
 
-キーチェーンで信頼させると、守りの前提が変わる。
+Trusting the CA in the keychain changes the security assumptions.
 
-- ブラウザを含め、その開発ユーザーのすべてのアプリが開発用の CA を信頼する。CA の秘密鍵が漏れると、任意のサイトになりすまして、そのユーザーの HTTPS 通信を読み書きできる。環境変数で渡すだけなら、影響はその変数を読み込んだプロセスに留まる。
-- 推奨構成に限る。CA の秘密鍵は専用ユーザーしか読めないので、開発ユーザーの権限で動くエージェントからは取り出せず、漏れるのは専用ユーザーか管理者の権限が奪われたときだけ。お試し構成では開発ユーザーが CA の秘密鍵を読めるので、エージェントが任意のサイトの証明書を作れてしまう。
-- CA を作り直したら、古い CA の信頼を外してから新しいものを入れ直す。
+- Every app of that developer user, browsers included, trusts the development CA. If the CA private key leaks, it can be used to impersonate any site and read and write that user's HTTPS traffic. When the CA is passed only through environment variables, the impact stays within the processes that read those variables.
+- Recommended setup only. Only the service user can read the CA private key, so an agent running with the developer user's privileges cannot extract it, and it leaks only if the service user's or an admin's privileges are taken over. In the trial setup, the developer user can read the CA private key, so the agent can create certificates for any site.
+- If you recreate the CA, remove trust in the old CA first, then add the new one again.
 
 ```sh
 security remove-trusted-cert /etc/credshim/ca.pem

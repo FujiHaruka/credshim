@@ -588,7 +588,7 @@ impl Runtime {
             (_, true, _) => format!("\n         {} did not use the proxy: check HTTPS_PROXY/https_proxy", self.name),
             ("node", _, true) => "\n         set NODE_EXTRA_CA_CERTS to the CA certificate".into(),
             ("python", _, true) => "\n         this Python's ssl module ignores SSL_CERT_FILE (Apple's /usr/bin/python3 does); requests and httpx read REQUESTS_CA_BUNDLE/SSL_CERT_FILE themselves".into(),
-            ("go", _, true) if cfg!(target_os = "macos") => "\n         Go on macOS verifies against the keychain and ignores SSL_CERT_FILE, unless the program was built with Go 1.27+ and either its go.mod says go 1.27+ or it runs with GODEBUG=x509sslcertoverrideplatform=1; see \"macOS の Go 製ツール\" in docs/troubleshooting.md".into(),
+            ("go", _, true) if cfg!(target_os = "macos") => "\n         Go on macOS verifies against the keychain and ignores SSL_CERT_FILE, unless the program was built with Go 1.27+ and either its go.mod says go 1.27+ or it runs with GODEBUG=x509sslcertoverrideplatform=1; see \"Go tools on macOS\" in docs/troubleshooting.md".into(),
             (_, _, true) => format!("\n         {} does not trust the CA: check SSL_CERT_FILE (and REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE)", self.name),
             _ => String::new(),
         }

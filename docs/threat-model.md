@@ -1,72 +1,72 @@
-# 脅威モデルと設計原則
+# Threat model and design principles
 
-用語：**開発ユーザー**はエージェントとアプリが動く OS ユーザー、**専用ユーザー**はプロキシだけが動く OS ユーザー。**推奨構成**はプロキシを専用ユーザーで動かす構成、**お試し構成**は開発ユーザーのまま動かす構成（[README](../README.md#構成を選ぶ)）。**ダミー**はアプリに渡す偽の値で、**束縛**はダミーを本物に差し替えてよい宛先（ホスト、ポート、任意でパス）をダミーごとに決めること。
+Terms: the **developer user** is the OS user that the agent and apps run as, and the **service user** is the OS user that runs only the proxy. The **recommended setup** runs the proxy as the service user, and the **trial setup** runs it as the developer user ([README](../README.md#choosing-a-setup)). A **dummy** is a fake value given to apps, and **binding** sets, for each dummy, the destinations (host, port, optionally path) where the dummy may be replaced with the real value.
 
-**守るもの**は秘密の「値」そのもの。.env、アプリのメモリ、ログ、テストfixture、エージェントのコンテキストに本物が現れないこと。
+**What it protects** is the secret's "value" itself: the real value does not appear in .env, app memory, logs, test fixtures, or the agent's context.
 
-**守らないもの**は秘密の「利用」。エージェントは値を知らなくても、プロキシ経由で本物の権限を使ってAPIを叩ける。これは仕組み上避けられない前提で、許可リスト・上限・監査ログで緩和する。
+**What it does not protect** is the "use" of the secret. Without knowing the value, the agent can still call APIs with the real permissions through the proxy. This is unavoidable by design, and allowlists, limits, and the audit log mitigate it.
 
-一番危ないのは「本物のキーが別ホストへ注入されること」と「プロキシの設定や秘密ストアを書き換え・読み出しされること」。以下の原則はほぼこの2点を塞ぐためにある。
+The most dangerous outcomes are "the real key is injected into another host" and "the proxy's configuration or secret store is rewritten or read". The principles below exist almost entirely to block these two.
 
-| エージェントが取りうる行動 | 対策（原則） |
+| What the agent can do | Countermeasure (principle) |
 | --- | --- |
-| リポジトリ、環境変数、アプリのメモリ、ログを読む | 本物がそこに存在しない（1） |
-| ダミーキー付きリクエストを攻撃者のホストへ送る | ホスト束縛、束縛外は403（2, 4） |
-| CONNECT先と内側のHostヘッダーを食い違わせる | 接続先で照合、不一致は拒否（3） |
-| APIのエラー応答などに本物の値をエコーさせる | レスポンスのスクラブ（5） |
-| 設定を書き換えて秘密を別ホストに束縛し直す | 設定をエージェントが書けない場所へ（6） |
-| プロキシのメモリ、秘密ストア、CA秘密鍵を読む | OSユーザー／コンテナ分離（6, 9） |
-| プロキシ経由でクラウドのメタデータ（`169.254.169.254` など）からマシンの認証情報を得る | リンクローカル、未指定アドレス、AWS の `fd00:ec2::/32`、GCP の `fd20:ce::254` へは、名前解決のあとで接続を拒否（403。インターセプトするホストでも同じ） |
-| プロキシ経由で本物の権限を乱用する | 残存リスク。許可リスト、上限、監査ログで緩和。`allow_methods` のあるルールでは、メソッドを上書きするヘッダーとクエリの `_method` も許可リストのメソッドでなければ拒否し、`allow_paths` のあるルールでは `X-Original-URL`・`X-Rewrite-URL` を拒否する。フォームのボディの `_method` はボディを読まないので見ていない |
+| Read the repository, environment variables, app memory, logs | The real value is not there (1) |
+| Send a request carrying a dummy key to an attacker's host | Host binding; outside the binding, 403 (2, 4) |
+| Make the CONNECT target and the inner Host header disagree | Match on the connection target; reject a mismatch (3) |
+| Make an API echo the real value, for example in an error response | Response scrubbing (5) |
+| Rewrite the configuration to rebind a secret to another host | Keep the configuration where the agent cannot write (6) |
+| Read the proxy's memory, the secret store, or the CA private key | OS user / container isolation (6, 9) |
+| Get the machine's credentials from cloud metadata (`169.254.169.254` and others) through the proxy | Connections to link-local addresses, unspecified addresses, AWS's `fd00:ec2::/32`, and GCP's `fd20:ce::254` are refused after name resolution (403; the same for hosts the proxy intercepts) |
+| Abuse the real permissions through the proxy | Residual risk. Mitigated by allowlists, limits, and the audit log. For a rule with `allow_methods`, headers that override the method and the `_method` query parameter are also rejected unless their method is in the allowlist; for a rule with `allow_paths`, `X-Original-URL` and `X-Rewrite-URL` are rejected. `_method` in a form body is not checked, because the proxy does not read the body |
 
-1. **秘密はプロキシプロセスの中だけ。** 登録は人間がTTYから行い、argvや環境変数を経由しない。値を取り出すコマンドは作らない。
-2. **ホスト束縛。** 各秘密は宛先（scheme、host、port、任意でpath prefix）に束縛する。差し替えるのは、実際に接続する上流が束縛先と一致し、かつ上流のTLS証明書をシステムの信頼ストアで検証できたときだけ。
-3. **照合はクライアントが操れる値でなく接続先で。** CONNECTのauthorityを正とし（末尾のドットは取り除いてから照合する）、内側のHostや:authorityが一致しなければ拒否する。
-4. **束縛外に現れたダミーは差し替えず403と警告ログ。** 平文HTTPの上流への注入は明示許可がない限り禁止。リダイレクトはプロキシが追わずクライアントへ返す。
-5. **ボディは既定でバッファしない。** 書き換えはトークンエンドポイントのような小さいボディに限り、サイズ上限を設ける。レスポンス中の秘密値スクラブは安全網として別に持つ。WebSocket の 101 以降のフレームはスクラブしない。
-6. **設定・秘密ストア・CA秘密鍵はエージェントが触れない場所に。** 最終形ではプロキシを別OSユーザー、またはエージェントが動くコンテナの外で動かす。ルール設定も秘密と同じくらい重要な資産として扱う。起動時の検査は、状態ファイルと、それを置くディレクトリ、シンボリックリンクをたどった各段のディレクトリまで。その上のディレクトリは見ないので、他人が書けるディレクトリの下に状態を置くと、途中のディレクトリごと差し替えられうる。
-7. **登録済みホストだけMITMし、他は素のTCPトンネル。** 証明書ピン留めや無関係な通信を壊さない。
-8. **ログやエラーに秘密を出さない仕組みを型で強制。** 秘密は専用型で持ち、Debug/Display出力をマスクする。
-9. **ルートCAはOSの信頼ストアに入れない。** アプリにだけ環境変数で渡し、CA鍵が漏れた場合の被害をこの開発用途に閉じ込める。例外は、macOS で環境変数を読まない Go 製ツールのために [うまく動かないとき](troubleshooting.md#macos-の-go-製ツール) が任意で案内する、推奨構成の開発ユーザーのログインキーチェーンでの信頼。その場合 CA 鍵の漏洩はその開発ユーザーのすべての HTTPS 通信に及ぶ（残存リスク）。
+1. **Secrets exist only inside the proxy process.** A human registers them from a TTY, not through argv or environment variables. There is no command that reads a value back out.
+2. **Host binding.** Each secret is bound to a destination (scheme, host, port, optionally a path prefix). The proxy replaces the dummy only when the upstream it actually connects to matches the binding and the upstream's TLS certificate verifies against the system trust store.
+3. **Match on the connection target, not on values the client controls.** The CONNECT authority is authoritative (a trailing dot is removed before matching), and a request whose inner Host or :authority does not match is rejected.
+4. **A dummy that appears outside its binding is not replaced; the proxy returns 403 and logs a warning.** Injection into a plaintext HTTP upstream is forbidden unless explicitly allowed. The proxy does not follow redirects; it returns them to the client.
+5. **Bodies are not buffered by default.** Rewriting is limited to small bodies, such as those of token endpoints, and has a size limit. Scrubbing secret values from responses is kept separately as a safety net. WebSocket frames after the 101 are not scrubbed.
+6. **The configuration, secret store, and CA private key live where the agent cannot touch them.** In the final form, the proxy runs as a separate OS user, or outside the container the agent runs in. Rule configuration is treated as an asset as important as the secrets. The startup check covers the state files, the directory that holds them, and each directory reached while following symbolic links. It does not look at directories above those, so if the state is under a directory that other users can write to, the state can be replaced together with an intermediate directory.
+7. **Only registered hosts are MITMed; everything else is a plain TCP tunnel.** This does not break certificate pinning or unrelated traffic.
+8. **Types enforce that secrets stay out of logs and errors.** Secrets are held in dedicated types that mask their Debug/Display output.
+9. **The root CA is not added to the OS trust store.** It is given only to apps through environment variables, which confines the damage of a leaked CA key to this development use. The exception is trust in the developer user's login keychain in the recommended setup, which [Troubleshooting](troubleshooting.md#go-tools-on-macos) offers as an option for Go tools on macOS that do not read environment variables. In that case, a leaked CA key affects all HTTPS traffic of that developer user (residual risk).
 
-設定の読み直し（SIGHUP、推奨構成では `sudo credshim service reload`）を起こせるのは、プロキシと同じユーザーか root だけで、推奨構成の開発ユーザーは起こせない。読み直しても上限のカウンタは引き継ぐので、読み直しで上限を0に戻すことはできない。設定が壊れている、秘密が無いなどで読み直せなければ、動いている設定を使い続ける。読み直しのあとは、開いたままの接続の上でも次の要求から新しいルールで判定する（ルールを消すか秘密を変えれば、次の要求からは古い秘密を注入しない）。処理中の要求は読み直す前のルールで最後まで流れる。秘密ストア、CA、待ち受け、監査ログ、OAuth、SSH は起動時の設定のままで、読み直しでは変えない。
+Only the same user as the proxy, or root, can trigger a configuration reload (SIGHUP, or `sudo credshim service reload` in the recommended setup); the developer user in the recommended setup cannot. A reload carries over the limit counters, so a reload cannot reset them to 0. If the configuration cannot be reloaded, for example because it is broken or a secret is missing, the proxy keeps using the running configuration. After a reload, the next request is judged by the new rules, even on a connection that stays open (if you remove a rule or change a secret, the old secret is not injected from the next request on). Requests in progress finish under the rules from before the reload. The secret store, CA, listeners, audit log, OAuth, and SSH keep their startup configuration; a reload does not change them.
 
-base URL モードでは、接続先はクライアントが操れる値ではなく設定の対応表（接頭辞→ルールのホスト）で決まる。クライアントが選べるのはパスだけなので、接頭辞の照合はセグメント単位で行い、ドットセグメントやエンコードされた区切りを含むパスは一致させない。listener はループバックだけに bind し、ループバック以外を名乗る Host は拒否する（DNS リバインディング対策）。ダミーを含まない要求はそのまま転送するが、本物は使わないので MITM の pass と同じ扱いになる。
+In base URL mode, the connection target is decided by the mapping in the configuration (prefix -> rule host), not by a value the client controls. The client chooses only the path, so prefixes are matched segment by segment, and a path that contains dot segments or encoded separators does not match. The listener binds only to loopback and rejects a Host that names anything other than loopback (against DNS rebinding). A request that contains no dummy is forwarded as is, but no real value is used, so it is treated the same as a MITM pass.
 
-## SSH エージェント
+## SSH agent
 
-CredShim は ssh-agent として、鍵をプロキシの中だけに置いて署名を代行する。署名するのは、同じ agent 接続で検証済みの `session-bind@openssh.com` があり、そのホスト鍵の SHA256 指紋がルールの束縛先に含まれ、署名対象が bind のセッション ID と許可されたユーザー名を含むユーザー認証要求（`publickey` か `publickey-hostbound-v00@openssh.com`。後者はホスト鍵が bind と一致すること）ちょうどの形をしているときだけ。1本の接続で受け付ける bind は1回で、検証に失敗した bind や2回目の bind のあとはその接続での署名をすべて拒否し、`is_forwarding=1` の bind を一度でも受けた接続（`ssh -A` の先）も拒否する。
+CredShim acts as an ssh-agent: it keeps keys only inside the proxy and signs on their behalf. It signs only when the same agent connection has a verified `session-bind@openssh.com`, the SHA256 fingerprint of that host key is among the rule's bindings, and the data to sign has exactly the form of a user authentication request (`publickey` or `publickey-hostbound-v00@openssh.com`; for the latter, the host key must match the bind) that contains the bind's session ID and an allowed user name. A connection accepts one bind. After a bind that fails verification, or after a second bind, every signature on that connection is refused, and a connection that has ever received a bind with `is_forwarding=1` (the far side of `ssh -A`) is also refused.
 
-| エージェントが取りうる行動 | 対策 |
+| What the agent can do | Countermeasure |
 | --- | --- |
-| `~/.ssh` やプロセスのメモリから秘密鍵を読む | 鍵はプロキシの中で生成し秘密ストアにだけ置く。ディスク上の鍵ファイルは作らない |
-| agent ソケットを自作クライアントで叩き、攻撃者のサーバーへの認証に使う | session-bind 必須。ホスト鍵が束縛先でなければ署名しない |
-| 束縛先への正規セッションで得た署名を別ホストへ流用する | 署名対象に bind のセッション ID が入り、他の接続では通らない |
-| 任意のデータ（コミット署名、別プロトコルの challenge）に署名させる | ユーザー認証要求ちょうどの形以外は拒否 |
-| agent フォワードを経由して別ホストから使う | フォワードされた接続からの要求は拒否 |
-| 束縛先への本物の権限を乱用する（署名を大量に得る） | 残存リスク。ルールごとの毎分・日次の上限、ホスト鍵とユーザー名の許可リスト、監査ログで緩和 |
-| 同じマシンの別ユーザーが agent ソケットにつなぐ | 接続元の uid を `SO_PEERCRED`／`getpeereid` で確かめ、`[ssh] client_uids`（既定はプロキシ自身の uid）以外は切る。推奨構成のソケットは専用ユーザーが所有し開発ユーザーが書けないディレクトリに置く |
-| 移行前の鍵を `~/.ssh` から読む | 残存リスク。`credshim doctor` が `~/.ssh` に残った秘密鍵を報告する。既存の鍵は読まれた前提で、新しい鍵に入れ替えてサーバーから外す |
+| Read a private key from `~/.ssh` or from process memory | Keys are generated inside the proxy and stored only in the secret store. No key file is created on disk |
+| Call the agent socket with its own client and use it to authenticate to an attacker's server | session-bind is required. No signature unless the host key is in the binding |
+| Reuse a signature obtained in a legitimate session with the bound host against another host | The signed data contains the bind's session ID, so it does not pass on another connection |
+| Get arbitrary data (a commit signature, a challenge from another protocol) signed | Anything that is not exactly a user authentication request is refused |
+| Use the agent from another host through agent forwarding | Requests from a forwarded connection are refused |
+| Abuse the real permissions on the bound host (get many signatures) | Residual risk. Mitigated by per-rule per-minute and daily limits, allowlists of host keys and user names, and the audit log |
+| Another user on the same machine connects to the agent socket | The peer uid is checked with `SO_PEERCRED`/`getpeereid`, and connections from uids not in `[ssh] client_uids` (default: the proxy's own uid) are closed. In the recommended setup, the socket is owned by the service user and placed in a directory the developer user cannot write to |
+| Read keys from before the migration in `~/.ssh` | Residual risk. `credshim doctor` reports private keys left in `~/.ssh`. Assume existing keys have been read: replace them with new keys and remove them from servers |
 
-## AWS 認証情報
+## AWS credentials
 
-`~/.aws` にはダミーのアクセスキーだけを置く。CredShim は `amazonaws.com` 配下を MITM し、Authorization の資格スコープにダミーのアクセスキー ID が入った SigV4 要求だけを、本物の認証情報で署名し直して上流へ送る。署名し直すヘッダーはクライアントが署名したものと同じ集合で、時刻とスコープもクライアントの値を使う。S3 は `x-amz-content-sha256` の値をそのまま署名に使いボディはストリームで流し、それ以外のサービスは上限付きでボディを読んでハッシュを計算する。サービスとリージョンの絞り込みはスコープで行い、ホストがスコープのサービスとリージョンのエンドポイントでなければ再署名しない（対応表は botocore から生成）。利用者が作る API の前段（`execute-api`）は、署名した要求が持ち主のバックエンドに届くので、ルールに明示したときだけ再署名する。`X-Amz-Date` が現在時刻から15分より離れた要求も再署名しない。
+`~/.aws` holds only dummy access keys. CredShim MITMs hosts under `amazonaws.com` and, only for SigV4 requests whose Authorization credential scope contains a dummy access key ID, re-signs the request with the real credentials and sends it upstream. The re-signed headers are the same set the client signed, and the time and scope are the client's values. For S3, the value of `x-amz-content-sha256` is used in the signature as is and the body is streamed; for other services, the proxy reads the body up to a limit and computes its hash. Services and regions are restricted by the scope: if the host is not the endpoint of the scope's service and region, the request is not re-signed (the endpoint table is generated from botocore). For API fronts that users build (`execute-api`), a signed request reaches the owner's backend, so it is re-signed only when the rule names it explicitly. A request whose `X-Amz-Date` is more than 15 minutes from the current time is not re-signed either.
 
-SSO のロールでは、SSO のログインを CredShim が行う。`credshim aws sso login` がデバイス認可フローで得たトークンを秘密ストアに置き、プロキシはそれでロール認証情報を取得してメモリに持ち、期限前に取り直す。プロキシ自身の SSO の通信は待ち受けを通らないので、クライアントからの SSO OIDC とポータルへの CONNECT は引き続き拒否される。
+For SSO roles, CredShim performs the SSO login. `credshim aws sso login` stores the token obtained through the device authorization flow in the secret store; the proxy uses it to get role credentials, keeps them in memory, and gets them again before they expire. The proxy's own SSO traffic does not go through the listener, so CONNECT from clients to SSO OIDC and the portal is still refused.
 
-| エージェントが取りうる行動 | 対策 |
+| What the agent can do | Countermeasure |
 | --- | --- |
-| `~/.aws` の credentials を読む | ダミーのアクセスキーしか無い。本物は秘密ストアとプロキシのメモリだけ |
-| ダミーのアクセスキーで署名した要求を AWS 以外のホストへ送る | `amazonaws.com` 配下以外でダミーが見つかれば403（平文 HTTP も同じ）。本物での署名は、スコープのサービスのエンドポイント宛てにしか行わない。API Gateway など利用者のバックエンドに届くエンドポイントは明示したときだけ |
-| 束縛先の API で新しい認証情報を発行させ、応答から本物の値を得る | botocore のモデルから抜き出した、応答に `SecretAccessKey` か `SessionToken` を含む37操作を拒否。Query の `Action` はクエリ文字列とボディの両方、JSON は `X-Amz-Target`、rpc-v2-cbor はパス、REST はメソッドとパスのテンプレートで判定する |
-| 署名の要らない API（SSO OIDC のデバイス認可、SSO ポータル、`AssumeRoleWithWebIdentity`・`AssumeRoleWithSAML`、`GetCredentialsForIdentity`、`aws login`）で自分で認証情報を得る、人間に承認させる | ルールと無関係に拒否。SSO OIDC、SSO ポータル、signin はホストごと CONNECT の段階で（AWS の設定が無くても）、STS と Cognito Identity の操作は MITM したうえで操作名で |
-| AWS の応答に本物のキーをエコーさせる | 本物のアクセスキー ID とシークレットをスクラブ対象に加える |
-| 署名付きチャンク（`STREAMING-AWS4-HMAC-SHA256-PAYLOAD`）でプロキシの知らない署名を続けさせる | 拒否 |
-| SSO のキャッシュ（`~/.aws/sso/cache`、`~/.aws/cli/cache`）を読む | ログインは `credshim aws sso login` で行い、`~/.aws` には何も書かない。SSO トークン（アクセス、リフレッシュ、クライアントのシークレット）は秘密ストアに暗号化して置き、ロール認証情報はプロキシのメモリだけ |
-| SSO トークンやロール認証情報を、ログ、エラー、応答から得る | 取得したロール認証情報と SSO トークンは直近2世代までスクラブ対象に加える。ログとエラーには状態コードと AWS のエラーコードだけを出す |
-| SSO の期限切れやログアウトのあとも使い続ける | プロキシは要求ごとに SSO トークンの期限を確かめ、更新できなければ上流へ送らず拒否する。ロール認証情報の取得が401なら秘密ストアを読み直し、新しいログインが無ければ拒否する。秘密ストアからログインが消えていれば、更新したトークンを書き戻さずに使うのをやめる。`logout` はアクセストークンが切れていれば更新してからポータルのセッションを終わらせる |
-| 束縛先の API で本物の権限を乱用する、認証情報以外の秘密（`ecr:GetAuthorizationToken` など）を得る | 残存リスク。ルールの `operations` で操作を許可リストにでき、要求から特定した操作のどれかが許可リストに無ければ、または操作を特定できなければ403。ルールごとの毎分・日次・同時実行の上限は429。どちらも上流へは何も送らない。IAM 側の最小権限を併用する |
-| 移行前の認証情報を `~/.aws` や環境変数から読む | 残存リスク。`credshim doctor` が `~/.aws` の本物のアクセスキー、`credential_process`・SSO のプロファイル、SSO と CLI のキャッシュ、環境変数の本物のキーとセッショントークンを報告する（値は出さない） |
-| 自分で `credshim aws sso login` を実行して人間に承認させる | 残存リスクを含む。`login` は stdin が TTY でなければ拒否するが、疑似端末で迂回でき、`--config` で自分の秘密ストアを指せば得たトークンを読める（そのトークンは SSO の本人の全アカウントとロールに効く）。最後の防壁は、人間が覚えのないデバイスコードを承認しないこと。コンテナ分離の構成ではコンテナから SSO OIDC とポータルへの出口がプロキシしか無く、プロキシはそれらへの CONNECT を拒否するので、コンテナ内の `login` は届かない。ただし拒否はホスト名によるので、IP アドレスや自前の DNS 名で CONNECT されると届く |
+| Read the credentials in `~/.aws` | Only dummy access keys are there. The real ones are only in the secret store and the proxy's memory |
+| Send a request signed with a dummy access key to a host other than AWS | A dummy found outside `amazonaws.com` gets 403 (plaintext HTTP too). Signing with the real credentials happens only for requests to an endpoint of the scope's service. Endpoints that reach a user's backend, such as API Gateway, only when named explicitly |
+| Have the bound API issue new credentials and get the real values from the response | 37 operations, extracted from the botocore models, whose responses contain `SecretAccessKey` or `SessionToken` are refused. Query `Action` is checked in both the query string and the body, JSON by `X-Amz-Target`, rpc-v2-cbor by the path, and REST by the method and path template |
+| Get credentials on its own through APIs that need no signature (SSO OIDC device authorization, the SSO portal, `AssumeRoleWithWebIdentity`, `AssumeRoleWithSAML`, `GetCredentialsForIdentity`, `aws login`), or get a human to approve | Refused regardless of rules. SSO OIDC, the SSO portal, and signin are refused per host at the CONNECT stage (even with no AWS configuration); STS and Cognito Identity operations are refused by operation name after MITM |
+| Make AWS echo the real key in a response | The real access key ID and secret are added to the scrub targets |
+| Use signed chunks (`STREAMING-AWS4-HMAC-SHA256-PAYLOAD`) to continue with signatures the proxy does not know | Refused |
+| Read the SSO caches (`~/.aws/sso/cache`, `~/.aws/cli/cache`) | Login is done with `credshim aws sso login`, which writes nothing to `~/.aws`. SSO tokens (access, refresh, client secret) are stored encrypted in the secret store, and role credentials are only in the proxy's memory |
+| Get SSO tokens or role credentials from logs, errors, or responses | Fetched role credentials and SSO tokens are added to the scrub targets, up to the last two generations. Logs and errors contain only the status code and the AWS error code |
+| Keep using them after SSO expires or after logout | The proxy checks the SSO token's expiry on every request and, if it cannot refresh the token, refuses without sending anything upstream. If getting role credentials returns 401, the proxy rereads the secret store and refuses unless there is a new login. If the login has been removed from the secret store, the proxy stops using the refreshed token without writing it back. `logout` refreshes the access token first if it has expired, then ends the portal session |
+| Abuse the real permissions on the bound API, or get secrets other than credentials (such as `ecr:GetAuthorizationToken`) | Residual risk. A rule's `operations` can make an allowlist of operations; if any operation identified from the request is not in the allowlist, or the operation cannot be identified, the result is 403. Per-rule per-minute, daily, and concurrency limits give 429. In both cases nothing is sent upstream. Use least privilege on the IAM side as well |
+| Read credentials from before the migration in `~/.aws` or environment variables | Residual risk. `credshim doctor` reports real access keys in `~/.aws`, `credential_process` and SSO profiles, the SSO and CLI caches, and real keys and session tokens in environment variables (without printing the values) |
+| Run `credshim aws sso login` itself and get a human to approve | Includes residual risk. `login` refuses when stdin is not a TTY, but a pseudo-terminal bypasses this, and with `--config` pointing at its own secret store the agent can read the token it gets (that token works for all accounts and roles of the SSO user). The last line of defense is that the human does not approve a device code they do not recognize. In the container setup, the only way out of the container to SSO OIDC and the portal is the proxy, and the proxy refuses CONNECT to them, so `login` inside the container does not reach them. However, the refusal is by host name, so a CONNECT by IP address or by a DNS name of its own does reach them |
 
-各脅威に対応する回帰テストは [開発](development.md#回帰テスト対応表) にある。
+The regression tests for each threat are in [Development](development.md#regression-test-map).

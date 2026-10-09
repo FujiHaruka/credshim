@@ -1,22 +1,22 @@
-# コンテナ分離
+# Container isolation
 
-エージェントとアプリを devcontainer などのコンテナに入れ、プロキシはホストで [推奨構成](install.md) のとおり専用ユーザーとして動かす。コンテナの外向きの通信をプロキシだけに絞ると、SSO OIDC やポータルへの直接の接続も含めて、すべての通信がプロキシの判定と監査を通る。
+Put the agent and apps in a container such as a devcontainer, and run the proxy on the host as the service user, as in the [recommended setup](install.md). If you limit the container's outbound traffic to the proxy alone, all traffic goes through the proxy's checks and audit, including direct connections to SSO OIDC and the portal.
 
-> SSH の構成（下の「SSH」）はまだ手動で確かめていない。ここに書いたのはその出発点。
+> The SSH setup ("SSH" below) has not been checked by hand yet. What is written here is a starting point.
 
-## プロキシをコンテナから使えるようにする
+## Making the proxy reachable from containers
 
-既定ではプロキシはループバック（`127.0.0.1`）でしか待ち受けない。コンテナから届くアドレスで待ち受けるよう、設定を変えて `sudo $bin service install` で再起動する（`$bin` は [導入手順の変数](install.md#変数を決める)）。
+By default the proxy listens only on loopback (`127.0.0.1`). To listen on an address that containers can reach, change the config and restart with `sudo $bin service install` (`$bin` is one of [the install variables](install.md#set-the-variables)).
 
 ```toml
 [listen]
-addr = "172.17.0.1:8787"      # docker ブリッジのホスト側。0.0.0.0 は常に拒否
+addr = "172.17.0.1:8787"      # host side of the docker bridge. 0.0.0.0 is always rejected
 allow_non_loopback = true
 ```
 
 ## AWS
 
-コンテナ内の `aws` に、プロキシ、結合バンドル、ダミーのキーを渡す。
+Pass the proxy, the combined bundle, and the dummy keys to `aws` in the container.
 
 ```sh
 docker run --rm \
@@ -28,12 +28,12 @@ docker run --rm \
 
 ## SSH
 
-SSH エージェントのソケットをコンテナにマウントし、22番ポートへの接続はプロキシの CONNECT で出す。プロキシは、ルールの無いホストへの CONNECT を中身を見ずに TCP のまま中継し、監査ログに `tunnel` として残す。
+Mount the SSH agent socket into the container, and send connections to port 22 out through the proxy's CONNECT. The proxy relays a CONNECT to a host that has no rule as plain TCP without looking at the contents, and records it in the audit log as `tunnel`.
 
-エージェントは接続元の uid を見る。
+The agent checks the uid of the connecting client.
 
-- **Linux の docker（user namespace なし）。** コンテナ内の uid がそのままホストの uid になる。コンテナを開発ユーザーの uid で動かす（`--user "$(id -u)"`）か、コンテナの uid を `client_uids` に入れる。OpenSSH はパスワードエントリの無い uid では動かないので、イメージにその uid のユーザーを作っておく。
-- **Docker Desktop（macOS）。** ホストの Unix ソケットをバインドマウントで渡せないので、ホストのエージェントをコンテナへ中継する `/run/host-services/ssh-auth.sock` を使う。
+- **Docker on Linux (without user namespaces).** A uid inside the container is the same uid on the host. Run the container with the developer user's uid (`--user "$(id -u)"`), or add the container's uid to `client_uids`. OpenSSH does not run under a uid that has no password entry, so create a user with that uid in the image.
+- **Docker Desktop (macOS).** You cannot pass a host Unix socket through a bind mount, so use `/run/host-services/ssh-auth.sock`, which relays the host's agent into the container.
 
 ```sh
 docker run --rm --user "$(id -u)" \
@@ -43,7 +43,7 @@ docker run --rm --user "$(id -u)" \
 ```
 
 ```text
-# ssh_config（OpenBSD の nc を使う例。socat なら ProxyCommand socat - PROXY:172.17.0.1:%h:%p,proxyport=8787）
+# ssh_config (example with OpenBSD nc. With socat: ProxyCommand socat - PROXY:172.17.0.1:%h:%p,proxyport=8787)
 Host github.com
   ProxyCommand nc -X connect -x 172.17.0.1:8787 %h %p
 ```

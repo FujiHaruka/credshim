@@ -1,87 +1,87 @@
 # AWS
 
-`~/.aws` と環境変数にはダミーのアクセスキーだけを置く。`aws` コマンドや SDK はダミーで署名（SigV4）したリクエストをプロキシへ送り、CredShim はアクセスキー ID でルールを引いて、本物の認証情報で署名し直して AWS へ送る。ダミーのシークレットは送信されないので、何を書いてもよい。
+Put only dummy access keys in `~/.aws` and in environment variables. The `aws` command and the SDKs sign requests with the dummy (SigV4) and send them to the proxy. CredShim looks up the rule by the access key ID, signs the request again with the real credentials, and sends it to AWS. The dummy secret is never sent, so it can be anything.
 
-本物の認証情報は、IAM ユーザーの静的なアクセスキーか、IAM Identity Center（SSO）のロールのどちらかで持つ。
+The real credentials are either a static access key of an IAM user or a role in IAM Identity Center (SSO).
 
-このページのコマンドは推奨構成で書いてあり、`$user`・`$bin`・`credshim-svc` は [導入手順の変数](install.md#変数を決める) を使う。お試し構成では [読み替え](install.md#お試し構成で読み替える) のとおりに読む。
+The commands on this page are for the recommended setup. `$user`, `$bin`, and `credshim-svc` are [the install variables](install.md#set-the-variables). For the trial setup, read them as described in [adapting the commands](install.md#adapting-the-commands-to-the-trial-setup).
 
-## 静的アクセスキー
+## Static access keys
 
 ```sh
-# 管理者のセッション
-$bin preset aws | sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/null   # ダミーのアクセスキー ID は毎回ランダム
-credshim-svc secret set aws-access-key-id      # 本物のアクセスキー ID
-credshim-svc secret set aws-secret-access-key  # 本物のシークレット
+# admin session
+$bin preset aws | sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/null   # the dummy access key ID is random each time
+credshim-svc secret set aws-access-key-id      # real access key ID
+credshim-svc secret set aws-secret-access-key  # real secret
 sudo $bin service reload
 
-# 開発ユーザーのセッション
-. /etc/credshim/env                          # AWS_CA_BUNDLE が結合バンドルを指す
-set -a; . /etc/credshim/keys.env; set +a     # ダミーの AWS_ACCESS_KEY_ID・AWS_SECRET_ACCESS_KEY
+# developer session
+. /etc/credshim/env                          # AWS_CA_BUNDLE points to the combined bundle
+set -a; . /etc/credshim/keys.env; set +a     # dummy AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
 aws sts get-caller-identity
 ```
 
-AWS のルールが2つ以上あるときは、環境変数ではなく、`/etc/credshim/keys.env` のコメントにあるプロファイルを `~/.aws/credentials` に書いて `AWS_PROFILE` で選ぶ。
+When there are two or more AWS rules, do not use the environment variables. Write the profiles from the comments in `/etc/credshim/keys.env` into `~/.aws/credentials` and select one with `AWS_PROFILE`.
 
-`AWS_CA_BUNDLE` は信頼ストアを置き換えるので、開発用の CA 単体ではなく、結合バンドル（開発用の CA とシステムのルート証明書をまとめたファイル）を指す。`/etc/credshim/env` はそうなっている。
+`AWS_CA_BUNDLE` replaces the trust store, so point it at the combined bundle (one file with the development CA and the system root certificates), not at the development CA alone. `/etc/credshim/env` already does this.
 
-### 使えるサービスと操作を絞る
+### Restricting services and operations
 
 ```toml
 [aws]
-max_body_bytes = 16777216   # S3 以外で署名のために読むボディの上限（既定 16MiB）
+max_body_bytes = 16777216   # limit on the body read for signing, for services other than S3 (default 16MiB)
 
 [[aws_key]]
 name = "aws"
 dummy_access_key_id = "CREDSHIMAWS..."
-access_key_id = "aws-access-key-id"          # 秘密ストアの名前
-secret_access_key = "aws-secret-access-key"  # 秘密ストアの名前
-services = ["sts", "s3", "dynamodb"]         # 省略すると全サービス（execute-api は明示したときだけ）
-regions = ["ap-northeast-1"]                 # 省略すると全リージョン
+access_key_id = "aws-access-key-id"          # name in the secret store
+secret_access_key = "aws-secret-access-key"  # name in the secret store
+services = ["sts", "s3", "dynamodb"]         # all services if omitted (execute-api only when listed)
+regions = ["ap-northeast-1"]                 # all regions if omitted
 operations = ["sts:GetCallerIdentity", "s3:GetObject", "s3:ListObjects*", "dynamodb:Describe*"]
 limits = { per_minute = 120, per_day = 5000, concurrent = 8 }
 ```
 
-- `services` は署名のスコープに入るサービス名で照合する。
-- `operations` は `<サービス>:<操作名>` の許可リスト。末尾の `*` は前方一致で、`s3:*` はそのサービスの全操作。許可リストに無い操作と、操作を特定できないリクエストは `CredShimOperationNotAllowed` の 403 になり、AWS には送らない。
-- 許可リストを作るには、まず `operations` を書かずに使い、`credshim-svc tail` の `operation` に出る操作名を集めるとよい。
-- 同じ形のリクエストに当てはまる操作が複数あるとき（たとえば `GetBucketLifecycle` と `GetBucketLifecycleConfiguration`）は、その両方を許可する必要がある。
-- `limits` を超えると `CredShimLimitExceeded` の 429。
-- `services`・`regions`・`operations`・`limits` は SSO のロールにも書ける。
+- `services` matches the service name in the signing scope.
+- `operations` is an allowlist of `<service>:<operation>`. A trailing `*` is a prefix match, and `s3:*` is every operation of that service. An operation that is not in the allowlist, and a request whose operation cannot be identified, get a 403 `CredShimOperationNotAllowed` and are not sent to AWS.
+- To build the allowlist, first use it without `operations` and collect the operation names shown in `operation` in `credshim-svc tail`.
+- When more than one operation matches the same request shape (for example `GetBucketLifecycle` and `GetBucketLifecycleConfiguration`), you must allow both.
+- Exceeding `limits` gives a 429 `CredShimLimitExceeded`.
+- `services`, `regions`, `operations`, and `limits` can also be set on SSO roles.
 
-操作は、リクエストの形から botocore のモデルをもとに特定する（Query と EC2 は `Action`、JSON は `X-Amz-Target`、rpc-v2-cbor はパス、REST はメソッド、パス、必須のクエリとヘッダー）。
+The operation is identified from the shape of the request, based on the botocore models (`Action` for Query and EC2, `X-Amz-Target` for JSON, the path for rpc-v2-cbor, and for REST the method, the path, and the required query parameters and headers).
 
-### 使えないもの
+### What does not work
 
-- 認証情報を発行する操作（`sts:AssumeRole`・`GetSessionToken`、`iam:CreateAccessKey`、`s3:CreateSession` など37操作）は、ルールによらず拒否する。本物の認証情報が応答で返ってしまうため。
-- SSO OIDC、SSO ポータル、`aws login` の signin のホストへの接続は、AWS の設定が無くても常に拒否する。そのため `aws sso login`（代わりに `credshim aws sso login` を使う）は動かない。
-- AssumeRole するプロファイル、`aws s3 presign` などクライアント側で署名するもの、S3 Express One Zone は動かない。
+- Operations that issue credentials (37 operations, such as `sts:AssumeRole`, `GetSessionToken`, `iam:CreateAccessKey`, and `s3:CreateSession`) are denied regardless of the rules, because the response would contain real credentials.
+- Connections to the SSO OIDC, SSO portal, and `aws login` signin hosts are always denied, even with no AWS configuration. So `aws sso login` does not work (use `credshim aws sso login` instead).
+- Profiles that use AssumeRole, client-side signing such as `aws s3 presign`, and S3 Express One Zone do not work.
 
-## AWS IAM Identity Center（SSO）
+## AWS IAM Identity Center (SSO)
 
-SSO のロールも、`~/.aws` にはダミーの静的アクセスキーだけを置いて使う。ログインは `aws sso login` ではなく `credshim aws sso login` で人間が行う。SSO のトークンは秘密ストアに、ロールの認証情報はプロキシのメモリにだけ置く。プロキシは期限の10分前にロールの認証情報と SSO のトークンを取り直す（リフレッシュトークンがあれば）。
+SSO roles also work with only a dummy static access key in `~/.aws`. A human logs in with `credshim aws sso login`, not `aws sso login`. The SSO token is kept in the secret store, and the role credentials only in the proxy's memory. The proxy fetches new role credentials and a new SSO token 10 minutes before they expire (if there is a refresh token).
 
 ```sh
-# 管理者のセッション
+# admin session
 $bin preset aws-sso | sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/null
-sudo -u $user vi /var/lib/credshim/config.toml   # start_url、region、アカウント、ロールを書き換える
+sudo -u $user vi /var/lib/credshim/config.toml   # change start_url, region, account, and role
 sudo $bin service reload
-credshim-svc aws sso login sso   # 表示された URL をブラウザで開き、コードを確かめて承認する
+credshim-svc aws sso login sso   # open the URL shown in a browser, check the code, and approve
 
-# 開発ユーザーのセッション
+# developer session
 . /etc/credshim/env
 set -a; . /etc/credshim/keys.env; set +a
-aws sts get-caller-identity      # 認証情報はダミー（静的キーと同じ）
+aws sts get-caller-identity      # the credentials are dummies (same as static keys)
 
-# 使い終わったら（管理者のセッション）
-credshim-svc aws sso logout sso  # IAM Identity Center のセッションを終わらせ、保存したトークンを消す
+# when you are done (admin session)
+credshim-svc aws sso logout sso  # end the IAM Identity Center session and delete the saved token
 ```
 
 ```toml
 [[aws_sso_session]]
 name = "sso"
 start_url = "https://your-portal.awsapps.com/start"
-region = "us-east-1"                 # IAM Identity Center のリージョン
+region = "us-east-1"                 # IAM Identity Center region
 
 [[aws_sso_role]]
 name = "aws-sso"
@@ -89,12 +89,12 @@ dummy_access_key_id = "CREDSHIMAWS..."
 session = "sso"
 account_id = "123456789012"
 role_name = "Developer"
-services = ["sts", "s3"]             # 省略すると全サービス（静的キーと同じ）
+services = ["sts", "s3"]             # all services if omitted (same as static keys)
 regions = ["ap-northeast-1"]
 ```
 
-- ログインしていないか、SSO のトークンが切れて更新できないときは、リクエストを AWS へ送らずに `CredShimSsoLoginRequired` のエラー（`credshim aws sso login <session>` を促すメッセージ付き）を返し、監査ログに `sso_login_required` を残す。
-- 動いているプロキシは、次の AWS のリクエストで新しいログインを読み込むので、ログインし直したあとの再起動は要らない。
-- `logout` のあとも、プロキシがすでに持っているロールの認証情報は、取り直しの時期まで使われる。
-- `login` は端末から実行する（標準入力が端末でなければ拒否する）。`sudo` は端末をそのまま渡すので、`credshim-svc` でも動く。
-- 覚えのないデバイスコードの承認を求められたら承認しない。エージェントが自分でログインを始めて、人間に承認させようとしている可能性がある。
+- If you are not logged in, or the SSO token has expired and cannot be refreshed, the proxy does not send the request to AWS. It returns a `CredShimSsoLoginRequired` error (with a message that asks you to run `credshim aws sso login <session>`) and writes `sso_login_required` to the audit log.
+- A running proxy reads the new login on the next AWS request, so you do not need to restart after you log in again.
+- After `logout`, role credentials that the proxy already holds are still used until they are due to be fetched again.
+- Run `login` from a terminal (it refuses to run if standard input is not a terminal). `sudo` passes the terminal through, so it also works with `credshim-svc`.
+- If you are asked to approve a device code you do not recognize, do not approve it. An agent may have started a login on its own and be trying to get a human to approve it.

@@ -1,49 +1,49 @@
-# SSH エージェント
+# SSH agent
 
-CredShim は ssh-agent としても動く。鍵はプロキシの中で生成して秘密ストアにだけ置き、外へは公開鍵しか出さない。`~/.ssh` に秘密鍵のファイルは作らない。
+CredShim also runs as an ssh-agent. It generates keys inside the proxy and keeps them only in the secret store. Only the public key leaves it. It does not create private key files in `~/.ssh`.
 
-署名するのは、次の条件をすべて満たすログインのときだけ。
+It signs only for a login that meets all of the following conditions.
 
-- `ssh` が OpenSSH 8.9 以降で、接続先のサーバーを証明する情報（session-bind）を送ってくる
-- そのサーバーのホスト鍵の指紋が、設定の `host_keys` に含まれる
-- ログインするユーザー名が、設定の `users` に含まれる
+- `ssh` is OpenSSH 8.9 or later and sends information that proves which server it connects to (session-bind)
+- The fingerprint of that server's host key is in `host_keys` in the config
+- The login user name is in `users` in the config
 
-`ssh -A` で転送した先からの要求、`ssh-keygen -Y sign`（コミット署名など）、鍵の追加と削除は拒否する。
+It rejects requests from hosts reached through `ssh -A` forwarding, `ssh-keygen -Y sign` (commit signing and the like), and adding or removing keys.
 
-このページのコマンドは推奨構成で書いてあり、`$user`・`$bin`・`credshim-svc` は [導入手順の変数](install.md#変数を決める) を使う。お試し構成では [読み替え](install.md#お試し構成で読み替える) のとおりに読む。
+The commands on this page are written for the recommended setup, and `$user`, `$bin`, and `credshim-svc` are [the install variables](install.md#set-the-variables). For the trial setup, read them as described in [adapting the commands to the trial setup](install.md#adapting-the-commands-to-the-trial-setup).
 
-## GitHub で使う
+## Using it with GitHub
 
 ```sh
-# 管理者のセッション
-$bin preset github-ssh | sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/null   # GitHub のホスト鍵3種、ユーザー git
-credshim-svc ssh keygen ssh-github           # 表示された公開鍵を GitHub に登録する
-sudo $bin service install --user yourname    # SSH の設定は再起動で反映する。yourname は開発ユーザー
+# admin session
+$bin preset github-ssh | sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/null   # GitHub's three host keys, user git
+credshim-svc ssh keygen ssh-github           # register the printed public key on GitHub
+sudo $bin service install --user yourname    # SSH settings apply on restart. yourname is the developer user
 
-# 開発ユーザーのセッション
-. /etc/credshim/env                          # SSH_AUTH_SOCK=/var/lib/credshim-ssh/agent.sock も入る
+# developer session
+. /etc/credshim/env                          # also sets SSH_AUTH_SOCK=/var/lib/credshim-ssh/agent.sock
 ssh -T git@github.com
 ```
 
-既存の `~/.ssh` の鍵は取り込まない。新しい鍵に入れ替え、古い鍵はサーバーから外す（[既存の認証情報を入れ替える](install.md#6-既存の認証情報を入れ替える)）。
+It does not import existing keys from `~/.ssh`. Switch to a new key and remove the old key from the server ([Replace existing credentials](install.md#6-replace-existing-credentials)).
 
-## 設定
+## Configuration
 
 ```toml
 [ssh]
 socket = "/var/lib/credshim-ssh/agent.sock"
-client_uids = [501]          # 接続を受け付ける uid。省略するとプロキシ自身の uid だけ
+client_uids = [501]          # uids it accepts connections from. If omitted, only the proxy's own uid
 
 [[ssh_key]]
 name = "github"
-secret = "ssh-github"        # credshim-svc ssh keygen に渡した名前
+secret = "ssh-github"        # the name passed to credshim-svc ssh keygen
 users = ["git"]
 host_keys = ["SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU"]
-limits = { per_minute = 30, per_day = 500 }   # 署名の回数の上限（省略すると無制限）
+limits = { per_minute = 30, per_day = 500 }   # limit on the number of signatures (unlimited if omitted)
 ```
 
-- 上限を超えた署名の要求は拒否し、監査ログに `reason="limited"` を残す。
-- エージェントは接続元の uid を確かめ、`client_uids` に無い接続はすぐに閉じる。`service install` は、新しく作る設定の `client_uids` に `--user` の uid を書く。設定がすでにあれば、足すべき行を表示する。
-- ソケットのディレクトリ `/var/lib/credshim-ssh` は専用ユーザーの所有で、開発ユーザーは書けない。
-- ProxyJump で踏み台を経由するなら、踏み台のホスト鍵の指紋も `host_keys` に入れる。
-- `[ssh]` と `[[ssh_key]]` を変えたら、`sudo $bin service install --user yourname` で再起動する（`service reload` では変わらない）。
+- It rejects signing requests over the limit and records them in the audit log with `reason="limited"`.
+- The agent checks the uid of the connecting client and closes a connection from a uid not in `client_uids` at once. `service install` writes the `--user` uid into `client_uids` when it creates a new config. If the config already exists, it prints the line to add.
+- The socket directory `/var/lib/credshim-ssh` is owned by the service user, and the developer user cannot write to it.
+- If you go through a bastion host with ProxyJump, also add the bastion's host key fingerprint to `host_keys`.
+- After you change `[ssh]` or `[[ssh_key]]`, restart with `sudo $bin service install --user yourname` (`service reload` does not apply them).

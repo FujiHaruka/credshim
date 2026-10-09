@@ -1,74 +1,74 @@
-# 設定
+# Configuration
 
-設定ファイルは TOML。推奨構成では `/var/lib/credshim/config.toml`（専用ユーザーだけが読み書きできる）、お試し構成では `~/.config/credshim/config.toml`。
+The configuration file is TOML. In the recommended setup it is `/var/lib/credshim/config.toml` (only the service user can read and write it). In the trial setup it is `~/.config/credshim/config.toml`.
 
-このページのコマンドは推奨構成で書いてあり、`$user`・`$bin`・`credshim-svc` は [導入手順の変数](install.md#変数を決める) を使う。お試し構成では [読み替え](install.md#お試し構成で読み替える) のとおりに読む。設定ファイルの編集は、管理者のセッションで `sudo -u $user vi /var/lib/credshim/config.toml` などで行う。
+The commands on this page are for the recommended setup. `$user`, `$bin`, and `credshim-svc` are [the install variables](install.md#set-the-variables). For the trial setup, read them as described in [adapting the commands](install.md#adapting-the-commands-to-the-trial-setup). Edit the configuration file in the admin session, for example with `sudo -u $user vi /var/lib/credshim/config.toml`.
 
-## ルールを書く
+## Writing rules
 
-ルールは「どのダミーを、どの宛先へ向かうときだけ、どの本物に差し替えるか」を決める。プリセットの無い API は、ルールを自分で書く。
+A rule says which dummy to replace with which real value, and only when the request goes to which destination. For an API that has no preset, write the rule yourself.
 
 ```toml
 [[rule]]
 name = "stripe"
 host = "api.stripe.com"
-secret = "stripe"                                  # 秘密ストアに登録する名前
-dummy = "sk_credshim_stripe_0123456789abcdef"       # アプリに渡すダミー（自分でランダムな文字列にする）
-env = "STRIPE_API_KEY"                             # keys.env にダミーを載せる変数名
-inject = { header = "authorization" }              # ダミーを探して差し替える場所
+secret = "stripe"                                  # name registered in the secret store
+dummy = "sk_credshim_stripe_0123456789abcdef"      # dummy given to the app (make it your own random string)
+env = "STRIPE_API_KEY"                             # variable in keys.env that carries the dummy
+inject = { header = "authorization" }              # where to look for the dummy and replace it
 allow_methods = ["GET", "POST"]
 allow_paths = ["/v1/charges", "/v1/customers"]
 limits = { per_minute = 60, per_day = 1000 }
 ```
 
-書いたら本物のキーを登録して反映する。
+After you write it, register the real key and apply the change.
 
 ```sh
 credshim-svc secret set stripe
 sudo $bin service reload
 ```
 
-| 項目 | 必須 | 意味 |
+| Field | Required | Meaning |
 | --- | --- | --- |
-| `name` | ○ | ルールの名前。英数字と `.`・`_`・`-` |
-| `host` | ○ | 宛先のホスト名（小文字、ポートなし） |
-| `port` | | 宛先のポート。既定は 443 |
-| `path_prefix` | | 宛先をこのパスの下に絞る（`/v1` なら `/v1/...` だけ） |
-| `secret` | ○ | 本物の値を入れる秘密ストアの名前。`credshim-svc secret set <名前>` で登録する |
-| `dummy` | ○ | アプリに渡すダミー。24〜256文字の英数字と `-`・`.`・`_`・`~`。ほかのルールのダミーを含んだり、含まれたりしてはいけない |
-| `inject` | ○ | ダミーを探して差し替える場所。`header = "<ヘッダー名>"`（値の中のダミーだけを置き換えるので `Bearer <ダミー>` の形でよい）、`query = "<パラメーター名>"`、`basic = true`（Basic 認証）のうち1つ以上 |
-| `allow_methods` | | 許可する HTTP メソッド。省略するとすべて |
-| `allow_paths` | | 許可するパス。前方一致で、パスの区切りの単位で照合する（`/v1/charges` は `/v1/charges/ch_1` に一致し、`/v1/chargesX` には一致しない）。省略するとすべて |
-| `limits` | | 回数の上限。`per_minute`・`per_day`・`concurrent`（同時に処理中のリクエスト数）。省略すると無制限 |
-| `env` | | `keys.env` にダミーを載せる環境変数名。`_KEY`・`_TOKEN`・`_SECRET`・`_PASSWORD` のどれかで終わる名前に限る |
-| `base_url_prefix` | | [base URL モード](#base-url-モード) で使う接頭辞 |
+| `name` | yes | Rule name. Letters, digits, `.`, `_`, and `-` |
+| `host` | yes | Destination host name (lowercase, no port) |
+| `port` | | Destination port. Default 443 |
+| `path_prefix` | | Limits the destination to paths under this prefix (with `/v1`, only `/v1/...`) |
+| `secret` | yes | Name in the secret store that holds the real value. Register it with `credshim-svc secret set <name>` |
+| `dummy` | yes | Dummy given to the app. 24 to 256 characters: letters, digits, `-`, `.`, `_`, and `~`. It must not contain, or be contained in, another rule's dummy |
+| `inject` | yes | Where to look for the dummy and replace it. One or more of `header = "<header name>"` (only the dummy inside the value is replaced, so `Bearer <dummy>` works), `query = "<parameter name>"`, and `basic = true` (Basic authentication) |
+| `allow_methods` | | Allowed HTTP methods. All if omitted |
+| `allow_paths` | | Allowed paths. Prefix match on path segment boundaries (`/v1/charges` matches `/v1/charges/ch_1` and does not match `/v1/chargesX`). All if omitted |
+| `limits` | | Request count limits: `per_minute`, `per_day`, and `concurrent` (requests in progress at the same time). No limit if omitted |
+| `env` | | Environment variable name that carries the dummy in `keys.env`. The name must end in `_KEY`, `_TOKEN`, `_SECRET`, or `_PASSWORD` |
+| `base_url_prefix` | | Prefix used in [base URL mode](#base-url-mode) |
 
-### ルールの効き方
+### How rules apply
 
-- ダミーを本物に差し替えるのは、実際の接続先が `host`・`port`（と `path_prefix`）に一致し、その宛先の TLS 証明書をシステムの信頼ストアで検証できたときだけ。平文の HTTP には差し替えない。
-- ダミーが別の宛先に向かえば、差し替えずに 403 を返す。上流には何も送らない。
-- 宛先は合っていても、`allow_methods`・`allow_paths` の外なら 403、`limits` を超えれば 429。どちらも上流には送らない。
-- 応答に本物の値が含まれていれば、クライアントに返す前にダミーに戻す（スクラブ）。`[scrub] enabled = false` で止められるが、止めない方がよい。
-- ルールの無いホストへの通信は、中身を見ずにそのまま中継する。開発用の CA が要るのは、ルールのあるホストへの通信だけ。
+- The dummy is replaced with the real value only when the actual destination matches `host` and `port` (and `path_prefix`), and the destination's TLS certificate verifies against the system trust store. Plain HTTP is never replaced.
+- If the dummy goes to another destination, the proxy returns 403 and does not replace it. Nothing is sent upstream.
+- If the destination matches but the request is outside `allow_methods` or `allow_paths`, the response is 403. If it exceeds `limits`, the response is 429. In both cases nothing is sent upstream.
+- If a response contains the real value, the proxy changes it back to the dummy before it returns the response to the client (scrub). `[scrub] enabled = false` turns this off, but leave it on.
+- Traffic to a host with no rule is relayed as is, without looking inside. The development CA is needed only for traffic to hosts that have a rule.
 
-## 設定の反映
+## Applying changes
 
-ルールや秘密を変えたら、管理者のセッションで `sudo $bin service reload` を実行する。プロセスは止まらない。
+After you change rules or secrets, run `sudo $bin service reload` in the admin session. The process keeps running.
 
-- 処理中のリクエスト（ストリーミングの応答や WebSocket を含む）は、読み直す前の設定のまま最後まで流れる。次のリクエストからは新しい設定を使う。開いたままの接続の上の次のリクエストも同じ。
-- 上限のカウンタは引き継ぐ。
-- `service reload` は先に、専用ユーザーとして設定と秘密を読めるかを確かめ（`run --check`）、読めなければ何も変えずに失敗する。プロキシ側で読み直しに失敗したときも、動いている設定のまま続ける。結果はサービスのログ（macOS は `/var/lib/credshim/credshim.log`、Linux は `journalctl -u credshim`）に出る。
-- ルールの無かったホストへの開いたままの接続は中身を見ずに中継しているので、そのホストに足したルールは、クライアントが接続し直すまで効かない。
+- Requests in progress (including streaming responses and WebSockets) run to the end on the configuration from before the reload. The next request uses the new configuration. This includes the next request on a connection that stays open.
+- Limit counters carry over.
+- `service reload` first checks that the service user can read the configuration and the secrets (`run --check`). If it cannot, the reload fails and changes nothing. If the proxy fails to reload, it also keeps running on its current configuration. The result goes to the service log (`/var/lib/credshim/credshim.log` on macOS, `journalctl -u credshim` on Linux).
+- An open connection to a host that had no rule is relayed without looking inside, so a rule added for that host does not apply until the client reconnects.
 
-読み直しで反映される設定と、再起動が要る設定は次のとおり。再起動が要る設定を変えて reload すると、ログに警告が出る。
+The table shows which settings apply on reload and which need a restart. If you change a setting that needs a restart and then reload, the log shows a warning.
 
-| すぐ反映される | 再起動が要る（`sudo $bin service install`。処理中の接続は切れる） |
+| Applies immediately | Needs a restart (`sudo $bin service install`; connections in progress are closed) |
 | --- | --- |
-| `[[rule]]`、`[scrub]`、AWS（`[aws]`、`[[aws_key]]`、`[[aws_sso_session]]`、`[[aws_sso_role]]`） | `[listen]`、`[ca]`、`[secrets]`、`[audit]`、`[status]`、SSH（`[ssh]`、`[[ssh_key]]`）、OAuth（`[[oauth]]`、`[vault]`、`[limits]`） |
+| `[[rule]]`, `[scrub]`, AWS (`[aws]`, `[[aws_key]]`, `[[aws_sso_session]]`, `[[aws_sso_role]]`) | `[listen]`, `[ca]`, `[secrets]`, `[audit]`, `[status]`, SSH (`[ssh]`, `[[ssh_key]]`), OAuth (`[[oauth]]`, `[vault]`, `[limits]`) |
 
-## base URL モード
+## Base URL mode
 
-プロキシの環境変数や独自の CA を扱えないクライアント向けのモード。`http://127.0.0.1:8788/openai/...` を `https://api.openai.com/...` に決まった対応で転送するリバースプロキシで、ルール（宛先、許可リスト、上限、スクラブ）はそのまま掛かる。開発用の CA は要らない。
+A mode for clients that cannot use the proxy environment variables or a custom CA. It is a reverse proxy that forwards `http://127.0.0.1:8788/openai/...` to `https://api.openai.com/...` by a fixed mapping. Rules (destination, allowlists, limits, scrub) still apply. The development CA is not needed.
 
 ```toml
 [listen]
@@ -76,56 +76,56 @@ addr = "127.0.0.1:8787"
 base_url_addr = "127.0.0.1:8788"
 ```
 
-`[listen]` を変えたら `sudo $bin service install` で再起動する。プリセットのルールには `base_url_prefix`（`openai` なら `/openai`）が入っている。
+After you change `[listen]`, restart with `sudo $bin service install`. Preset rules include `base_url_prefix` (`/openai` for `openai`).
 
 ```sh
 OPENAI_BASE_URL=http://127.0.0.1:8788/openai/v1 OPENAI_API_KEY=sk-credshim-openai-... python app.py
 ```
 
-`/etc/credshim/keys.env` には、使える base URL が `# base URL for openai: http://127.0.0.1:8788/openai` のようにコメントで入る。
+`/etc/credshim/keys.env` lists the available base URLs as comments, such as `# base URL for openai: http://127.0.0.1:8788/openai`.
 
-- 対応表に無いパス、`..` や `%2f` を含むパス、ループバック以外を名乗る Host は拒否する。
-- ダミーを含まないリクエストはそのまま上流へ転送する（本物は使わない）。
+- The proxy rejects paths that are not in the mapping, paths that contain `..` or `%2f`, and a Host that names anything other than loopback.
+- A request that contains no dummy is forwarded upstream as is (the real value is not used).
 
 ## OAuth
 
-OAuth のクライアントシークレットと、発行されたアクセストークン・リフレッシュトークンも、アプリにはダミーだけを見せる。
+For OAuth, the app also sees only dummies for the client secret and for the access tokens and refresh tokens that are issued.
 
-- アプリはダミーのクライアントシークレットでトークンエンドポイントを呼ぶ。プロキシが本物に差し替えて送る。
-- トークンエンドポイントの応答のアクセストークンとリフレッシュトークンは、プロキシがダミーに置き換えてアプリに返す。本物は暗号化した保管庫（`[vault]`）に置く。
-- アプリがダミーのアクセストークンを `Authorization` ヘッダーに入れて `resource_hosts` の API を呼ぶと、本物に差し替える。リフレッシュと失効（revoke）のリクエストも同じ。
+- The app calls the token endpoint with the dummy client secret. The proxy replaces it with the real one and sends the request.
+- The proxy replaces the access token and the refresh token in the token endpoint response with dummies and returns them to the app. The real tokens are kept in an encrypted vault (`[vault]`).
+- When the app calls an API in `resource_hosts` with the dummy access token in the `Authorization` header, the proxy replaces it with the real one. The same applies to refresh and revoke requests.
 
 ```toml
 [[oauth]]
 name = "example"
 token_endpoint = "https://oauth.example.com/token"
-revoke_endpoint = "https://oauth.example.com/revoke"     # 省略できる
+revoke_endpoint = "https://oauth.example.com/revoke"    # optional
 client_id = "your-client-id"
 client_secret = { secret = "example-client", dummy = "credshim-example-client-0123456789abcdef" }
-client_auth = "client_secret_post"                      # Basic 認証で送るなら "client_secret_basic"
-resource_hosts = ["api.example.com"]                    # アクセストークンを差し替える API のホスト
+client_auth = "client_secret_post"                      # "client_secret_basic" to send it with Basic authentication
+resource_hosts = ["api.example.com"]                    # API hosts where the access token is replaced
 
 [limits]
-max_token_body_bytes = 65536                            # 省略できる。トークンエンドポイントで読むボディの上限（既定 64KiB）
+max_token_body_bytes = 65536                            # optional. Limit on the body read at the token endpoint (default 64KiB)
 ```
 
-本物のクライアントシークレットは `credshim-svc secret set example-client` で登録する。保管庫の暗号化の鍵は、初めて起動したときに秘密ストアに作られる。OAuth の設定を変えたら `sudo $bin service install` で再起動する。
+Register the real client secret with `credshim-svc secret set example-client`. The vault encryption key is created in the secret store on the first start. After you change the OAuth settings, restart with `sudo $bin service install`.
 
-## 秘密ストア
+## Secret stores
 
-本物の値を置く場所は `[secrets]` で選ぶ。
+`[secrets]` selects where the real values are kept.
 
-| `backend` | 置き場所 | 既定になる構成 |
+| `backend` | Storage | Default in |
 | --- | --- | --- |
-| `age-file` | age で暗号化したファイル（`path`）。鍵は既定で同じ場所の `.key` | 推奨構成（`/var/lib/credshim/secrets.age`）、お試し構成の Linux |
-| `keychain` | macOS のキーチェーン（サービス名は既定で `credshim`） | お試し構成の macOS |
-| `command` | 外部コマンドの標準出力（`command = ["...", "{name}"]`、`{name}` は秘密の名前）。読み取り専用で、登録は外部のツールで行う | |
+| `age-file` | A file encrypted with age (`path`). The key defaults to `.key` in the same location | Recommended setup (`/var/lib/credshim/secrets.age`), trial setup on Linux |
+| `keychain` | The macOS keychain (service name `credshim` by default) | Trial setup on macOS |
+| `command` | Standard output of an external command (`command = ["...", "{name}"]`, where `{name}` is the secret name). Read-only. Register secrets with the external tool | |
 
-`credshim-svc secret list` で、登録した秘密の名前と更新時刻を見られる（値は出ない）。値を取り出すコマンドは無い。
+`credshim-svc secret list` shows the names of the registered secrets and when they were updated (not the values). There is no command that prints a value.
 
-## 監査ログと状態
+## Audit log and status
 
-`service install` が作る設定には、監査ログ `/var/lib/credshim/audit.jsonl` と状態のソケット `/var/lib/credshim/status.sock` が入っている。
+The configuration that `service install` writes includes the audit log `/var/lib/credshim/audit.jsonl` and the status socket `/var/lib/credshim/status.sock`.
 
 ```toml
 [audit]
@@ -135,10 +135,10 @@ path = "/var/lib/credshim/audit.jsonl"
 socket = "/var/lib/credshim/status.sock"
 ```
 
-- `credshim-svc tail` は監査ログをライブで表示する。エージェントがいまどこを呼んでいるか、何が拒否されたかが分かる。
-- `credshim-svc status` はルールごとのカウンタを表示する。
+- `credshim-svc tail` shows the audit log live. You can see where the agent is calling now and what was denied.
+- `credshim-svc status` shows the counters for each rule.
 
-どちらにも秘密やダミーの値は出ない。どちらも専用ユーザーだけが読める場所にあるので、開発ユーザーからは見えない。
+Neither shows secret or dummy values. Both are in a location that only the service user can read, so the developer user cannot see them.
 
 ```text
 2026-09-30T03:31:37.5Z inject      200 POST https://api.openai.com:443/v1/chat/completions [openai] via connect
