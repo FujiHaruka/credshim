@@ -1,4 +1,4 @@
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -45,15 +45,11 @@ pub fn install(print: bool, upgrade: bool, user: Option<String>) -> anyhow::Resu
             binary.display()
         );
     }
-    let user = user.or_else(|| {
-        std::env::var("SUDO_USER")
-            .ok()
-            .filter(|name| name != "root")
-    });
     run_script(
         SETUP,
         "credshim-service-install",
         std::iter::once(binary.as_os_str()).chain(user.as_deref().map(OsStr::new)),
+        std::env::var_os("SUDO_USER").map(|name| ("SUDO_USER", name)),
     )
     .context("service setup failed")
 }
@@ -72,6 +68,7 @@ pub fn reload(print: bool) -> anyhow::Result<()> {
         RELOAD,
         "credshim-service-reload",
         std::iter::empty::<&OsStr>(),
+        None,
     )
     .context("service reload failed")
 }
@@ -87,8 +84,13 @@ pub fn upgrade(print: bool, version: Option<String>) -> anyhow::Result<()> {
         );
     }
     let version = version.unwrap_or_else(|| "latest".to_owned());
-    run_script(UPGRADE, "credshim-service-upgrade", [OsStr::new(&version)])
-        .context("service upgrade failed")
+    run_script(
+        UPGRADE,
+        "credshim-service-upgrade",
+        [OsStr::new(&version)],
+        None,
+    )
+    .context("service upgrade failed")
 }
 
 pub fn verify(print: bool) -> anyhow::Result<()> {
@@ -101,14 +103,20 @@ pub fn verify(print: bool) -> anyhow::Result<()> {
             "`credshim verify` checks what the developer user can reach; run it as that user, without sudo"
         );
     }
-    run_script(VERIFY, "credshim-verify", std::iter::empty::<&OsStr>())
-        .context("some isolation checks above failed")
+    run_script(
+        VERIFY,
+        "credshim-verify",
+        std::iter::empty::<&OsStr>(),
+        None,
+    )
+    .context("some isolation checks above failed")
 }
 
 fn run_script<'a>(
     script: &str,
     name: &str,
     args: impl IntoIterator<Item = &'a OsStr>,
+    env: Option<(&str, OsString)>,
 ) -> anyhow::Result<()> {
     let status = Command::new("/bin/bash")
         .arg("-c")
@@ -117,6 +125,7 @@ fn run_script<'a>(
         .args(args)
         .env_clear()
         .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .envs(env)
         .stdin(Stdio::null())
         .status()
         .context("could not start bash")?;

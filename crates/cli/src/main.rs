@@ -10,6 +10,7 @@ mod preset;
 mod routing;
 mod service;
 mod tail;
+mod terminal;
 
 use std::collections::BTreeSet;
 use std::fs::File;
@@ -408,7 +409,11 @@ async fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             let mut stderr = std::io::stderr();
-            let _ = writeln!(stderr, "Error: {err:?}");
+            let _ = writeln!(
+                stderr,
+                "Error: {}",
+                terminal::printable_lines(&format!("{err:?}"))
+            );
             let topic = err
                 .downcast_ref::<config::Invalid>()
                 .map_or_else(|| command_topic(&path), |invalid| invalid.topic);

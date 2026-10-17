@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 
+use crate::terminal::printable;
+
 const POLL: Duration = Duration::from_millis(250);
 
 pub async fn run(path: &Path, last: usize, follow: bool) -> anyhow::Result<()> {
@@ -133,19 +135,6 @@ fn render(line: &str) -> String {
         path = text("path"),
         ingress = text("ingress"),
     )
-}
-
-fn printable(value: &str) -> String {
-    value
-        .chars()
-        .flat_map(|c| {
-            if c.is_control() {
-                c.escape_default().collect::<Vec<_>>()
-            } else {
-                vec![c]
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]

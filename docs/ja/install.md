@@ -130,7 +130,7 @@ for chunk in openai.OpenAI().chat.completions.create(
 
 ### ダミーのキーをプロジェクトに渡す
 
-ダミーのキーは `/etc/credshim/keys.env`（`credshim env --keys` の出力と同じ）に別に置いてある。読めるのはインストールで指定した開発ユーザー（`--user`）だけで、指定が無ければ root だけが読める。そのときは `service reload` が開発ユーザーに渡す方法を示す。中身は次のとおり。
+ダミーのキーは `/etc/credshim/keys.env`（`credshim env --keys` の出力と同じ）に別に置いてある。読めるのはインストールで指定した開発ユーザー（`--user`）だけ。`--user` を付けないインストールやアップグレードは、ファイルの今の持ち主を変えない。開発ユーザーを一度も指定していなければ root だけが読める。そのときは `service reload` が開発ユーザーに渡す方法を示す。中身は次のとおり。
 
 - ルールに `env` があれば、そのダミーのキー（`OPENAI_API_KEY` など）
 - AWS のルールがちょうど1つなら、そのダミーの `AWS_ACCESS_KEY_ID` と `AWS_SECRET_ACCESS_KEY`（2つ以上なら、`~/.aws/credentials` に書くプロファイルをコメントで出す）

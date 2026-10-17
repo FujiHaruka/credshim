@@ -130,7 +130,7 @@ You can put `. /etc/credshim/env` in your shell config (`~/.zshrc` or similar). 
 
 ### Giving the dummy keys to a project
 
-The dummy keys are kept separately in `/etc/credshim/keys.env` (the same as the output of `credshim env --keys`). Only the developer user given at install (`--user`) can read it; without one, only root can, and `service reload` says how to give it to the developer user. It contains:
+The dummy keys are kept separately in `/etc/credshim/keys.env` (the same as the output of `credshim env --keys`). Only the developer user given at install (`--user`) can read it. An install or upgrade without `--user` keeps the file's current owner. If no developer user was ever given, only root can read it, and `service reload` says how to give it to the developer user. It contains:
 
 - For each rule with `env`, its dummy key (`OPENAI_API_KEY` and so on)
 - If there is exactly one AWS rule, its dummy `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (with two or more, the profiles to write in `~/.aws/credentials`, as comments)

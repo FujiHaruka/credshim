@@ -385,7 +385,7 @@ fn replace_in_query(parts: &mut Parts, param: &str, dummy: &str, secret: &[u8]) 
 fn follows_an_escape(value: &str, dummy: &str) -> bool {
     value
         .match_indices(dummy)
-        .any(|(at, _)| value[at.saturating_sub(2)..at].contains('%'))
+        .any(|(at, _)| value.as_bytes()[at.saturating_sub(2)..at].contains(&b'%'))
 }
 
 fn replace_all(haystack: &[u8], needle: &[u8], with: &[u8]) -> Zeroizing<Vec<u8>> {

@@ -28,9 +28,11 @@ refuse_writable_ancestors() {
 }
 
 user=credshim
+dev=${2:-}
+[[ -n $dev || ${SUDO_USER:-root} == root ]] || dev=$SUDO_USER
 dev_uid=
-if [[ $# -eq 2 ]]; then
-  dev_uid=$(id -u "$2") || { echo "no such user: $2" >&2; exit 1; }
+if [[ -n $dev ]]; then
+  dev_uid=$(id -u "$dev") || { echo "no such user: $dev" >&2; exit 1; }
   [[ $dev_uid != 0 ]] || { echo "the development user must not be root" >&2; exit 1; }
 fi
 state=/var/lib/credshim
@@ -90,7 +92,7 @@ TOML
 fi
 
 if [[ -n $dev_uid ]] && ! grep -Eq "^client_uids *=.*[^0-9]$dev_uid([^0-9]|$)" "$state/config.toml"; then
-  echo "note: add 'client_uids = [$dev_uid]' under [ssh] in $state/config.toml (socket = \"$agent/agent.sock\") so $2 can use the ssh agent" >&2
+  echo "note: add 'client_uids = [$dev_uid]' under [ssh] in $state/config.toml (socket = \"$agent/agent.sock\") so $dev can use the ssh agent" >&2
 fi
 
 if [[ ! -e $state/ca/ca-key.pem ]]; then
@@ -108,8 +110,10 @@ sudo -u "$user" HOME="$state" "$bin" env --config "$state/config.toml" \
 echo "# dummy keys, for a project's .env or direnv: $public/keys.env" >> "$tmp/env"
 install -m 0644 -o root -g root "$tmp/env" "$public/env"
 sudo -u "$user" HOME="$state" "$bin" env --keys --config "$state/config.toml" > "$tmp/keys.env"
-install -m 0400 -o "${dev_uid:-0}" -g root "$tmp/keys.env" "$public/keys.env"
-[[ -n $dev_uid ]] || echo "note: no development user given (--user, or run through sudo); only root can read $public/keys.env" >&2
+keys_owner=$(stat -c %u "$public/keys.env" 2>/dev/null || echo "${dev_uid:-0}")
+[[ $# -eq 1 ]] || keys_owner=$dev_uid
+install -m 0400 -o "$keys_owner" -g root "$tmp/keys.env" "$public/keys.env"
+[[ $keys_owner != 0 ]] || echo "note: only root can read $public/keys.env; give it to the development user with: sudo $bin service install --user <development-user>" >&2
 
 cat > /etc/systemd/system/credshim.service <<UNIT
 [Unit]

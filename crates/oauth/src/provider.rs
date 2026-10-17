@@ -56,7 +56,7 @@ pub enum ProviderError {
     #[error("oauth provider {0:?} is defined more than once")]
     DuplicateName(String),
     #[error(
-        "oauth provider {provider:?}: {field} {url:?} must be an https URL with a path and no query"
+        "oauth provider {provider:?}: {field} {url:?} must be an https URL with a path and no query or user info"
     )]
     InvalidEndpoint {
         provider: String,
@@ -97,6 +97,9 @@ impl Endpoint {
             return Err(invalid());
         }
         let authority = uri.authority().ok_or_else(invalid)?;
+        if authority.as_str().contains('@') {
+            return Err(invalid());
+        }
         let endpoint = Self {
             host: authority.host().to_ascii_lowercase(),
             port: authority.port_u16().unwrap_or(DEFAULT_PORT),

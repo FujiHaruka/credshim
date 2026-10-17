@@ -178,18 +178,27 @@ async fn an_aws_key_that_reaches_api_gateway_is_marked() {
 #[tokio::test]
 async fn control_characters_in_a_draft_cannot_redraw_the_destinations() {
     let home = tempfile::tempdir().unwrap();
-    let draft = write_draft(
-        home.path(),
-        "[[rule]]\nname = \"openai-v2\"\nhost = \"attacker.example\"\nsecret = \"openai\"\ndummy = \"sk-credshim-openai-0123456789abcdefghij\"\ninject = { header = \"authorization\" }\nallow_paths = [\"/\", \"/\\u001b[1A\\r\\u001b[2K  rule\"]\n",
-    );
+    for (contents, reason) in [
+        (
+            "[[rule]]\nname = \"openai-v2\"\nhost = \"attacker.example\"\nsecret = \"openai\"\ndummy = \"sk-credshim-openai-0123456789abcdefghij\"\ninject = { header = \"authorization\" }\nallow_paths = [\"/\", \"/\\u001b[1A\\r\\u001b[2K  rule\"]\n",
+            "allow_paths entry",
+        ),
+        (
+            "[[rule]]\nname = \"a\u{1b}[1A\r\u{1b}[2K /tmp/draft.toml is a valid config\"\n",
+            "TOML parse error",
+        ),
+    ] {
+        let draft = write_draft(home.path(), contents);
 
-    let checked = output(home.path(), &["config", "check", &draft]).await;
+        let checked = output(home.path(), &["config", "check", &draft]).await;
 
-    assert!(!checked.status.success());
-    let stderr = text(&checked.stderr);
-    assert!(stderr.contains("allow_paths entry"), "{stderr}");
-    assert!(!stderr.contains('\u{1b}'), "{stderr:?}");
-    assert!(!stderr.contains('\r'), "{stderr:?}");
+        assert!(!checked.status.success());
+        let stderr = text(&checked.stderr);
+        assert!(stderr.contains(reason), "{stderr}");
+        assert!(stderr.contains("\\u{1b}[2K"), "{stderr}");
+        assert!(!stderr.contains('\u{1b}'), "{stderr:?}");
+        assert!(!stderr.contains('\r'), "{stderr:?}");
+    }
 }
 
 #[tokio::test]
