@@ -120,14 +120,20 @@ Traffic to destinations that have rules is relayed through the development CA, s
 
 If you put the dummy keys into every shell, other keys written in a project's .env can stop being used. For how to pass them per project, see [docs/install.md](docs/install.md#giving-the-dummy-keys-to-a-project).
 
+A coding agent can also do the setup for you: give it the one line in [Setting up with a coding agent](docs/agent-setup.md). You run the admin commands it hands you and type the real keys.
+
+When a request fails, CredShim's response says why and which command shows more. [Coding agents](docs/agents.md) explains how an agent tells what happened, and has a note to put in `AGENTS.md` or `CLAUDE.md`. `credshim docs` prints these docs for the installed version.
+
 ## Documentation
 
 - [Installing the recommended setup](docs/install.md): install, update, uninstall, and migrating from existing credentials
+- [Setting up with a coding agent](docs/agent-setup.md): the one line to give an agent, and the steps it follows
 - [Configuration](docs/configuration.md): writing rules, applying changes, base URL mode, OAuth, audit log
 - [AWS](docs/aws.md): static access keys and IAM Identity Center (SSO)
 - [SSH agent](docs/ssh.md)
 - [Container isolation](docs/container.md)
-- [Troubleshooting](docs/troubleshooting.md): `credshim doctor`, investigating 403 and 429, Go tools on macOS
+- [Troubleshooting](docs/troubleshooting.md): `credshim doctor`, refused requests, Go tools on macOS
+- [Coding agents](docs/agents.md): what an agent holds, what to do when a request fails, a note for the agent's instructions
 - [Threat model](docs/threat-model.md)
 - [Development](docs/development.md)
 

@@ -1,6 +1,6 @@
 # うまく動かないとき
 
-まず開発ユーザーのセッションで `credshim doctor` を実行する。拒否されたリクエストの理由は、管理者のセッションの `credshim-svc tail`（お試し構成では `credshim run` の端末）で見る。`credshim-svc` は [導入手順の変数](install.md#変数を決める) を参照。
+まず開発ユーザーのセッションで `credshim doctor` を実行する。CredShim が止めたリクエストは、応答に理由と、監査ログの記録を表示するコマンドが入る（[止められたリクエスト](#止められたリクエスト)）。すべてのリクエストを見るには、管理者のセッションで `credshim-svc tail`（お試し構成では `credshim tail`）を使う。`credshim-svc` は [導入手順の変数](install.md#変数を決める) を参照。
 
 ## credshim doctor
 
@@ -22,29 +22,98 @@
 
 `credshim.test` はプロキシ自身が答える予約ホスト名で、DNS には存在しない。そこへ届けばプロキシを通っている、TLS が通れば CA を信頼している、と分かる。各言語から同じことを確かめるワンライナー（requests、httpx、Node の fetch、Go）は `credshim doctor --snippets` で表示できる。
 
-失敗したときに見るところ：
+`fail` か `warn` の行にはチェックの名前があり、チェックごとに下に節がある。最後に、それらの節を表示するコマンドが出る。`credshim doctor --verbose` は、失敗した確認の出力もすべて表示する。
 
-- **Node。** 組み込みの fetch は `NODE_USE_ENV_PROXY=1`（Node 24 以降）がないと `HTTPS_PROXY` を見ない。古い Node では undici の `EnvHttpProxyAgent` を dispatcher に渡す。プロキシを通らずに失敗した（`ENOTFOUND credshim.test`）ときは、doctor がそう案内する。
-- **Python。** Apple 同梱の `/usr/bin/python3` の ssl モジュールは `SSL_CERT_FILE` を読まない。requests と httpx は `REQUESTS_CA_BUNDLE`・`SSL_CERT_FILE` を自分で読むので動く。
-- **Go。** Linux では `SSL_CERT_FILE` を読む。macOS では読まないことが多い（下の [macOS の Go 製ツール](#macos-の-go-製ツール)）。doctor は go.mod の無い一時ファイルを `go run` するので、macOS ではキーチェーンで CA を信頼させていない限り失敗と報告する。
-- **SSH。** `SSH_AUTH_SOCK` の先のエージェントに鍵の一覧を求め、CredShim の鍵（コメントが `credshim:<ルール名>`）が無ければ、別のエージェントを指していると警告する。PATH の `ssh` が OpenSSH 8.9 より前（session-bind を送らない）なら報告する。
-- **AWS。** PATH の `aws` で `credshim.test` にダミーのキーのリクエストを送り、プロキシを通って CA を信頼しているかを見る。`AWS_CA_BUNDLE` は信頼ストアを置き換えるので、結合バンドルを指している必要がある。
-- **残った本物（files）。** `~/.ssh` の秘密鍵、`~/.aws/credentials`・`~/.aws/config` の本物のアクセスキーと `credential_process`・SSO のプロファイル、`~/.aws/sso/cache`・`~/.aws/cli/cache`、環境変数の本物のキーとセッショントークンを、パスとプロファイル名だけで報告する（値は出さない）。片付け方は [既存の認証情報を入れ替える](install.md#6-既存の認証情報を入れ替える)。
+### `proxy`
 
-## 403 や 429 が返る
+プロキシ経由で `credshim.test` から応答が無かったか、証明書が CA につながらなかった。プロキシが動いているか（`credshim-svc status`、お試し構成では `credshim run` の端末）と、`HTTPS_PROXY` がそのアドレスを指しているかを確かめる。
 
-CredShim が止めたリクエストは、上流へは何も送らずに 403 か 429 を返す。ボディは空（AWS だけは AWS の形式のエラー）なので、理由は監査ログで見る。
+### `env`
 
-| 監査ログの判定 | 状態 | 意味と対処 |
-| --- | --- | --- |
-| `deny` | 403 | ダミーが、そのルールの宛先ではないホストへ送られた。平文の HTTP で送った場合や、クラウドのメタデータのアドレスへの接続もこれ。宛先が正しいならルールの `host`・`port`・`path_prefix` を直す |
-| `not_allowed` | 403 | 宛先は合っているが、`allow_methods`・`allow_paths`（AWS は `operations`）の外。必要ならルールの許可リストに足す |
-| `limited` | 429 | `limits` の上限を超えた。`credshim-svc status` でカウンタを見る |
-| `misdirected` | 421 | 接続先と、リクエストの中の Host が食い違う |
-| `error` | 500・502 | 差し替えに失敗した（ルールの秘密が登録されていない、空など）か、AWS SSO のロールの認証情報を取れなかった。理由はサービスのログに出る |
-| `tunnel` | 502 | ルールの無いホストへの CONNECT で、プロキシが上流へ TCP で繋げなかった（名前解決できない、接続を拒否された、タイムアウト）。理由はサービスのログに出る |
+アプリに要る環境変数が無いか、違うファイルを指している。`. /etc/credshim/env`（お試し構成では `eval "$(credshim env)"`）で読み込む。`SSL_CERT_FILE` と `AWS_CA_BUNDLE` は信頼ストアを置き換えるので、CA 単体ではなく結合バンドルを指す必要がある。
 
-ルールのあるホストなのに `inject` も `deny` も出ず、アプリ側で TLS の証明書エラーになるときは、そのアプリがプロキシの環境変数か CA を読んでいない。`credshim doctor` で確かめる。
+### `curl`
+
+curl がプロキシを通って `credshim.test` に届かなかったか、CA を信頼しなかった。curl は `HTTPS_PROXY` と `SSL_CERT_FILE`（か `CURL_CA_BUNDLE`）を読む。
+
+### `python`
+
+Apple 同梱の `/usr/bin/python3` の ssl モジュールは `SSL_CERT_FILE` を読まない。requests と httpx は `REQUESTS_CA_BUNDLE`・`SSL_CERT_FILE` を自分で読むので動く。
+
+### `node`
+
+組み込みの fetch は `NODE_USE_ENV_PROXY=1`（Node 24 以降）がないと `HTTPS_PROXY` を見ない。古い Node では undici の `EnvHttpProxyAgent` を dispatcher に渡す。プロキシを通らずに失敗した（`ENOTFOUND credshim.test`）ときは、doctor がそう案内する。Node は `NODE_EXTRA_CA_CERTS` で CA を信頼する。
+
+### `go`
+
+Linux では `SSL_CERT_FILE` を読む。macOS では読まないことが多い（下の [macOS の Go 製ツール](#macos-の-go-製ツール)）。doctor は go.mod の無い一時ファイルを `go run` するので、macOS ではキーチェーンで CA を信頼させていない限り失敗と報告する。
+
+### `ssh`
+
+`SSH_AUTH_SOCK` の先のエージェントに鍵の一覧を求め、CredShim の鍵（コメントが `credshim:<ルール名>`）が無ければ、別のエージェントを指していると警告する。エージェントが応答しないときは、プロキシが動いているかと、この uid が `[ssh] client_uids` に入っているかを確かめる。
+
+### `openssh`
+
+PATH の `ssh` が OpenSSH 8.9 より前か、OpenSSH ではない。CredShim のエージェントは session-bind を要し、OpenSSH は 8.9 からそれを送る。
+
+### `aws`
+
+PATH の `aws` で `credshim.test` にダミーのキーのリクエストを送り、プロキシを通って CA を信頼しているかを見る。`AWS_CA_BUNDLE` は信頼ストアを置き換えるので、結合バンドルを指している必要がある。
+
+### `files`
+
+`~/.ssh` の秘密鍵、`~/.aws/credentials`・`~/.aws/config` の本物のアクセスキーと `credential_process`・SSO のプロファイル、`~/.aws/sso/cache`・`~/.aws/cli/cache`、環境変数の本物のキーとセッショントークンを、パスとプロファイル名だけで報告する（値は出さない）。片付け方は [既存の認証情報を入れ替える](install.md#6-既存の認証情報を入れ替える)。
+
+## 止められたリクエスト
+
+CredShim がリクエストを止めると、上流へは何も送らずに自分で応答する。応答には、CredShim が止めたこと、理由、詳しく見るためのコマンドが入る。
+
+```text
+HTTP/1.1 403 Forbidden
+credshim-error: not_allowed
+credshim-request-id: 3f9c2a7b1e04
+content-type: text/plain; charset=utf-8
+
+credshim: POST /v1/files is outside the allow_methods or allow_paths of rule "openai"
+details: sudo -u credshim /usr/local/libexec/credshim/credshim tail --config /var/lib/credshim/config.toml --id 3f9c2a7b1e04
+docs: credshim docs troubleshooting#not_allowed
+```
+
+- `credshim-error` は止めた理由の種類で、種類ごとに下に節がある。
+- `details` は、このリクエストの監査ログの記録をすべて表示するコマンド。推奨構成では監査ログを読めるのは管理者だけなので、エージェントはこの行を人に渡す。お試し構成では開発ユーザーがそのまま実行できる。監査ログを設定していなければ、この行がそう伝える。
+- `docs` は、このページの該当する節を表示する。
+- AWS の SDK と aws CLI には、同じ内容が AWS の形式のエラー（`CredShimOperationNotAllowed` など）のメッセージとして届く。
+- ルールのあるホストを通った応答には、上流が答えたものも含めてすべて `credshim-request-id` が付く。上流に断られたリクエストも、本物の鍵に差し替わっていたかなどを引ける。
+
+ルールのあるホストなのに `credshim-error` が付かず、アプリ側で TLS の証明書エラーになるときは、そのアプリがプロキシの環境変数か CA を読んでいない。`credshim doctor` で確かめる。
+
+### `deny`
+
+403（AWS の一部は 400 か 413）。ダミーが、そのルールの宛先ではないホストへ送られた。平文の HTTP でダミーを送った場合や、リンクローカル・クラウドのメタデータのアドレス、AWS のサインインや SSO のエンドポイントへの接続もこれ。宛先が正しいならルールの `host`・`port`・`path_prefix` を直す。AWS はメッセージに理由が出る（認証情報を発行する操作など）。
+
+### `not_allowed`
+
+403。宛先は合っているが、`allow_methods`・`allow_paths`（AWS は `operations`）の外。許可するべきものなら、ルールの許可リストに足す。
+
+### `limited`
+
+429。`limits` の上限（`per_minute`・`per_day`・`concurrent`）を超えた。1行目がどの上限か、いつ再試行できるかを言い、`Retry-After` が同じ待ち時間を秒で返す（`concurrent` には無い。そのルールのリクエストが1つ終われば再試行できる）。それより前に再試行しても同じく止まる。`credshim-svc status` でカウンタを見る。
+
+### `misdirected`
+
+421。接続を開いたホストと、リクエストの中の Host が食い違う。または base URL のリスナーへのリクエストが別のホストを名乗っている。
+
+### `error`
+
+500 か 502。CredShim 自身の処理ができなかった。ルールの秘密が登録されていない・空、AWS SSO のロールの認証情報を取れなかった（`credshim aws sso login` が要るときはメッセージがそう言う）、再署名できなかった、上流が圧縮した応答を返して秘密を消せなかった、のどれか。
+
+### `upstream`
+
+502。プロキシが上流へ繋げなかったか、上流へのリクエストが失敗した（名前解決できない、接続を拒否された、タイムアウト、上流の証明書を検証できない）。1行目にエラーが出る。監査ログでは、ルールの無いホストへの CONNECT は `tunnel` と記録される。
+
+### `rejected`
+
+400、404、405、503。リクエストそのものを扱えなかった。プロキシへのリクエストとして正しくない、base URL のリスナーでどのルールの `base_url_prefix` もパスに合わない、AWS のリクエストボディのバッファが埋まっている（少し待って再試行する）、のどれか。
 
 ## macOS の Go 製ツール
 

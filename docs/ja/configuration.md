@@ -66,6 +66,20 @@ sudo $bin service reload
 | --- | --- |
 | `[[rule]]`、`[scrub]`、AWS（`[aws]`、`[[aws_key]]`、`[[aws_sso_session]]`、`[[aws_sso_role]]`） | `[listen]`、`[ca]`、`[secrets]`、`[audit]`、`[status]`、SSH（`[ssh]`、`[[ssh_key]]`）、OAuth（`[[oauth]]`、`[vault]`、`[limits]`） |
 
+## 下書きを確かめる
+
+`credshim config check <ファイル>` は、秘密ストア・CA・ファイルの権限を読まずに設定ファイルを確かめる。本物の設定を読めない開発ユーザーやコーディングエージェントでも、下書きに対して実行できる。下書きには足すセクションだけを書けばよい（`credshim preset` の出力など）。
+
+```sh
+credshim preset openai > draft.toml
+credshim config check draft.toml
+```
+
+- 見つけた問題をまとめて挙げ、それぞれに読む `credshim docs` の節を添える。設定のエラーは、どのコマンドでも、ファイルのどのセクションにあるかに応じた節を示す。
+- 下書きに問題が無ければ、各キーの行き先を表示する。ルールごとに、秘密、宛先、許可するメソッド・パス、上限。プリセットに無い宛先には `!!` が付くので、反映する前にサービスのドキュメントで確かめる。
+- 続けて、反映する手順を表示する。登録する秘密、ログインする AWS SSO のセッション、再読み込みのコマンド。これらは管理者のセッションで実行する。`secret set` と `aws sso login` は端末の前の人が打つ。
+- 今の設定にあるものとの衝突（ルール名の重複など）は分からない。`service reload` が反映の前に設定全体を確かめ、失敗すれば動いている設定のまま続ける。
+
 ## base URL モード
 
 プロキシの環境変数や独自の CA を扱えないクライアント向けのモード。`http://127.0.0.1:8788/openai/...` を `https://api.openai.com/...` に決まった対応で転送するリバースプロキシで、ルール（宛先、許可リスト、上限、スクラブ）はそのまま掛かる。開発用の CA は要らない。
@@ -136,11 +150,12 @@ socket = "/var/lib/credshim/status.sock"
 ```
 
 - `credshim-svc tail` は監査ログをライブで表示する。エージェントがいまどこを呼んでいるか、何が拒否されたかが分かる。
+- `credshim-svc tail --id <id>` は1件のリクエストの記録をすべて表示する。CredShim が止めた応答には、その id とこのコマンドが入る（[止められたリクエスト](troubleshooting.md#止められたリクエスト)）。
 - `credshim-svc status` はルールごとのカウンタを表示する。
 
 どちらにも秘密やダミーの値は出ない。どちらも専用ユーザーだけが読める場所にあるので、開発ユーザーからは見えない。
 
 ```text
-2026-09-30T03:31:37.5Z inject      200 POST https://api.openai.com:443/v1/chat/completions [openai] via connect
-2026-09-30T03:31:40.1Z deny        403 POST https://attacker.example:443/collect [openai] via connect
+2026-09-30T03:31:37.5Z inject      200 POST https://api.openai.com:443/v1/chat/completions [openai] via connect id=8d41c07a2b9e
+2026-09-30T03:31:40.1Z deny        403 POST https://attacker.example:443/collect [openai] via connect id=3f9c2a7b1e04
 ```

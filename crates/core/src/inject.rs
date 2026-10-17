@@ -11,7 +11,7 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_encode};
 use secrecy::{ExposeSecret, SecretString};
 use zeroize::Zeroizing;
 
-use crate::policy::{Limiter, Permit};
+use crate::policy::{Limiter, OverLimit, Permit};
 use crate::rule::{Location, Rule, SecretRef};
 use crate::rules::{self, Decision, Destination, Edit, RuleSet};
 use crate::scan;
@@ -171,7 +171,7 @@ impl Injector {
             .collect()
     }
 
-    pub fn admit(&self, applied: &[String]) -> Result<Permit, String> {
+    pub fn admit(&self, applied: &[String]) -> Result<Permit, OverLimit> {
         let limits = applied.iter().filter_map(|name| {
             let rule = self.rules.rules().iter().find(|rule| rule.name() == name)?;
             Some((rule.name(), rule.policy().limits()))

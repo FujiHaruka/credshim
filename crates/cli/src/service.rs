@@ -7,18 +7,23 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, bail};
 
 const UPGRADE: &str = include_str!("../../../scripts/install.sh");
+const VERIFY: &str = include_str!("../../../scripts/stage-b/verify.sh");
 #[cfg(target_os = "linux")]
 const SETUP: &str = include_str!("../../../scripts/stage-b/setup-linux.sh");
 #[cfg(target_os = "linux")]
 const RELOAD: &str = include_str!("../../../scripts/stage-b/reload-linux.sh");
 #[cfg(target_os = "linux")]
 pub const INSTALLED: &str = "/usr/local/libexec/credshim/credshim";
+#[cfg(target_os = "linux")]
+pub const SERVICE_USER: &str = "credshim";
 #[cfg(target_os = "macos")]
 const SETUP: &str = include_str!("../../../scripts/stage-b/setup-macos.sh");
 #[cfg(target_os = "macos")]
 const RELOAD: &str = include_str!("../../../scripts/stage-b/reload-macos.sh");
 #[cfg(target_os = "macos")]
 pub const INSTALLED: &str = "/Library/CredShim/bin/credshim";
+#[cfg(target_os = "macos")]
+pub const SERVICE_USER: &str = "_credshim";
 
 pub fn install(print: bool, upgrade: bool, user: Option<String>) -> anyhow::Result<()> {
     if print {
@@ -84,6 +89,20 @@ pub fn upgrade(print: bool, version: Option<String>) -> anyhow::Result<()> {
     let version = version.unwrap_or_else(|| "latest".to_owned());
     run_script(UPGRADE, "credshim-service-upgrade", [OsStr::new(&version)])
         .context("service upgrade failed")
+}
+
+pub fn verify(print: bool) -> anyhow::Result<()> {
+    if print {
+        std::io::stdout().write_all(VERIFY.as_bytes())?;
+        return Ok(());
+    }
+    if rustix::process::geteuid().is_root() {
+        bail!(
+            "`credshim verify` checks what the developer user can reach; run it as that user, without sudo"
+        );
+    }
+    run_script(VERIFY, "credshim-verify", std::iter::empty::<&OsStr>())
+        .context("some isolation checks above failed")
 }
 
 fn run_script<'a>(

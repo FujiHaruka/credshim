@@ -2,6 +2,8 @@
 
 The proxy runs as a service under a dedicated OS user. The config, the secrets, and the CA private key live in `/var/lib/credshim`, which only that user can read. The developer user (the everyday OS user that runs agents and apps) can reach only `/etc/credshim`, which holds the public CA certificate and the environment variable files. This separation keeps agents from getting the real values.
 
+A coding agent can prepare most of this for you; see [Setting up with a coding agent](agent-setup.md).
+
 | | Linux | macOS |
 | --- | --- | --- |
 | Service user | `credshim` | `_credshim` |
@@ -142,13 +144,16 @@ Putting the dummy keys in every shell is not recommended. python-dotenv, Node's 
 
 ## 5. Verify the isolation (developer session)
 
-Run the repository's `scripts/stage-b/verify.sh` as the developer user. It checks that:
+Run `credshim verify` as the developer user (`credshim verify --print` shows the script it runs). It checks that:
 
 - The developer user is not an admin
 - It cannot read or write the config, the secrets (including the lock file), or the CA private key
 - It cannot modify the service definition or the proxy binary
 - It cannot write to the SSH agent's directory, and can list keys from the agent
 - `AWS_CA_BUNDLE` and `SSH_AUTH_SOCK` in `/etc/credshim/env` point to public locations, and the file contains no dummy keys
+- The proxy runs as the service user, the developer user cannot signal it or read its memory, and it refuses a tunnel to the cloud metadata address and to the AWS SSO portal (nothing leaves the machine for these two)
+
+Each `FAIL` line names what the developer user could reach. A failure about sudo or admin groups goes back to step 1; the others usually mean the installation was changed afterwards, and `sudo $bin service install` restores it.
 
 ## 6. Replace existing credentials
 

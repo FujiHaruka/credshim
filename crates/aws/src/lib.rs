@@ -14,7 +14,7 @@ pub mod sso;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
-use credshim_core::{Limiter, Permit};
+use credshim_core::{Limiter, OverLimit, Permit};
 use http::request::Parts;
 
 pub use auth::{AuthError, Scope, SigV4Auth};
@@ -77,14 +77,12 @@ impl Aws {
         }
     }
 
-    pub fn admit(&self, rule: &AwsRule) -> Option<Permit> {
-        self.limiter
-            .admit(
-                [(rule.name(), rule.limits())],
-                Instant::now(),
-                SystemTime::now(),
-            )
-            .ok()
+    pub fn admit(&self, rule: &AwsRule) -> Result<Permit, OverLimit> {
+        self.limiter.admit(
+            [(rule.name(), rule.limits())],
+            Instant::now(),
+            SystemTime::now(),
+        )
     }
 
     pub fn with_max_body(mut self, max_body: usize) -> Self {

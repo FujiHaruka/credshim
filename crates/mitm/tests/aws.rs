@@ -752,6 +752,16 @@ async fn operations_outside_the_allow_list_are_refused_with_an_aws_error() {
         "CredShimOperationNotAllowed"
     );
     assert!(text(&body).contains("ListTables"), "{}", text(&body));
+    assert_eq!(response_headers["credshim-error"], "not_allowed");
+    assert!(response_headers.contains_key("credshim-request-id"));
+    let message: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        message["message"]
+            .as_str()
+            .unwrap()
+            .ends_with("docs: credshim docs troubleshooting#not_allowed)"),
+        "{message}"
+    );
 
     f.mock.put_object(BUCKET, "kept.txt", b"kept".to_vec());
     let get = |path: &'static str| {

@@ -9,7 +9,7 @@ use credshim_secrets::{BackendConfig, SecretStore};
 
 use crate::config::Config;
 
-const RESTART_ONLY: [&str; 10] = [
+pub const RESTART_ONLY: [&str; 10] = [
     "listen", "ca", "secrets", "audit", "status", "ssh", "ssh_key", "oauth", "vault", "limits",
 ];
 

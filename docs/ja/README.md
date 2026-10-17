@@ -120,14 +120,20 @@ set -a; . /etc/credshim/keys.env; set +a         # ダミーのキー。お試�
 
 ダミーのキーをすべてのシェルに入れると、プロジェクトの .env に書いた別のキーが使われなくなることがある。プロジェクトごとの渡し方は [docs/install.md](install.md#ダミーのキーをプロジェクトに渡す)。
 
+導入そのものもコーディングエージェントに任せられる。[コーディングエージェントに導入を任せる](agent-setup.md) の1行をエージェントに渡せば、人がするのは、渡された管理者のコマンドの実行と本物のキーの入力になる。
+
+リクエストが失敗すると、CredShim の応答が理由と、詳しく見るコマンドを示す。エージェントが何が起きたかを見分ける方法と、`AGENTS.md` や `CLAUDE.md` に入れる文は [コーディングエージェント](agents.md) にある。`credshim docs` は、入っているバージョンのこのドキュメントを表示する。
+
 ## ドキュメント
 
 - [推奨構成の導入](install.md)：インストール、更新、アンインストール、既存の認証情報からの移行
+- [コーディングエージェントに導入を任せる](agent-setup.md)：エージェントに渡す1行と、エージェントが進める手順
 - [設定](configuration.md)：ルールの書き方、設定の反映、base URL モード、OAuth、監査ログ
 - [AWS](aws.md)：静的アクセスキーと IAM Identity Center（SSO）
 - [SSH エージェント](ssh.md)
 - [コンテナ分離](container.md)
-- [うまく動かないとき](troubleshooting.md)：`credshim doctor`、403・429 の調べ方、macOS の Go 製ツール
+- [うまく動かないとき](troubleshooting.md)：`credshim doctor`、止められたリクエスト、macOS の Go 製ツール
+- [コーディングエージェント](agents.md)：エージェントが持っているもの、リクエストが失敗したときの対処、エージェントへの指示に入れる文
 - [脅威モデル](threat-model.md)
 - [開発](development.md)
 

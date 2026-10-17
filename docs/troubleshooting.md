@@ -1,6 +1,6 @@
 # Troubleshooting
 
-First run `credshim doctor` in the developer session. To see why a request was refused, use `credshim-svc tail` in the admin session (in the trial setup, the terminal running `credshim run`). For `credshim-svc`, see [the install variables](install.md#set-the-variables).
+First run `credshim doctor` in the developer session. A request that CredShim refused says why in its response, along with the command that shows its audit log entry (see [Refused requests](#refused-requests)). To watch every request, use `credshim-svc tail` in the admin session (in the trial setup, `credshim tail`). For `credshim-svc`, see [the install variables](install.md#set-the-variables).
 
 ## credshim doctor
 
@@ -22,29 +22,98 @@ Checks, with this shell's environment as is, that curl, python3, node, go, ssh, 
 
 `credshim.test` is a reserved host name that the proxy itself answers; it does not exist in DNS. Reaching it shows that the traffic goes through the proxy, and a successful TLS handshake shows that the CA is trusted. `credshim doctor --snippets` prints one-liners that check the same thing from each language (requests, httpx, Node's fetch, Go).
 
-What to check when something fails:
+A line marked `fail` or `warn` names a check, and each check has a section below. At the end, doctor prints the command for each of those sections. `credshim doctor --verbose` also prints the full output of each failed probe.
 
-- **Node.** The built-in fetch does not look at `HTTPS_PROXY` without `NODE_USE_ENV_PROXY=1` (Node 24 and later). On older Node, pass undici's `EnvHttpProxyAgent` as the dispatcher. When the request failed without going through the proxy (`ENOTFOUND credshim.test`), doctor says so.
-- **Python.** The ssl module of Apple's bundled `/usr/bin/python3` does not read `SSL_CERT_FILE`. requests and httpx read `REQUESTS_CA_BUNDLE` and `SSL_CERT_FILE` themselves, so they work.
-- **Go.** On Linux, Go reads `SSL_CERT_FILE`. On macOS it often does not (see [Go tools on macOS](#go-tools-on-macos) below). doctor runs a temporary file with no go.mod through `go run`, so on macOS it reports a failure unless the CA is trusted in the keychain.
-- **SSH.** doctor asks the agent at `SSH_AUTH_SOCK` for its key list and, if there is no CredShim key (comment `credshim:<rule name>`), warns that it points at a different agent. It reports when `ssh` on PATH is older than OpenSSH 8.9 (which does not send session-bind).
-- **AWS.** doctor uses `aws` on PATH to send a request with the dummy key to `credshim.test`, and checks that it goes through the proxy and trusts the CA. `AWS_CA_BUNDLE` replaces the trust store, so it must point at the combined bundle.
-- **Leftover real credentials (files).** doctor reports private keys in `~/.ssh`, real access keys and `credential_process` and SSO profiles in `~/.aws/credentials` and `~/.aws/config`, `~/.aws/sso/cache` and `~/.aws/cli/cache`, and real keys and session tokens in environment variables, by path and profile name only (without printing the values). To clean them up, see [Replace existing credentials](install.md#6-replace-existing-credentials).
+### `proxy`
 
-## 403 or 429 responses
+doctor could not get an answer from `credshim.test` through the proxy, or the certificate did not chain to the CA. Check that the proxy is running (`credshim-svc status`, or the `credshim run` terminal in the trial setup) and that `HTTPS_PROXY` points at its address.
 
-For a request that CredShim stops, it returns 403 or 429 and sends nothing upstream. The body is empty (except for AWS, which gets an error in the AWS format), so check the audit log for the reason.
+### `env`
 
-| Audit log verdict | Status | Meaning and fix |
-| --- | --- | --- |
-| `deny` | 403 | A dummy was sent to a host that is not that rule's destination. Sending over plaintext HTTP and connecting to a cloud metadata address also land here. If the destination is correct, fix the rule's `host`, `port`, `path_prefix` |
-| `not_allowed` | 403 | The destination is right, but the request is outside `allow_methods`, `allow_paths` (`operations` for AWS). If needed, add it to the rule's allowlist |
-| `limited` | 429 | A limit in `limits` was exceeded. Check the counters with `credshim-svc status` |
-| `misdirected` | 421 | The connection target and the Host inside the request disagree |
-| `error` | 500, 502 | Replacing failed (the rule's secret is not registered, is empty, and so on), or the role credentials for AWS SSO could not be obtained. The reason is in the service log |
-| `tunnel` | 502 | On a CONNECT to a host with no rule, the proxy could not open a TCP connection upstream (name resolution failed, the connection was refused, timeout). The reason is in the service log |
+An environment variable that apps need is missing or points at the wrong file. Load the variables with `. /etc/credshim/env` (in the trial setup, `eval "$(credshim env)"`). `SSL_CERT_FILE` and `AWS_CA_BUNDLE` must point at the combined bundle, not the CA alone, because they replace the trust store.
 
-If the host has a rule but neither `inject` nor `deny` appears, and the app gets a TLS certificate error, the app does not read the proxy environment variables or the CA. Check with `credshim doctor`.
+### `curl`
+
+curl did not reach `credshim.test` through the proxy or did not trust the CA. curl reads `HTTPS_PROXY` and `SSL_CERT_FILE` (or `CURL_CA_BUNDLE`).
+
+### `python`
+
+The ssl module of Apple's bundled `/usr/bin/python3` does not read `SSL_CERT_FILE`. requests and httpx read `REQUESTS_CA_BUNDLE` and `SSL_CERT_FILE` themselves, so they work.
+
+### `node`
+
+The built-in fetch does not look at `HTTPS_PROXY` without `NODE_USE_ENV_PROXY=1` (Node 24 and later). On older Node, pass undici's `EnvHttpProxyAgent` as the dispatcher. When the request failed without going through the proxy (`ENOTFOUND credshim.test`), doctor says so. Node trusts the CA through `NODE_EXTRA_CA_CERTS`.
+
+### `go`
+
+On Linux, Go reads `SSL_CERT_FILE`. On macOS it often does not (see [Go tools on macOS](#go-tools-on-macos) below). doctor runs a temporary file with no go.mod through `go run`, so on macOS it reports a failure unless the CA is trusted in the keychain.
+
+### `ssh`
+
+doctor asks the agent at `SSH_AUTH_SOCK` for its key list and, if there is no CredShim key (comment `credshim:<rule name>`), warns that it points at a different agent. If the agent does not answer, check that the proxy is running and that this uid is in `[ssh] client_uids`.
+
+### `openssh`
+
+The `ssh` on PATH is older than OpenSSH 8.9, or is not OpenSSH. The CredShim agent needs session-bind, which OpenSSH sends from 8.9.
+
+### `aws`
+
+doctor uses `aws` on PATH to send a request with the dummy key to `credshim.test`, and checks that it goes through the proxy and trusts the CA. `AWS_CA_BUNDLE` replaces the trust store, so it must point at the combined bundle.
+
+### `files`
+
+doctor reports private keys in `~/.ssh`, real access keys and `credential_process` and SSO profiles in `~/.aws/credentials` and `~/.aws/config`, `~/.aws/sso/cache` and `~/.aws/cli/cache`, and real keys and session tokens in environment variables, by path and profile name only (without printing the values). To clean them up, see [Replace existing credentials](install.md#6-replace-existing-credentials).
+
+## Refused requests
+
+When CredShim stops a request, it sends nothing upstream and answers itself. The response says that it came from CredShim, why, and which commands show more.
+
+```text
+HTTP/1.1 403 Forbidden
+credshim-error: not_allowed
+credshim-request-id: 3f9c2a7b1e04
+content-type: text/plain; charset=utf-8
+
+credshim: POST /v1/files is outside the allow_methods or allow_paths of rule "openai"
+details: sudo -u credshim /usr/local/libexec/credshim/credshim tail --config /var/lib/credshim/config.toml --id 3f9c2a7b1e04
+docs: credshim docs troubleshooting#not_allowed
+```
+
+- `credshim-error` is the kind of refusal, and each kind has a section below.
+- `details` is the command that prints the whole audit log entry of this request. In the recommended setup only the admin can read the audit log, so an agent passes this line to a person. In the trial setup, the developer user can run it as is. If no audit log is configured, this line says so.
+- `docs` prints the matching section of this page.
+- AWS SDKs and the aws CLI get the same text as the message of an AWS-format error (for example, `CredShimOperationNotAllowed`).
+- Every response that went through a rule's host carries `credshim-request-id`, including the ones the upstream answered, so you can also look up a request that the upstream refused (for example, to see whether the real key was put in).
+
+If the host has a rule but the app gets a TLS certificate error and no `credshim-error`, the app does not read the proxy environment variables or the CA. Check with `credshim doctor`.
+
+### `deny`
+
+403 (400 or 413 for some AWS refusals). A dummy was sent to a host that is not that rule's destination, a dummy was sent over plain HTTP, or the target is a link-local or cloud metadata address or an AWS sign-in or SSO endpoint. If the destination is correct, fix the rule's `host`, `port`, `path_prefix`. For AWS, the message gives the reason (for example, an operation that issues credentials).
+
+### `not_allowed`
+
+403. The destination is right, but the request is outside `allow_methods`, `allow_paths` (`operations` for AWS). If it should be allowed, add it to the rule's allowlist.
+
+### `limited`
+
+429. A limit in `limits` (`per_minute`, `per_day`, `concurrent`) was exceeded. The first line names the limit and says when to retry, and `Retry-After` gives the same wait in seconds (for `concurrent`, there is none: retry when one of the rule's requests finishes). Retrying before then fails again. Check the counters with `credshim-svc status`.
+
+### `misdirected`
+
+421. The host the connection was opened to and the Host inside the request disagree, or a request to the base URL listener names another host.
+
+### `error`
+
+500 or 502. CredShim could not complete its own part: the rule's secret is not registered or is empty, the AWS SSO role credentials could not be obtained (the message says when `credshim aws sso login` is needed), the request could not be re-signed, or the upstream sent a compressed response that cannot be scrubbed of secrets.
+
+### `upstream`
+
+502. The proxy could not connect to the upstream or the request to it failed (name resolution failed, the connection was refused, timeout, or the upstream's certificate could not be verified). The first line has the error. In the audit log, a CONNECT to a host with no rule appears as `tunnel`.
+
+### `rejected`
+
+400, 404, 405, or 503. The request itself could not be handled: it was not a valid proxy request, no rule's `base_url_prefix` matched the path on the base URL listener, or too many AWS request bodies were being buffered (retry shortly).
 
 ## Go tools on macOS
 

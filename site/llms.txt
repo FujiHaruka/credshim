@@ -4,17 +4,21 @@
 
 It sits in between as an HTTPS proxy through `HTTPS_PROXY` (HTTP/1.1, HTTP/2, SSE, WebSocket) or by replacing an API's base URL, and it also handles SSH keys (as an ssh-agent), AWS access keys and IAM Identity Center (SSO), and OAuth tokens. Run as a dedicated service user (the recommended setup), an agent cannot extract the real values; it can still use them within what the rules allow.
 
+When a request fails, CredShim's response says why and which command shows more, and `credshim docs` prints these docs for the installed version without network access. If you are an agent asked to set up CredShim, follow Setting up with a coding agent. If you are an agent working behind CredShim, read Coding agents first.
+
 Each page below is the Markdown source of the HTML page with the same name ending in `.html`. Japanese versions are at the same file names under `/credshim/ja/`.
 
 ## Docs
 
 - [Overview](https://fujiharuka.github.io/credshim/en/index.md): what CredShim does, what it protects and what it does not, supported platforms, the trial setup, presets, and using it with coding agents
+- [Coding agents](https://fujiharuka.github.io/credshim/en/agents.md): what an agent behind CredShim holds, how to tell what happened when a request fails, and a note for AGENTS.md or CLAUDE.md
 - [Installing the recommended setup](https://fujiharuka.github.io/credshim/en/install.md): install, update, uninstall, and migrating from existing credentials
+- [Setting up with a coding agent](https://fujiharuka.github.io/credshim/en/agent-setup.md): the steps an agent follows to survey the machine, draft and check the configuration, hand the admin commands to a person, and verify the result
 - [Configuration](https://fujiharuka.github.io/credshim/en/configuration.md): writing rules, applying changes, base URL mode, OAuth, audit log
 - [AWS](https://fujiharuka.github.io/credshim/en/aws.md): static access keys and IAM Identity Center (SSO)
 - [SSH agent](https://fujiharuka.github.io/credshim/en/ssh.md): CredShim as an ssh-agent that keeps the keys and signs only for allowed hosts and users
 - [Container isolation](https://fujiharuka.github.io/credshim/en/container.md): routing all agent traffic through the proxy's checks and audit
-- [Troubleshooting](https://fujiharuka.github.io/credshim/en/troubleshooting.md): `credshim doctor`, investigating 403 and 429, Go tools on macOS
+- [Troubleshooting](https://fujiharuka.github.io/credshim/en/troubleshooting.md): `credshim doctor` and its checks, refused requests (`credshim-error` kinds), Go tools on macOS
 - [Threat model and design principles](https://fujiharuka.github.io/credshim/en/threat-model.md): what an agent can and cannot do in each setup
 
 ## Optional

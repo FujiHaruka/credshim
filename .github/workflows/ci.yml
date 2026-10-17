@@ -3,9 +3,9 @@ name: CI
 on:
   push:
     branches: [main]
-    paths-ignore: ['docs/**', '**.md', 'LICENSE-*', 'site/**', 'scripts/build-docs-site.sh', '.github/workflows/docs-site.yml']
+    paths: ['**', '!**.md', 'README.md', 'docs/**', '!LICENSE-*', '!site/**', '!scripts/build-docs-site.sh', '!.github/workflows/docs-site.yml']
   pull_request:
-    paths-ignore: ['docs/**', '**.md', 'LICENSE-*', 'site/**', 'scripts/build-docs-site.sh', '.github/workflows/docs-site.yml']
+    paths: ['**', '!**.md', 'README.md', 'docs/**', '!LICENSE-*', '!site/**', '!scripts/build-docs-site.sh', '!.github/workflows/docs-site.yml']
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -113,13 +113,12 @@ jobs:
           for file in config.toml secrets.age secrets.lock secrets.key ca/ca-key.pem audit.jsonl; do
             sudo test -e "/var/lib/credshim/$file" || { echo "missing /var/lib/credshim/$file" >&2; exit 1; }
           done
-      - run: install -m 0755 scripts/stage-b/verify.sh /tmp/verify.sh
-      - name: a non-sudo development user cannot read or write the proxy's state
-        run: sudo -u devtest /tmp/verify.sh
+      - name: a non-sudo development user cannot read or write the proxy's state, and the proxy refuses what it must
+        run: sudo -u devtest /usr/local/libexec/credshim/credshim verify
       - name: the development user passes doctor from the public env file
         run: sudo -u devtest bash -c '. /etc/credshim/env && /usr/local/libexec/credshim/credshim doctor --no-runtimes'
       - name: verify flags a development user who can sudo
-        run: "! /tmp/verify.sh"
+        run: "! /usr/local/libexec/credshim/credshim verify"
       - name: service reload applies the config in the running process
         run: |
           pid=$(systemctl show -p MainPID --value credshim.service)

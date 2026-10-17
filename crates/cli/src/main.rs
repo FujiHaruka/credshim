@@ -1,6 +1,9 @@
 mod config;
+mod docs;
 mod doctor;
+mod draft;
 mod env;
+mod handoff;
 mod harden;
 mod leftovers;
 mod preset;
@@ -14,15 +17,16 @@ use std::io::{IsTerminal, Write};
 use std::net::SocketAddr;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, bail};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use credshim_aws::{Aws, AwsCredentials, Signer, SsoOptions, SsoProvider, SsoSession};
 use credshim_core::{BaseUrls, Rule, RuleSet, Secrets};
 use credshim_mitm::{
-    AUDIT_TARGET, CertificateAuthority, Proxy, ProxyConfig, Reloader, Stats, Upstream,
-    UpstreamTransport,
+    AUDIT_TARGET, CertificateAuthority, Details, Guide, Proxy, ProxyConfig, Reloader, Stats,
+    Upstream, UpstreamTransport,
 };
 use credshim_oauth::{DEFAULT_MAX_BODY, OAuth, Provider, Vault};
 use credshim_secrets::SecretStore;
@@ -49,78 +53,173 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(about = "Run the proxy (as the service user in the recommended setup)")]
     Run {
-        #[arg(long, value_name = "FILE")]
+        #[arg(long, value_name = "FILE", help = CONFIG_HELP)]
         config: Option<PathBuf>,
-        #[arg(long)]
+        #[arg(long, help = "Address to listen on, instead of [listen] addr")]
         listen: Option<SocketAddr>,
-        #[arg(long, conflicts_with = "listen")]
+        #[arg(
+            long,
+            conflicts_with = "listen",
+            help = "Check that the config, the CA and every secret the rules name load, then exit"
+        )]
         check: bool,
     },
+    #[command(about = "Create the development CA or write a trust bundle")]
     Ca {
         #[command(subcommand)]
         command: CaCommand,
     },
+    #[command(about = "Store real secrets (a person at a terminal) or list their names")]
     Secret {
         #[command(subcommand)]
         command: SecretCommand,
     },
+    #[command(about = "Show the running proxy's counters for each rule")]
     Status {
-        #[arg(long, value_name = "FILE")]
+        #[arg(long, value_name = "FILE", help = CONFIG_HELP)]
         config: Option<PathBuf>,
     },
+    #[command(about = "Print a ready-made rule to add to the config; the next steps go to stderr")]
     Preset {
         #[arg(value_parser = clap::builder::PossibleValuesParser::new(
             preset::names()
         ))]
         name: String,
     },
+    #[command(about = "Check a config file, such as a draft, without the secrets or the CA")]
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    #[command(about = "Print the shell variables that send a process through the proxy")]
     Env {
-        #[arg(long, value_name = "FILE")]
+        #[arg(long, value_name = "FILE", help = CONFIG_HELP)]
         config: Option<PathBuf>,
-        #[arg(long, value_name = "FILE")]
+        #[arg(
+            long,
+            value_name = "FILE",
+            help = "CA certificate to point to (default: the one in the CA directory)"
+        )]
         ca_cert: Option<PathBuf>,
-        #[arg(long, value_name = "FILE")]
+        #[arg(
+            long,
+            value_name = "FILE",
+            help = "Trust bundle to point to (default: the one in the CA directory)"
+        )]
         bundle: Option<PathBuf>,
-        #[arg(long, conflicts_with_all = ["ca_cert", "bundle"])]
+        #[arg(
+            long,
+            conflicts_with_all = ["ca_cert", "bundle"],
+            help = "Print the variables that carry the dummy keys instead"
+        )]
         keys: bool,
     },
+    #[command(about = "Check that this shell goes through the proxy and trusts its CA")]
     Doctor {
-        #[arg(long, value_name = "FILE")]
+        #[arg(long, value_name = "FILE", help = CONFIG_HELP)]
         config: Option<PathBuf>,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Proxy address (default: from HTTPS_PROXY, then from the config)"
+        )]
         proxy: Option<SocketAddr>,
-        #[arg(long, value_name = "FILE")]
+        #[arg(
+            long,
+            value_name = "FILE",
+            help = "CA certificate (default: NODE_EXTRA_CA_CERTS, then the config's CA directory)"
+        )]
         ca_cert: Option<PathBuf>,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Print one-liners that run the same check from each language, then exit"
+        )]
         snippets: bool,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Skip the checks that run python, node, go and the aws CLI"
+        )]
         no_runtimes: bool,
+        #[arg(long, help = "Print the whole output of every check that did not pass")]
+        verbose: bool,
     },
+    #[command(about = "Read this version's documentation, built into the binary")]
+    Docs {
+        #[arg(
+            value_name = "PAGE[#SECTION]",
+            help = "Page to read, optionally one section of it (default: list the pages)"
+        )]
+        topic: Option<String>,
+        #[arg(long, help = "List the page's sections instead")]
+        toc: bool,
+        #[arg(long, value_enum, help = "Language (default: from LANG)")]
+        lang: Option<docs::Lang>,
+    },
+    #[command(about = "Show the audit log, or the entry of one request")]
     Tail {
-        #[arg(long, value_name = "FILE")]
+        #[arg(long, value_name = "FILE", help = CONFIG_HELP)]
         config: Option<PathBuf>,
-        #[arg(short = 'n', long, default_value_t = 10)]
+        #[arg(
+            short = 'n',
+            long,
+            default_value_t = 10,
+            help = "Entries to show before following"
+        )]
         lines: usize,
-        #[arg(long)]
+        #[arg(long, help = "Exit after showing them instead of following")]
         no_follow: bool,
+        #[arg(
+            long,
+            value_name = "REQUEST_ID",
+            conflicts_with_all = ["lines", "no_follow"],
+            help = "Show the entry of the request with this credshim-request-id"
+        )]
+        id: Option<String>,
     },
+    #[command(
+        about = "Check, as the developer user, that the recommended setup keeps the real keys out of reach"
+    )]
+    Verify {
+        #[arg(long, help = "Print the check script instead of running it")]
+        print: bool,
+    },
+    #[command(about = "Install, reload or upgrade the system service (admin, with sudo)")]
     Service {
         #[command(subcommand)]
         command: ServiceCommand,
     },
+    #[command(about = "Manage the keys of the SSH agent")]
     Ssh {
         #[command(subcommand)]
         command: SshCommand,
     },
+    #[command(about = "Log in to AWS IAM Identity Center")]
     Aws {
         #[command(subcommand)]
         command: AwsCommand,
     },
 }
 
+const CONFIG_HELP: &str = "Config file (default: the service's, or ~/.config/credshim/config.toml)";
+
+#[derive(Subcommand)]
+enum ConfigCommand {
+    #[command(
+        about = "Check a config file without reading the secret store, the CA or file permissions, and print the commands that apply it"
+    )]
+    Check {
+        #[arg(
+            value_name = "FILE",
+            help = "Config file to check; a draft with only the new sections works"
+        )]
+        file: PathBuf,
+    },
+}
+
 #[derive(Subcommand)]
 enum AwsCommand {
+    #[command(about = "Log in to or out of an IAM Identity Center session")]
     Sso {
         #[command(subcommand)]
         command: SsoCommand,
@@ -129,83 +228,202 @@ enum AwsCommand {
 
 #[derive(Subcommand)]
 enum SsoCommand {
+    #[command(about = "Log in with a browser (a person at a terminal)")]
     Login {
+        #[arg(help = "Name of the [[aws_sso_session]]")]
         session: String,
-        #[arg(long, value_name = "FILE")]
+        #[arg(long, value_name = "FILE", help = CONFIG_HELP)]
         config: Option<PathBuf>,
     },
+    #[command(about = "Log out and remove the stored login")]
     Logout {
+        #[arg(help = "Name of the [[aws_sso_session]]")]
         session: String,
-        #[arg(long, value_name = "FILE")]
+        #[arg(long, value_name = "FILE", help = CONFIG_HELP)]
         config: Option<PathBuf>,
     },
 }
 
 #[derive(Subcommand)]
 enum SshCommand {
+    #[command(about = "Generate a key in the secret store and print its public key")]
     Keygen {
+        #[arg(help = "Secret name to store the private key under")]
         name: String,
-        #[arg(long, value_name = "FILE")]
+        #[arg(long, value_name = "FILE", help = CONFIG_HELP)]
         config: Option<PathBuf>,
     },
 }
 
 #[derive(Subcommand)]
 enum ServiceCommand {
+    #[command(about = "Install the service with its own user, or restart it to apply settings")]
     Install {
-        #[arg(long)]
+        #[arg(long, help = "Print the setup script instead of running it")]
         print: bool,
-        #[arg(long)]
+        #[arg(long, help = "Replace the installed binary with this one")]
         upgrade: bool,
-        #[arg(long, value_name = "NAME")]
+        #[arg(
+            long,
+            value_name = "NAME",
+            help = "Developer user allowed to use the SSH agent (default: SUDO_USER)"
+        )]
         user: Option<String>,
     },
+    #[command(
+        about = "Apply a changed config; it is checked first, and on failure nothing changes"
+    )]
     Reload {
-        #[arg(long)]
+        #[arg(long, help = "Print the reload script instead of running it")]
         print: bool,
     },
+    #[command(about = "Download a release, replace the installed binary and restart the service")]
     Upgrade {
-        #[arg(value_name = "VERSION")]
+        #[arg(value_name = "VERSION", help = "Release to install (default: latest)")]
         version: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Print the upgrade script instead of running it")]
         print: bool,
     },
 }
 
 #[derive(Subcommand)]
 enum CaCommand {
+    #[command(about = "Create the development CA")]
     Init {
-        #[arg(long, value_name = "DIR")]
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "CA directory (default: ca/ in the config directory)"
+        )]
         dir: Option<PathBuf>,
     },
+    #[command(about = "Write the OS trust store plus the development CA as one PEM bundle")]
     Bundle {
-        #[arg(long, value_name = "DIR")]
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "CA directory (default: ca/ in the config directory)"
+        )]
         dir: Option<PathBuf>,
-        #[arg(long, value_name = "FILE")]
+        #[arg(long, value_name = "FILE", help = "File to write (default: stdout)")]
         out: Option<PathBuf>,
     },
 }
 
 #[derive(Subcommand)]
 enum SecretCommand {
+    #[command(about = "Store a real secret, typed by a person at a terminal (never piped)")]
     Set {
+        #[arg(help = "Secret name, as the rules name it")]
         name: String,
-        #[arg(long, value_name = "FILE")]
+        #[arg(long, value_name = "FILE", help = CONFIG_HELP)]
         config: Option<PathBuf>,
     },
+    #[command(about = "List the stored secret names and when they changed (never the values)")]
     List {
-        #[arg(long, value_name = "FILE")]
+        #[arg(long, value_name = "FILE", help = CONFIG_HELP)]
         config: Option<PathBuf>,
     },
 }
 
+const COMMAND_TOPICS: &[(&str, &str)] = &[
+    ("run", config::CONFIG_TOPIC),
+    ("ca", "install#2-install-admin-session"),
+    ("secret", "configuration#secret-stores"),
+    ("status", credshim_mitm::guide::AUDIT_LOG_TOPIC),
+    ("preset", "configuration#writing-rules"),
+    ("config", draft::TOPIC),
+    ("env", "install#4-use-it-developer-session"),
+    ("doctor", "troubleshooting#credshim-doctor"),
+    ("docs", ""),
+    ("tail", credshim_mitm::guide::AUDIT_LOG_TOPIC),
+    ("verify", "install#5-verify-the-isolation-developer-session"),
+    ("service", "install"),
+    ("service reload", "configuration#applying-changes"),
+    (
+        "service upgrade",
+        "install#updating-to-a-new-release-admin-session",
+    ),
+    ("ssh", "ssh#configuration"),
+    ("aws", "aws"),
+    ("aws sso", "aws#aws-iam-identity-center-sso"),
+];
+
+fn command_topic(path: &str) -> &'static str {
+    let mut path = path;
+    loop {
+        if let Some((_, topic)) = COMMAND_TOPICS.iter().find(|(name, _)| *name == path) {
+            return topic;
+        }
+        match path.rsplit_once(' ') {
+            Some((parent, _)) => path = parent,
+            None => return "troubleshooting",
+        }
+    }
+}
+
+fn docs_command(topic: &str) -> String {
+    format!("credshim docs {topic}").trim_end().to_string()
+}
+
+fn with_docs_footers(command: clap::Command, path: &str) -> clap::Command {
+    let names: Vec<String> = command
+        .get_subcommands()
+        .map(|sub| sub.get_name().to_string())
+        .collect();
+    names.into_iter().fold(command, |command, name| {
+        let path = format!("{path} {name}").trim_start().to_string();
+        command.mut_subcommand(&name, |sub| {
+            with_docs_footers(sub, &path)
+                .after_help(format!("Docs: {}", docs_command(command_topic(&path))))
+        })
+    })
+}
+
+fn cli() -> clap::Command {
+    with_docs_footers(
+        Cli::command().after_help(
+            "Docs: credshim docs (built in, for this version); when something fails: credshim docs troubleshooting",
+        ),
+        "",
+    )
+}
+
+fn command_path(matches: &clap::ArgMatches) -> String {
+    let mut path = Vec::new();
+    let mut matches = matches;
+    while let Some((name, sub)) = matches.subcommand() {
+        path.push(name);
+        matches = sub;
+    }
+    path.join(" ")
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> ExitCode {
+    let matches = cli().get_matches();
+    let path = command_path(&matches);
+    let parsed = Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
+    match dispatch(parsed.command).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            let mut stderr = std::io::stderr();
+            let _ = writeln!(stderr, "Error: {err:?}");
+            let topic = err
+                .downcast_ref::<config::Invalid>()
+                .map_or_else(|| command_topic(&path), |invalid| invalid.topic);
+            let _ = writeln!(stderr, "docs: {}", docs_command(topic));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn dispatch(command: Command) -> anyhow::Result<()> {
     harden::disable_core_dumps()?;
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .map_err(|_| anyhow::anyhow!("a rustls crypto provider is already installed"))?;
-    match Cli::parse().command {
+    match command {
         Command::Run {
             config,
             check: true,
@@ -243,6 +461,17 @@ async fn main() -> anyhow::Result<()> {
         Command::Preset { name } => {
             let rendered = preset::render(&name).context("unknown preset")?;
             write!(std::io::stdout(), "{rendered}")?;
+            write!(std::io::stderr(), "{}", preset_steps(&name, &rendered)?)?;
+            Ok(())
+        }
+        Command::Config {
+            command: ConfigCommand::Check { file },
+        } => {
+            write!(
+                std::io::stdout(),
+                "{}",
+                draft::check(&file, &handoff::Handoff::current())?
+            )?;
             Ok(())
         }
         Command::Env {
@@ -263,22 +492,37 @@ async fn main() -> anyhow::Result<()> {
             ca_cert,
             snippets,
             no_runtimes,
+            verbose,
         } => {
             if snippets {
                 write!(std::io::stdout(), "{}", doctor::snippets())?;
                 return Ok(());
             }
-            run_doctor(config.as_deref(), proxy, ca_cert, !no_runtimes).await
+            run_doctor(config.as_deref(), proxy, ca_cert, !no_runtimes, verbose).await
+        }
+        Command::Docs { topic, toc, lang } => {
+            let lang = lang.unwrap_or_else(docs::Lang::from_env);
+            write!(
+                std::io::stdout(),
+                "{}",
+                docs::render(topic.as_deref(), toc, lang)?
+            )?;
+            Ok(())
         }
         Command::Tail {
             config,
             lines,
             no_follow,
+            id,
         } => {
             let config = load_config(config.as_deref())?.config;
             let path = config.audit.path.context("no [audit] path is configured")?;
-            tail::run(&path, lines, !no_follow).await
+            match id {
+                Some(id) => tail::show(&path, &id),
+                None => tail::run(&path, lines, !no_follow).await,
+            }
         }
+        Command::Verify { print } => service::verify(print),
         Command::Service {
             command:
                 ServiceCommand::Install {
@@ -377,6 +621,7 @@ async fn run_doctor(
     proxy: Option<SocketAddr>,
     ca_cert: Option<PathBuf>,
     runtimes: bool,
+    verbose: bool,
 ) -> anyhow::Result<()> {
     let proxy = proxy.or_else(doctor::proxy_from_env);
     let ca_cert = ca_cert.or_else(|| std::env::var_os("NODE_EXTRA_CA_CERTS").map(PathBuf::from));
@@ -397,12 +642,42 @@ async fn run_doctor(
         proxy,
         ca_cert,
         runtimes,
+        verbose,
     })
     .await?;
     if !passed {
         bail!("doctor found problems");
     }
     Ok(())
+}
+
+fn details(config: &config::Config, source: Option<&Path>) -> Details {
+    if config.audit.path.is_none() {
+        return Details::NoAuditLog;
+    }
+    Details::Command(handoff::Handoff::current().as_service("tail", source) + " --id")
+}
+
+fn preset_steps(name: &str, rendered: &str) -> anyhow::Result<String> {
+    let (config, table) = config::parse(rendered).map_err(|problem| problem.error)?;
+    let mut steps = vec![
+        "Add it to the config (credshim docs configuration#writing-rules); `credshim config check <file>` checks a draft that has it.".to_string(),
+    ];
+    if name == preset::AWS_SSO_PRESET {
+        steps.push(
+            "Replace start_url, region, account_id and role_name with your organization's."
+                .to_string(),
+        );
+    }
+    steps.extend(draft::apply_steps(
+        &config,
+        &table,
+        &handoff::Handoff::current(),
+    ));
+    Ok(format!(
+        "credshim: next steps for this {name} preset:\n{}",
+        draft::numbered(&steps)
+    ))
 }
 
 fn load_config(path: Option<&Path>) -> anyhow::Result<config::Loaded> {
@@ -492,6 +767,7 @@ async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::
     proxy_config.aws = routing.aws;
     proxy_config.scrub = routing.scrub;
     proxy_config.base_urls = routing.base_urls;
+    proxy_config.guide = Guide::new(details(&config, loaded.source.as_deref()));
     let _status = config
         .status
         .socket
@@ -627,7 +903,13 @@ fn sso_session(config: &config::Config, name: &str) -> anyhow::Result<SsoSession
 
 async fn aws_sso_login(config_path: Option<&Path>, name: &str) -> anyhow::Result<()> {
     if !std::io::stdin().is_terminal() {
-        bail!("`credshim aws sso login` is for a person at a terminal; stdin is not a TTY");
+        bail!(
+            "`credshim aws sso login` is for a person at a terminal with a browser (stdin is not a TTY); ask them to run: {}",
+            handoff::Handoff::current().as_service(
+                &format!("aws sso login {}", handoff::shell_word(name)),
+                config_path
+            )
+        );
     }
     let config = load_config(config_path)?.config;
     let session = sso_session(&config, name)?;
@@ -842,7 +1124,10 @@ fn secret_set(config_path: Option<&Path>, name: &str) -> anyhow::Result<()> {
     credshim_secrets::check_name(name)?;
     let backend = load_config(config_path)?.config.secrets()?;
     if !std::io::stdin().is_terminal() {
-        bail!("`credshim secret set` reads the value from a terminal; stdin is not a TTY");
+        bail!(
+            "`credshim secret set` takes the value from a person typing at a terminal, so a real secret never passes through a pipe, a script or an agent (stdin is not a TTY); ask the person to run: {}",
+            handoff::Handoff::current().as_service(&format!("secret set {name}"), config_path)
+        );
     }
     let store = backend.open()?;
     let value = non_empty_value(
@@ -926,5 +1211,82 @@ mod tests {
             err.to_string(),
             "the value for openai is empty; nothing was stored"
         );
+    }
+
+    #[test]
+    fn every_docs_topic_the_binary_points_to_exists_in_both_languages() {
+        let topics = COMMAND_TOPICS
+            .iter()
+            .map(|(_, topic)| topic.to_string())
+            .filter(|topic| !topic.is_empty())
+            .chain(credshim_mitm::Topic::ALL.iter().map(|topic| {
+                format!(
+                    "{}#{}",
+                    credshim_mitm::guide::TROUBLESHOOTING,
+                    topic.anchor()
+                )
+            }))
+            .chain(
+                config::SECTION_TOPICS
+                    .iter()
+                    .map(|(_, topic)| topic.to_string()),
+            )
+            .chain(
+                doctor::CHECKS
+                    .iter()
+                    .map(|check| format!("troubleshooting#{check}")),
+            )
+            .chain(
+                [
+                    "troubleshooting",
+                    config::CONFIG_TOPIC,
+                    "configuration#writing-rules",
+                    credshim_mitm::guide::AUDIT_LOG_TOPIC,
+                    "troubleshooting#go-tools-on-macos",
+                ]
+                .map(str::to_string),
+            );
+        for topic in topics {
+            for lang in [docs::Lang::En, docs::Lang::Ja] {
+                assert!(docs::resolves(&topic, lang), "{topic} ({lang:?})");
+            }
+        }
+    }
+
+    fn commands(command: &clap::Command, path: &str) -> Vec<(String, clap::Command)> {
+        command
+            .get_subcommands()
+            .flat_map(|sub| {
+                let path = format!("{path} {}", sub.get_name())
+                    .trim_start()
+                    .to_string();
+                std::iter::once((path.clone(), sub.clone())).chain(commands(sub, &path))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_command_and_option_explains_itself_in_help() {
+        for (path, command) in commands(&cli(), "") {
+            assert!(command.get_about().is_some(), "{path}");
+            for arg in command.get_arguments() {
+                assert!(
+                    arg.get_help().is_some() || arg.get_possible_values().len() > 1,
+                    "{path} {}",
+                    arg.get_id()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_command_topic_names_a_command() {
+        let paths: Vec<String> = commands(&cli(), "")
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect();
+        for (path, _) in COMMAND_TOPICS {
+            assert!(paths.iter().any(|known| known == path), "{path}");
+        }
     }
 }

@@ -61,6 +61,25 @@ pub const SSH_PRESETS: &[SshPreset] = &[SshPreset {
 pub const AWS_PRESET: &str = "aws";
 pub const AWS_SSO_PRESET: &str = "aws-sso";
 
+pub fn preset_for_host(host: &str) -> Option<&'static str> {
+    PRESETS
+        .iter()
+        .find(|preset| preset.host == host)
+        .map(|preset| preset.name)
+}
+
+pub fn preset_for_host_keys(keys: &[String]) -> Option<&'static str> {
+    SSH_PRESETS
+        .iter()
+        .find(|preset| {
+            !keys.is_empty()
+                && keys
+                    .iter()
+                    .all(|key| preset.host_keys.contains(&key.as_str()))
+        })
+        .map(|preset| preset.name)
+}
+
 pub fn names() -> impl Iterator<Item = &'static str> {
     PRESETS
         .iter()

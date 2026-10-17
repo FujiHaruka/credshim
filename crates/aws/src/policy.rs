@@ -66,6 +66,36 @@ impl Reason {
             Reason::SsoUnavailable => "sso_unavailable",
         }
     }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            Reason::BlockedHost(_) => "requests to AWS sign-in and SSO endpoints are refused",
+            Reason::NotBound => "the AWS dummy key was sent to a host outside amazonaws.com",
+            Reason::UnsupportedLocation => {
+                "the dummy key is not the access key of a SigV4 Authorization header (presigned URLs are not supported)"
+            }
+            Reason::BadAuthorization => "the SigV4 Authorization header could not be parsed",
+            Reason::ServiceNotAllowed => "the service is not in the rule's services",
+            Reason::RegionNotAllowed => "the region is not in the rule's regions",
+            Reason::OperationNotAllowed => "the operation is not in the rule's operations",
+            Reason::Limited => "the rule is over its limits",
+            Reason::CredentialOperation => "operations that issue AWS credentials are refused",
+            Reason::UnsignedCredentialOperation => {
+                "unsigned operations that issue AWS credentials are refused"
+            }
+            Reason::SignedChunks => "chunk-signed (streaming) uploads are not supported",
+            Reason::BadPayloadHash => "x-amz-content-sha256 is missing or not a SHA-256 hex digest",
+            Reason::BodyTooLarge => "the request body is over the size limit for re-signing",
+            Reason::EncodedBody => "the request body is compressed, so it cannot be checked",
+            Reason::EndpointMismatch => {
+                "the host is not the endpoint of the signed service and region"
+            }
+            Reason::BufferBusy => "too many AWS request bodies are being buffered; retry shortly",
+            Reason::SsoLoginRequired => "the SSO session needs `credshim aws sso login`",
+            Reason::SsoRefused => "AWS refused the SSO role credentials",
+            Reason::SsoUnavailable => "the SSO role credentials could not be obtained",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

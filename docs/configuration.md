@@ -66,6 +66,20 @@ The table shows which settings apply on reload and which need a restart. If you 
 | --- | --- |
 | `[[rule]]`, `[scrub]`, AWS (`[aws]`, `[[aws_key]]`, `[[aws_sso_session]]`, `[[aws_sso_role]]`) | `[listen]`, `[ca]`, `[secrets]`, `[audit]`, `[status]`, SSH (`[ssh]`, `[[ssh_key]]`), OAuth (`[[oauth]]`, `[vault]`, `[limits]`) |
 
+## Checking a draft
+
+`credshim config check <file>` checks a config file without reading the secret store, the CA, or file permissions. Anyone can run it on a draft, including the developer user and a coding agent, which cannot read the real config. A draft can hold only the sections to add, such as the output of `credshim preset`.
+
+```sh
+credshim preset openai > draft.toml
+credshim config check draft.toml
+```
+
+- It lists every problem it finds at once, each with the `credshim docs` section to read. An error in the config, from any command, points to the section for the part of the file it is in.
+- When the draft is valid, it prints where it lets each real key go: for each rule, the secret, the destination, and the allowed methods, paths, and limits. A destination that does not come from a preset is marked `!!`; confirm it with the service before applying.
+- It then prints the steps that apply it: the secrets to store, the AWS SSO sessions to log in to, and the reload command. Run them in the admin session. A person types `secret set` and `aws sso login` at a terminal.
+- It cannot see clashes with what is already in the config, such as a rule name used twice. `service reload` checks the whole config before it applies anything and keeps the running config if the check fails.
+
 ## Base URL mode
 
 A mode for clients that cannot use the proxy environment variables or a custom CA. It is a reverse proxy that forwards `http://127.0.0.1:8788/openai/...` to `https://api.openai.com/...` by a fixed mapping. Rules (destination, allowlists, limits, scrub) still apply. The development CA is not needed.
@@ -136,11 +150,12 @@ socket = "/var/lib/credshim/status.sock"
 ```
 
 - `credshim-svc tail` shows the audit log live. You can see where the agent is calling now and what was denied.
+- `credshim-svc tail --id <id>` prints the whole entry of one request. A response that CredShim refused gives its id and this command (see [Refused requests](troubleshooting.md#refused-requests)).
 - `credshim-svc status` shows the counters for each rule.
 
 Neither shows secret or dummy values. Both are in a location that only the service user can read, so the developer user cannot see them.
 
 ```text
-2026-09-30T03:31:37.5Z inject      200 POST https://api.openai.com:443/v1/chat/completions [openai] via connect
-2026-09-30T03:31:40.1Z deny        403 POST https://attacker.example:443/collect [openai] via connect
+2026-09-30T03:31:37.5Z inject      200 POST https://api.openai.com:443/v1/chat/completions [openai] via connect id=8d41c07a2b9e
+2026-09-30T03:31:40.1Z deny        403 POST https://attacker.example:443/collect [openai] via connect id=3f9c2a7b1e04
 ```

@@ -5,10 +5,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use credshim_aws::{AwsKeySpec, AwsRule, AwsSsoRoleSpec, SsoSession, SsoSessionSpec};
-use credshim_core::RuleSpec;
-use credshim_oauth::ProviderSpec;
+use credshim_core::{BaseUrls, Rule, RuleSet, RuleSpec};
+use credshim_oauth::{Provider, ProviderSpec};
 use credshim_secrets::BackendConfig;
 use credshim_ssh::{SshKeySpec, SshRule};
+use secrecy::SecretString;
 use serde::Deserialize;
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8787";
@@ -129,26 +130,11 @@ pub fn load(explicit: Option<&Path>) -> anyhow::Result<Loaded> {
         }
         Err(err) => return Err(err).with_context(|| format!("could not read {}", path.display())),
     };
-    let config: Config =
-        toml::from_str(&text).with_context(|| format!("invalid config {}", path.display()))?;
-    let table: toml::Table =
-        toml::from_str(&text).with_context(|| format!("invalid config {}", path.display()))?;
-    config
-        .check_env_names()
-        .and_then(|()| Ok(SshRule::from_specs(&config.ssh_keys).map(drop)?))
-        .and_then(|()| {
-            anyhow::ensure!(
-                config
-                    .ssh
-                    .client_uids
-                    .as_ref()
-                    .is_none_or(|uids| !uids.is_empty()),
-                "[ssh] client_uids must list at least one uid"
-            );
-            Ok(())
-        })
-        .and_then(|()| config.check_aws_keys())
-        .with_context(|| format!("invalid config {}", path.display()))?;
+    let invalid = |problem: Problem| problem.into_error(&path);
+    let (config, table) = parse(&text).map_err(invalid)?;
+    if let Some(problem) = config.basic_problems().into_iter().next() {
+        return Err(invalid(problem));
+    }
     Ok(Loaded {
         config,
         table,
@@ -156,7 +142,174 @@ pub fn load(explicit: Option<&Path>) -> anyhow::Result<Loaded> {
     })
 }
 
+pub fn read(path: &Path) -> anyhow::Result<String> {
+    std::fs::read_to_string(path).with_context(|| format!("could not read {}", path.display()))
+}
+
+pub fn parse(text: &str) -> Result<(Config, toml::Table), Problem> {
+    let problem = |err: toml::de::Error| Problem {
+        topic: section_topic(section_at(text, err.span())),
+        error: err.into(),
+    };
+    let config: Config = toml::from_str(text).map_err(problem)?;
+    let table: toml::Table = toml::from_str(text).map_err(problem)?;
+    Ok((config, table))
+}
+
+fn section_at(text: &str, span: Option<std::ops::Range<usize>>) -> &str {
+    let end = span.map_or(0, |span| span.start);
+    text.get(..end)
+        .unwrap_or(text)
+        .lines()
+        .rev()
+        .find_map(|line| line.trim_start().strip_prefix('['))
+        .and_then(|header| {
+            header
+                .trim_start_matches('[')
+                .split([']', '.'])
+                .next()
+                .map(str::trim)
+        })
+        .unwrap_or_default()
+}
+
+pub const CONFIG_TOPIC: &str = "configuration";
+const RULES_TOPIC: &str = "configuration#writing-rules";
+const BASE_URL_TOPIC: &str = "configuration#base-url-mode";
+const OAUTH_TOPIC: &str = "configuration#oauth";
+const SSH_TOPIC: &str = "ssh#configuration";
+const AWS_KEY_TOPIC: &str = "aws#static-access-keys";
+const AWS_SSO_TOPIC: &str = "aws#aws-iam-identity-center-sso";
+
+pub const SECTION_TOPICS: &[(&str, &str)] = &[
+    ("rule", RULES_TOPIC),
+    ("scrub", RULES_TOPIC),
+    ("listen", BASE_URL_TOPIC),
+    ("ca", "install#2-install-admin-session"),
+    ("secrets", "configuration#secret-stores"),
+    ("audit", "configuration#audit-log-and-status"),
+    ("status", "configuration#audit-log-and-status"),
+    ("oauth", OAUTH_TOPIC),
+    ("vault", OAUTH_TOPIC),
+    ("limits", OAUTH_TOPIC),
+    ("ssh", SSH_TOPIC),
+    ("ssh_key", SSH_TOPIC),
+    ("aws", AWS_KEY_TOPIC),
+    ("aws_key", AWS_KEY_TOPIC),
+    ("aws_sso_session", AWS_SSO_TOPIC),
+    ("aws_sso_role", AWS_SSO_TOPIC),
+];
+
+fn section_topic(section: &str) -> &'static str {
+    SECTION_TOPICS
+        .iter()
+        .find(|(name, _)| *name == section)
+        .map_or(CONFIG_TOPIC, |(_, topic)| topic)
+}
+
+#[derive(Debug)]
+pub struct Invalid {
+    pub path: PathBuf,
+    pub topic: &'static str,
+}
+
+impl std::fmt::Display for Invalid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid config {}", self.path.display())
+    }
+}
+
+#[derive(Debug)]
+pub struct Problem {
+    pub topic: &'static str,
+    pub error: anyhow::Error,
+}
+
+impl Problem {
+    pub fn into_error(self, path: &Path) -> anyhow::Error {
+        self.error.context(Invalid {
+            path: path.to_path_buf(),
+            topic: self.topic,
+        })
+    }
+}
+
+fn note<E: Into<anyhow::Error>>(
+    problems: &mut Vec<Problem>,
+    topic: &'static str,
+    result: Result<(), E>,
+) {
+    if let Err(error) = result {
+        problems.push(Problem {
+            topic,
+            error: error.into(),
+        });
+    }
+}
+
 impl Config {
+    pub fn problems(&self) -> Vec<Problem> {
+        let mut problems = self.basic_problems();
+        let mut rules = Vec::new();
+        for spec in &self.rules {
+            match Rule::from_spec(spec.clone()) {
+                Ok(rule) => rules.push(rule),
+                Err(err) => note(&mut problems, RULES_TOPIC, Err(err)),
+            }
+        }
+        if rules.len() == self.rules.len() {
+            note(
+                &mut problems,
+                RULES_TOPIC,
+                RuleSet::from_rules(rules).map(drop),
+            );
+        }
+        note(
+            &mut problems,
+            BASE_URL_TOPIC,
+            BaseUrls::from_specs(&self.rules).map(drop),
+        );
+        for spec in &self.oauth {
+            let placeholder = spec
+                .client_secret_name()
+                .map(|_| SecretString::from(String::new()));
+            note(
+                &mut problems,
+                OAUTH_TOPIC,
+                Provider::new(spec.clone(), placeholder).map(drop),
+            );
+        }
+        problems
+    }
+
+    fn basic_problems(&self) -> Vec<Problem> {
+        let mut problems = Vec::new();
+        note(&mut problems, RULES_TOPIC, self.check_env_names());
+        note(
+            &mut problems,
+            SSH_TOPIC,
+            SshRule::from_specs(&self.ssh_keys).map(drop),
+        );
+        note(
+            &mut problems,
+            SSH_TOPIC,
+            if self
+                .ssh
+                .client_uids
+                .as_ref()
+                .is_some_and(|uids| uids.is_empty())
+            {
+                Err(anyhow::anyhow!(
+                    "[ssh] client_uids must list at least one uid"
+                ))
+            } else {
+                Ok(())
+            },
+        );
+        note(&mut problems, AWS_KEY_TOPIC, self.check_aws_keys());
+        problems
+    }
+
     fn check_env_names(&self) -> anyhow::Result<()> {
         let mut owners = BTreeMap::new();
         for rule in &self.rules {
@@ -302,6 +455,21 @@ fn is_env_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_parse_error_points_to_the_docs_of_its_section() {
+        let topic = |text: &str| parse(text).unwrap_err().topic;
+        assert_eq!(
+            topic("[secrets]\nbackend = \"file\"\n"),
+            "configuration#secret-stores"
+        );
+        assert_eq!(
+            topic("[ca]\ndir = \"x\"\n\n[[aws_sso_role]]\nnmae = \"x\"\n"),
+            "aws#aws-iam-identity-center-sso"
+        );
+        assert_eq!(topic("[[rule]\n"), "configuration#writing-rules");
+        assert_eq!(topic("listne = 1\n"), CONFIG_TOPIC);
+    }
 
     #[test]
     fn only_a_real_directory_owned_by_this_user_is_its_own() {
