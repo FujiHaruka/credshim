@@ -12,10 +12,11 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::net::TcpListener;
 use tokio::sync::OnceCell;
 
+use crate::guide::{Topic, refuse};
 use crate::intercept::{Ingress, Session};
 use crate::live::Live;
-use crate::proxy::{ProxyBody, status};
-use crate::upstream::Upstream;
+use crate::proxy::{ProxyBody, unreachable};
+use crate::upstream::{ConnectError, Upstream};
 
 type SessionCell = Arc<OnceCell<Arc<Session>>>;
 
@@ -82,35 +83,60 @@ impl BaseUrlServer {
     async fn handle(&self, req: Request<Incoming>) -> Response<ProxyBody> {
         let (mut parts, body) = req.into_parts();
         if parts.method == Method::CONNECT {
-            return status(StatusCode::METHOD_NOT_ALLOWED);
+            return self.refuse(
+                StatusCode::METHOD_NOT_ALLOWED,
+                Topic::Rejected,
+                "the base URL listener takes plain requests to a base_url_prefix, not CONNECT"
+                    .into(),
+            );
         }
         if parts.uri.scheme().is_some() || parts.uri.authority().is_some() {
             tracing::warn!("base URL request is not in origin form");
-            return status(StatusCode::BAD_REQUEST);
+            return self.refuse(
+                StatusCode::BAD_REQUEST,
+                Topic::Rejected,
+                "the base URL request came in proxy form; make the client connect to the listener directly (add it to NO_PROXY)".into(),
+            );
         }
         if !self.addressed_to_listener(&parts.headers) {
             tracing::warn!("base URL request names a host other than the loopback listener");
-            return status(StatusCode::MISDIRECTED_REQUEST);
+            return self.refuse(
+                StatusCode::MISDIRECTED_REQUEST,
+                Topic::Misdirected,
+                "the Host of a base URL request must be the listener's own address".into(),
+            );
         }
         let routing = self.live.current();
         let Some(route) = routing.base_urls.resolve(parts.uri.path()) else {
             tracing::debug!(path = parts.uri.path(), "no base URL prefix matches");
-            return status(StatusCode::NOT_FOUND);
+            let why = format!("no rule's base_url_prefix matches {}", parts.uri.path());
+            return self.refuse(StatusCode::NOT_FOUND, Topic::Rejected, why);
         };
         let rebuilt = match parts.uri.query() {
             Some(query) => format!("{}?{query}", route.path),
             None => route.path.to_string(),
         };
         let Ok(path) = PathAndQuery::try_from(rebuilt) else {
-            return status(StatusCode::BAD_REQUEST);
+            return self.refuse(
+                StatusCode::BAD_REQUEST,
+                Topic::Rejected,
+                "the rewritten path is not a valid request path".into(),
+            );
         };
         let (host, port) = (route.host.to_string(), route.port);
         parts.uri = Uri::from(path);
         parts.headers.remove(header::HOST);
         match self.session(host.clone(), port).await {
-            Some(session) => session.respond(parts, body).await,
-            None => status(StatusCode::BAD_GATEWAY),
+            Ok(session) => session.respond(parts, body).await,
+            Err(err) => self
+                .live
+                .guide()
+                .finish(None, unreachable(&host, port, &err)),
         }
+    }
+
+    fn refuse(&self, status: StatusCode, topic: Topic, why: String) -> Response<ProxyBody> {
+        self.live.guide().finish(None, refuse(status, topic, why))
     }
 
     fn addressed_to_listener(&self, headers: &http::HeaderMap) -> bool {
@@ -134,7 +160,7 @@ impl BaseUrlServer {
         })
     }
 
-    async fn session(&self, host: String, port: u16) -> Option<Arc<Session>> {
+    async fn session(&self, host: String, port: u16) -> Result<Arc<Session>, ConnectError> {
         let cell = self
             .sessions
             .lock()
@@ -158,10 +184,10 @@ impl BaseUrlServer {
             })
             .await;
         match opened {
-            Ok(session) => Some(session.clone()),
+            Ok(session) => Ok(session.clone()),
             Err(err) => {
                 tracing::warn!(%host, port, error = %err, "base URL upstream failed");
-                None
+                Err(err)
             }
         }
     }

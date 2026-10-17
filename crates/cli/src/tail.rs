@@ -48,6 +48,27 @@ pub async fn run(path: &Path, last: usize, follow: bool) -> anyhow::Result<()> {
     }
 }
 
+pub fn show(path: &Path, id: &str) -> anyhow::Result<()> {
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("could not open audit log {}", path.display()))?;
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        let Ok(entry) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if entry["fields"]["id"].as_str() == Some(id) {
+            let mut stdout = std::io::stdout();
+            writeln!(stdout, "{}", render(&line))?;
+            writeln!(stdout, "{}", serde_json::to_string_pretty(&entry)?)?;
+            return Ok(());
+        }
+    }
+    anyhow::bail!(
+        "no request with id {id} in the audit log {}; check the id, or the log may have been rotated",
+        path.display()
+    )
+}
+
 fn render(line: &str) -> String {
     let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
         return line.trim_end().to_string();
@@ -95,8 +116,14 @@ fn render(line: &str) -> String {
     } else {
         format!(" ({reason})")
     };
+    let id = text("id");
+    let id = if id.is_empty() {
+        String::new()
+    } else {
+        format!(" id={id}")
+    };
     format!(
-        "{time} {decision:<11} {status} {method} {scheme}://{host}:{port}{path}{rules}{aws}{reason} via {ingress}",
+        "{time} {decision:<11} {status} {method} {scheme}://{host}:{port}{path}{rules}{aws}{reason} via {ingress}{id}",
         decision = text("decision"),
         status = text("status"),
         method = text("method"),

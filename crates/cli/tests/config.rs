@@ -170,6 +170,7 @@ async fn audit_log_records_decisions_as_json_without_values() {
     .await;
     let plain = MockUpstream::http().start().await;
 
+    let mut responses = Vec::new();
     for (auth, query) in [
         (format!("Bearer {OPENAI_DUMMY}"), String::new()),
         ("Bearer other".to_string(), "?key=abc".to_string()),
@@ -186,6 +187,7 @@ async fn audit_log_records_decisions_as_json_without_values() {
         .unwrap();
         let mut response = String::new();
         tcp.read_to_string(&mut response).await.unwrap();
+        responses.push(response);
     }
 
     let contents = std::fs::read_to_string(&audit).unwrap();
@@ -214,6 +216,32 @@ async fn audit_log_records_decisions_as_json_without_values() {
         std::fs::metadata(&audit).unwrap().permissions().mode() & 0o777,
         0o600
     );
+
+    let id = entries[0]["fields"]["id"].as_str().unwrap();
+    let details = responses[0]
+        .lines()
+        .find_map(|line| line.strip_prefix("details: "))
+        .unwrap();
+    let binary = std::fs::canonicalize(env!("CARGO_BIN_EXE_credshim")).unwrap();
+    assert_eq!(
+        details,
+        format!("{} tail --config {config} --id {id}", binary.display())
+    );
+    let words: Vec<&str> = details.split(' ').skip(1).collect();
+    let shown = output(home.path(), &words).await;
+    assert!(shown.status.success(), "{}", stderr(&shown));
+    let shown = String::from_utf8(shown.stdout).unwrap();
+    assert!(shown.contains(&format!("id={id}")), "{shown}");
+    assert!(shown.contains("sent over plain HTTP"), "{shown}");
+    assert!(!shown.contains(OPENAI_DUMMY) && !shown.contains(&secret));
+
+    let missing = output(
+        home.path(),
+        &["tail", "--config", &config, "--id", "000000000000"],
+    )
+    .await;
+    assert!(!missing.status.success());
+    assert!(stderr(&missing).contains("no request with id 000000000000"));
 }
 
 fn oauth_provider(home: &std::path::Path) -> String {

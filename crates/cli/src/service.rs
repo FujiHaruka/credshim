@@ -13,12 +13,16 @@ const SETUP: &str = include_str!("../../../scripts/stage-b/setup-linux.sh");
 const RELOAD: &str = include_str!("../../../scripts/stage-b/reload-linux.sh");
 #[cfg(target_os = "linux")]
 pub const INSTALLED: &str = "/usr/local/libexec/credshim/credshim";
+#[cfg(target_os = "linux")]
+pub const SERVICE_USER: &str = "credshim";
 #[cfg(target_os = "macos")]
 const SETUP: &str = include_str!("../../../scripts/stage-b/setup-macos.sh");
 #[cfg(target_os = "macos")]
 const RELOAD: &str = include_str!("../../../scripts/stage-b/reload-macos.sh");
 #[cfg(target_os = "macos")]
 pub const INSTALLED: &str = "/Library/CredShim/bin/credshim";
+#[cfg(target_os = "macos")]
+pub const SERVICE_USER: &str = "_credshim";
 
 pub fn install(print: bool, upgrade: bool, user: Option<String>) -> anyhow::Result<()> {
     if print {

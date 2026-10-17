@@ -27,6 +27,7 @@ use crate::audit::{self, AwsLabels, Outcome, Stats};
 use crate::base_url::BaseUrlServer;
 use crate::ca::CertificateAuthority;
 use crate::doctor;
+use crate::guide::{Guide, Topic, error_chain, refuse};
 use crate::intercept::{Ingress, Intercept, Services, Session};
 use crate::live::{Live, Routing};
 use crate::relay::relay;
@@ -51,6 +52,7 @@ pub struct ProxyConfig {
     pub doctor_ca: Option<Arc<CertificateAuthority>>,
     pub base_url_listen: Option<SocketAddr>,
     pub base_urls: BaseUrls,
+    pub guide: Guide,
 }
 
 impl ProxyConfig {
@@ -71,6 +73,7 @@ impl ProxyConfig {
             doctor_ca: None,
             base_url_listen: None,
             base_urls: BaseUrls::default(),
+            guide: Guide::default(),
         }
     }
 }
@@ -226,6 +229,7 @@ impl Proxy {
                 base_urls: config.base_urls.clone(),
             },
             config.stats.clone(),
+            Arc::new(config.guide.clone()),
         );
         let reloader = Reloader {
             live: live.clone(),
@@ -374,30 +378,35 @@ impl Handler {
     async fn tunnel(&self, mut req: Request<Incoming>) -> Response<ProxyBody> {
         let Some((host, port)) = connect_target(req.uri()) else {
             tracing::warn!("CONNECT without a host:port authority");
-            return status(StatusCode::BAD_REQUEST);
+            return self.unrecorded(refuse(
+                StatusCode::BAD_REQUEST,
+                Topic::Rejected,
+                "CONNECT needs a host:port target",
+            ));
         };
         tracing::debug!(%host, port, "CONNECT");
         if doctor::is_doctor_host(&host) {
             let Some(ca) = self.doctor_ca.clone() else {
                 tracing::warn!("doctor check needs a CA; create one with `credshim ca init`");
-                return status(StatusCode::SERVICE_UNAVAILABLE);
+                return self.unrecorded(refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Topic::Error,
+                    "the proxy has no CA yet, so it cannot answer the doctor check; create one with `credshim ca init`",
+                ));
             };
             doctor::serve_tls(hyper::upgrade::on(&mut req), ca, self.handshake_timeout);
             return Response::new(empty());
         }
         if let Some(blocked) = credshim_aws::blocked(&host) {
             tracing::warn!(%host, port, "CONNECT to an AWS sign-in or SSO endpoint refused");
-            let labels = AwsLabels::reason(credshim_aws::Reason::BlockedHost(blocked));
-            audit::record_connect_labelled(
-                "tcp",
-                &host,
-                port,
-                Some(&labels),
+            let reason = credshim_aws::Reason::BlockedHost(blocked);
+            return audit::record(
+                &audit::connect_entry("tcp", &host, port),
+                Some(&AwsLabels::reason(reason)),
                 &Outcome::Blocked,
-                StatusCode::FORBIDDEN,
-                self.live.stats(),
+                refuse(StatusCode::FORBIDDEN, Topic::Deny, reason.describe()),
+                &self.live,
             );
-            return status(StatusCode::FORBIDDEN);
         }
         let routing = self.live.current();
         if let Some(intercept) = routing.intercept.as_ref().filter(|i| i.covers(&host)) {
@@ -407,22 +416,32 @@ impl Handler {
             Ok(tcp) => tcp,
             Err(err) if err.is_off_limits() => {
                 tracing::warn!(%host, port, "CONNECT to a link-local, unspecified or cloud metadata address refused");
-                self.audit_connect("tcp", &host, port, &Outcome::Blocked, StatusCode::FORBIDDEN);
-                return status(StatusCode::FORBIDDEN);
+                return self.refuse_connect(
+                    "tcp",
+                    &host,
+                    port,
+                    &Outcome::Blocked,
+                    off_limits(&host, port),
+                );
             }
             Err(err) => {
                 tracing::warn!(%host, port, error = %err, "CONNECT upstream failed");
-                self.audit_connect(
+                return self.refuse_connect(
                     "tcp",
                     &host,
                     port,
                     &Outcome::Tunnel,
-                    StatusCode::BAD_GATEWAY,
+                    unreachable(&host, port, &err),
                 );
-                return status(StatusCode::BAD_GATEWAY);
             }
         };
-        self.audit_connect("tcp", &host, port, &Outcome::Tunnel, StatusCode::OK);
+        audit::record_unanswered(
+            &audit::connect_entry("tcp", &host, port),
+            &Outcome::Tunnel,
+            StatusCode::OK,
+            None,
+            self.live.stats(),
+        );
         let on_upgrade = hyper::upgrade::on(&mut req);
         let idle_timeout = self.idle_timeout;
         tokio::spawn(async move {
@@ -460,25 +479,23 @@ impl Handler {
             Ok(session) => session,
             Err(ConnectError::OffLimits { .. }) => {
                 tracing::warn!(%host, port, "intercepted CONNECT to a link-local, unspecified or cloud metadata address refused");
-                self.audit_connect(
+                return self.refuse_connect(
                     "https",
                     &host,
                     port,
                     &Outcome::Blocked,
-                    StatusCode::FORBIDDEN,
+                    off_limits(&host, port),
                 );
-                return status(StatusCode::FORBIDDEN);
             }
             Err(err) => {
                 tracing::warn!(%host, port, error = %err, "intercepted upstream failed");
-                self.audit_connect(
+                return self.refuse_connect(
                     "https",
                     &host,
                     port,
                     &Outcome::Rejected,
-                    StatusCode::BAD_GATEWAY,
+                    unreachable(&host, port, &err),
                 );
-                return status(StatusCode::BAD_GATEWAY);
             }
         };
         session.serve(
@@ -489,15 +506,25 @@ impl Handler {
         Response::new(empty())
     }
 
-    fn audit_connect(
+    fn refuse_connect(
         &self,
         scheme: &'static str,
         host: &str,
         port: u16,
         outcome: &Outcome,
-        status: StatusCode,
-    ) {
-        audit::record_connect(scheme, host, port, outcome, status, self.live.stats());
+        response: Response<ProxyBody>,
+    ) -> Response<ProxyBody> {
+        audit::record(
+            &audit::connect_entry(scheme, host, port),
+            None,
+            outcome,
+            response,
+            &self.live,
+        )
+    }
+
+    fn unrecorded(&self, response: Response<ProxyBody>) -> Response<ProxyBody> {
+        self.live.guide().finish(None, response)
     }
 
     async fn connect_with_timeout(&self, host: &str, port: u16) -> Result<TcpStream, TunnelError> {
@@ -511,7 +538,11 @@ impl Handler {
         let (mut parts, body) = req.into_parts();
         let Some(authority) = forward_authority(&parts.uri) else {
             tracing::warn!(method = %parts.method, "request is not an absolute http:// URI");
-            return status(StatusCode::BAD_REQUEST);
+            return self.unrecorded(refuse(
+                StatusCode::BAD_REQUEST,
+                Topic::Rejected,
+                "a request to the proxy needs an absolute http:// URI, or CONNECT for https",
+            ));
         };
         tracing::debug!(method = %parts.method, %authority, path = parts.uri.path(), "forward");
         if doctor::is_doctor_host(authority.host()) {
@@ -529,15 +560,14 @@ impl Handler {
         };
         if let Some(blocked) = credshim_aws::blocked(authority.host()) {
             tracing::warn!(%authority, "request to an AWS sign-in or SSO endpoint refused");
-            let labels = AwsLabels::reason(credshim_aws::Reason::BlockedHost(blocked));
-            audit::record_labelled(
+            let reason = credshim_aws::Reason::BlockedHost(blocked);
+            return audit::record(
                 &entry,
-                Some(&labels),
+                Some(&AwsLabels::reason(reason)),
                 &Outcome::Blocked,
-                StatusCode::FORBIDDEN,
-                self.live.stats(),
+                refuse(StatusCode::FORBIDDEN, Topic::Deny, reason.describe()),
+                &self.live,
             );
-            return status(StatusCode::FORBIDDEN);
         }
         let routing = self.live.current();
         let dummy = routing
@@ -558,18 +588,21 @@ impl Handler {
                 %authority,
                 "dummy credential sent over plain HTTP; refusing to forward"
             );
-            audit::record(
-                &entry,
-                &Outcome::Denied(rule),
+            let response = refuse(
                 StatusCode::FORBIDDEN,
-                self.live.stats(),
+                Topic::Deny,
+                format!("the dummy of rule \"{rule}\" was sent over plain HTTP; use https://"),
             );
-            return status(StatusCode::FORBIDDEN);
+            return audit::record(&entry, None, &Outcome::Denied(rule), response, &self.live);
         }
         let mut uri = http::uri::Parts::from(std::mem::take(&mut parts.uri));
         uri.authority = Some(authority.clone());
         let Ok(uri) = Uri::from_parts(uri) else {
-            return status(StatusCode::BAD_REQUEST);
+            return self.unrecorded(refuse(
+                StatusCode::BAD_REQUEST,
+                Topic::Rejected,
+                "the request URI could not be rebuilt for the upstream",
+            ));
         };
         parts.uri = uri;
         strip_hop_by_hop(&mut parts.headers);
@@ -577,7 +610,13 @@ impl Handler {
             Ok(host) => {
                 parts.headers.insert(header::HOST, host);
             }
-            Err(_) => return status(StatusCode::BAD_REQUEST),
+            Err(_) => {
+                return self.unrecorded(refuse(
+                    StatusCode::BAD_REQUEST,
+                    Topic::Rejected,
+                    "the request's host is not a valid Host header",
+                ));
+            }
         }
         parts.version = http::Version::HTTP_11;
         let req = Request::from_parts(parts, body.boxed());
@@ -589,15 +628,21 @@ impl Handler {
             }
             Err(err) if TunnelError::off_limits_in(&err) => {
                 tracing::warn!(%authority, "request to a link-local, unspecified or cloud metadata address refused");
-                (Outcome::Blocked, status(StatusCode::FORBIDDEN))
+                (Outcome::Blocked, off_limits(authority.host(), entry.port))
             }
             Err(err) => {
                 tracing::warn!(%authority, error = %err, "upstream request failed");
-                (Outcome::Pass, status(StatusCode::BAD_GATEWAY))
+                (
+                    Outcome::Pass,
+                    refuse(
+                        StatusCode::BAD_GATEWAY,
+                        Topic::Upstream,
+                        format!("the request to {authority} failed: {}", error_chain(&err)),
+                    ),
+                )
             }
         };
-        audit::record(&entry, &outcome, response.status(), self.live.stats());
-        response
+        audit::record(&entry, None, &outcome, response, &self.live)
     }
 }
 
@@ -676,15 +721,31 @@ pub(crate) fn strip_hop_by_hop(headers: &mut HeaderMap) {
 }
 
 fn empty() -> ProxyBody {
-    Full::new(Bytes::new())
-        .map_err(|never| match never {})
-        .boxed()
+    full(Bytes::new())
 }
 
-pub(crate) fn status(code: StatusCode) -> Response<ProxyBody> {
-    let mut res = Response::new(empty());
-    *res.status_mut() = code;
-    res
+pub(crate) fn full(body: Bytes) -> ProxyBody {
+    Full::new(body).map_err(|never| match never {}).boxed()
+}
+
+pub(crate) fn off_limits(host: &str, port: u16) -> Response<ProxyBody> {
+    refuse(
+        StatusCode::FORBIDDEN,
+        Topic::Deny,
+        format!("{host}:{port} is a link-local, unspecified or cloud metadata address"),
+    )
+}
+
+pub(crate) fn unreachable(
+    host: &str,
+    port: u16,
+    err: &(dyn std::error::Error + 'static),
+) -> Response<ProxyBody> {
+    refuse(
+        StatusCode::BAD_GATEWAY,
+        Topic::Upstream,
+        format!("could not connect to {host}:{port}: {}", error_chain(err)),
+    )
 }
 
 #[derive(Clone)]

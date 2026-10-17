@@ -6,7 +6,7 @@ use std::time::Duration;
 use http::header::{self, HeaderValue};
 use http::uri::{Authority, PathAndQuery};
 use http::{Method, Request, Response, StatusCode, Uri, Version};
-use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
+use http_body_util::{BodyExt, LengthLimitError, Limited};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::upgrade::OnUpgrade;
@@ -15,14 +15,16 @@ use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_rustls::LazyConfigAcceptor;
 
+use credshim_aws::refusal::Format;
 use credshim_aws::{Aws, CredentialError, Decision, Reason};
 use credshim_core::{Destination, InjectError, Injector, Permit, Verdict};
 use credshim_oauth::{Exchange, OAuth};
 
 use crate::audit::{self, AwsLabels, Outcome};
 use crate::ca::CertificateAuthority;
+use crate::guide::{Topic, error_chain, refuse, refuse_aws};
 use crate::live::Live;
-use crate::proxy::{ProxyBody, status, strip_hop_by_hop};
+use crate::proxy::{ProxyBody, full, strip_hop_by_hop};
 use crate::relay::relay;
 use crate::scrub::{self, ScrubBody};
 use crate::upstream::{ALPN_H2, ConnectError, TargetConnector, Upstream};
@@ -149,10 +151,6 @@ enum SendError {
     Client(#[from] hyper_util::client::legacy::Error),
 }
 
-fn full(body: bytes::Bytes) -> ProxyBody {
-    Full::new(body).map_err(|never| match never {}).boxed()
-}
-
 #[derive(Debug, thiserror::Error)]
 enum UpgradeError {
     #[error(transparent)]
@@ -236,17 +234,23 @@ impl Session {
             let host = self.target.host.clone();
             let port = self.target.port;
             let stats = self.live.stats().clone();
-            match tokio::time::timeout(handshake_timeout, self.accept(on_upgrade, &ca)).await {
-                Ok(Ok(())) => return,
-                Ok(Err(reason)) => tracing::warn!(%host, port, %reason, "MITM session rejected"),
-                Err(_) => tracing::warn!(%host, port, "downstream TLS handshake timed out"),
-            }
-            audit::record_connect(
-                "https",
-                &host,
-                port,
+            let reason =
+                match tokio::time::timeout(handshake_timeout, self.accept(on_upgrade, &ca)).await {
+                    Ok(Ok(())) => return,
+                    Ok(Err(reason)) => {
+                        tracing::warn!(%host, port, %reason, "MITM session rejected");
+                        reason
+                    }
+                    Err(_) => {
+                        tracing::warn!(%host, port, "downstream TLS handshake timed out");
+                        "downstream TLS handshake timed out".to_string()
+                    }
+                };
+            audit::record_unanswered(
+                &audit::connect_entry("https", &host, port),
                 &Outcome::Rejected,
                 StatusCode::OK,
+                Some(&reason),
                 &stats,
             );
         });
@@ -319,15 +323,21 @@ impl Session {
                 method = %parts.method,
                 "request inside CONNECT tunnel names a different host"
             );
-            let response = status(StatusCode::MISDIRECTED_REQUEST);
-            self.audit(
+            let response = refuse(
+                StatusCode::MISDIRECTED_REQUEST,
+                Topic::Misdirected,
+                format!(
+                    "the request names a host other than {}, the one this connection was opened to",
+                    self.target.authority()
+                ),
+            );
+            return self.audit(
                 &parts.method,
                 parts.uri.path(),
                 &Outcome::Misdirected,
                 None,
-                &response,
+                response,
             );
-            return response;
         }
         self.respond(parts, body).await
     }
@@ -345,8 +355,7 @@ impl Session {
             response,
             aws,
         } = self.relay(&routing.services, parts, body).await;
-        self.audit(&method, &path, &outcome, aws.as_ref(), &response);
-        response
+        self.audit(&method, &path, &outcome, aws.as_ref(), response)
     }
 
     fn audit(
@@ -355,8 +364,8 @@ impl Session {
         path: &str,
         outcome: &Outcome,
         aws: Option<&AwsLabels>,
-        response: &Response<ProxyBody>,
-    ) {
+        response: Response<ProxyBody>,
+    ) -> Response<ProxyBody> {
         let entry = audit::Entry {
             ingress: self.ingress.name(),
             scheme: "https",
@@ -365,7 +374,7 @@ impl Session {
             method,
             path,
         };
-        audit::record_labelled(&entry, aws, outcome, response.status(), self.live.stats());
+        audit::record(&entry, aws, outcome, response, &self.live)
     }
 
     async fn relay(
@@ -401,11 +410,12 @@ impl Session {
                         port = target.port,
                         "request exceeds a rule's limits"
                     );
-                    return Relayed::new(
-                        Outcome::Limited(rule),
-                        status(StatusCode::TOO_MANY_REQUESTS),
-                        None,
+                    let response = refuse(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        Topic::Limited,
+                        format!("rule \"{rule}\" is over its limits"),
                     );
+                    return Relayed::new(Outcome::Limited(rule), response, None);
                 }
             },
             Ok(Verdict::NotAllowed(rule)) => {
@@ -417,11 +427,16 @@ impl Session {
                     path = parts.uri.path(),
                     "method or path is not in the rule's allow list"
                 );
-                return Relayed::new(
-                    Outcome::NotAllowed(rule),
-                    status(StatusCode::FORBIDDEN),
-                    None,
+                let response = refuse(
+                    StatusCode::FORBIDDEN,
+                    Topic::NotAllowed,
+                    format!(
+                        "{} {} is outside the allow_methods or allow_paths of rule \"{rule}\"",
+                        parts.method,
+                        parts.uri.path()
+                    ),
                 );
+                return Relayed::new(Outcome::NotAllowed(rule), response, None);
             }
             Ok(Verdict::Denied(rule)) => {
                 tracing::warn!(
@@ -430,15 +445,27 @@ impl Session {
                     port = target.port,
                     "dummy credential sent to a destination its rule is not bound to"
                 );
-                return Relayed::new(Outcome::Denied(rule), status(StatusCode::FORBIDDEN), None);
+                let response = refuse(
+                    StatusCode::FORBIDDEN,
+                    Topic::Deny,
+                    format!(
+                        "the dummy of rule \"{rule}\" was sent to {}, which is not that rule's destination",
+                        target.authority()
+                    ),
+                );
+                return Relayed::new(Outcome::Denied(rule), response, None);
             }
             Err(err) => {
                 tracing::error!(rule = %err.rule, "credential injection failed");
-                return Relayed::new(
-                    Outcome::Failed(err.rule),
-                    status(StatusCode::INTERNAL_SERVER_ERROR),
-                    None,
+                let response = refuse(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Topic::Error,
+                    format!(
+                        "the secret of rule \"{}\" could not be put into the request (is it registered and non-empty?)",
+                        err.rule
+                    ),
                 );
+                return Relayed::new(Outcome::Failed(err.rule), response, None);
             }
         };
         if let Some(exchange) = exchange {
@@ -506,11 +533,26 @@ impl Session {
     ) -> Result<(Outcome, ProxyBody, Option<AwsLabels>, Option<Permit>), Box<Relayed>> {
         let target = &self.target;
         let rule_in = |parts: &http::request::Parts| aws.first_dummy_in(parts).map(str::to_string);
+        let refuse_as_aws = |parts: &http::request::Parts,
+                             service: Option<&str>,
+                             status: StatusCode,
+                             topic: Topic,
+                             why: String,
+                             code: &'static str| {
+            refuse_aws(status, topic, why, Format::of(parts, service), code)
+        };
         let (buffered, body) = if aws.needs_body(&target.host, parts) {
             let Some(budget) = self.reserve_buffer(services, aws, parts).await else {
                 return Err(Box::new(Relayed::new(
                     Outcome::Rejected,
-                    status(StatusCode::SERVICE_UNAVAILABLE),
+                    refuse_as_aws(
+                        parts,
+                        None,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Topic::Rejected,
+                        Reason::BufferBusy.describe().to_string(),
+                        "CredShimBusy",
+                    ),
                     Some(AwsLabels::reason(Reason::BufferBusy)),
                 )));
             };
@@ -528,7 +570,18 @@ impl Session {
                     let outcome = rule_in(parts).map_or(Outcome::Blocked, Outcome::Denied);
                     return Err(Box::new(Relayed::new(
                         outcome,
-                        status(StatusCode::PAYLOAD_TOO_LARGE),
+                        refuse_as_aws(
+                            parts,
+                            None,
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            Topic::Deny,
+                            format!(
+                                "{} ({} bytes)",
+                                Reason::BodyTooLarge.describe(),
+                                aws.max_body()
+                            ),
+                            "CredShimBodyTooLarge",
+                        ),
                         Some(AwsLabels::reason(Reason::BodyTooLarge)),
                     )));
                 }
@@ -536,7 +589,11 @@ impl Session {
                     tracing::debug!(host = %target.host, error = %err, "could not read the AWS request body");
                     return Err(Box::new(Relayed::new(
                         Outcome::Rejected,
-                        status(StatusCode::BAD_REQUEST),
+                        refuse(
+                            StatusCode::BAD_REQUEST,
+                            Topic::Rejected,
+                            format!("could not read the AWS request body: {err}"),
+                        ),
                         None,
                     )));
                 }
@@ -560,6 +617,11 @@ impl Session {
                     "AWS request refused"
                 );
                 let labels = Some(AwsLabels::new(&denial.labels, Some(denial.reason)));
+                let service = denial
+                    .labels
+                    .scope
+                    .as_ref()
+                    .map(|scope| scope.service.as_str());
                 if denial.reason == Reason::OperationNotAllowed {
                     let rule = rule.unwrap_or_default();
                     let operation = denial
@@ -567,19 +629,17 @@ impl Session {
                         .operation
                         .as_deref()
                         .unwrap_or("this operation");
-                    let scope = denial.labels.scope.as_ref();
-                    let response = credshim_aws::refusal::error_response(
+                    let response = refuse_as_aws(
                         parts,
-                        scope.map(|scope| scope.service.as_str()),
+                        service,
                         StatusCode::FORBIDDEN,
+                        Topic::NotAllowed,
+                        format!("{operation} is not in the operations of AWS rule {rule}"),
                         "CredShimOperationNotAllowed",
-                        &format!(
-                            "credshim: {operation} is not in the operations of AWS rule {rule}"
-                        ),
                     );
                     return Err(Box::new(Relayed::new(
                         Outcome::NotAllowed(rule),
-                        response.map(full),
+                        response,
                         labels,
                     )));
                 }
@@ -589,9 +649,21 @@ impl Session {
                     }
                     _ => StatusCode::FORBIDDEN,
                 };
+                let why = match &rule {
+                    Some(rule) => format!("AWS rule {rule}: {}", denial.reason.describe()),
+                    None => denial.reason.describe().to_string(),
+                };
+                let response = refuse_as_aws(
+                    parts,
+                    service,
+                    code,
+                    Topic::Deny,
+                    why,
+                    "CredShimRequestRefused",
+                );
                 Err(Box::new(Relayed::new(
                     rule.map_or(Outcome::Blocked, Outcome::Denied),
-                    status(code),
+                    response,
                     labels,
                 )))
             }
@@ -600,16 +672,17 @@ impl Session {
                 let labels = AwsLabels::new(&plan.labels, None);
                 let Some(permit) = aws.admit(plan.rule) else {
                     tracing::warn!(%rule, host = %target.host, "AWS request exceeds the rule's limits");
-                    let response = credshim_aws::refusal::error_response(
+                    let response = refuse_as_aws(
                         parts,
                         Some(plan.auth.scope.service.as_str()),
                         StatusCode::TOO_MANY_REQUESTS,
+                        Topic::Limited,
+                        format!("AWS rule {rule} is over its limits"),
                         "CredShimLimitExceeded",
-                        &format!("credshim: AWS rule {rule} is over its limits"),
                     );
                     return Err(Box::new(Relayed::new(
                         Outcome::Limited(rule),
-                        response.map(full),
+                        response,
                         Some(AwsLabels::new(&plan.labels, Some(Reason::Limited))),
                     )));
                 };
@@ -634,16 +707,17 @@ impl Session {
                                 Outcome::Failed(rule),
                             ),
                         };
-                        let response = credshim_aws::refusal::error_response(
+                        let response = refuse_as_aws(
                             parts,
                             Some(plan.auth.scope.service.as_str()),
                             code,
+                            Topic::Error,
+                            err.to_string(),
                             refusal_code(reason),
-                            &format!("credshim: {err}"),
                         );
                         return Err(Box::new(Relayed::new(
                             outcome,
-                            response.map(full),
+                            response,
                             Some(AwsLabels::new(&plan.labels, Some(reason))),
                         )));
                     }
@@ -664,9 +738,17 @@ impl Session {
                             | credshim_aws::ResignError::HeaderValue => StatusCode::BAD_REQUEST,
                             _ => StatusCode::INTERNAL_SERVER_ERROR,
                         };
+                        let response = refuse_as_aws(
+                            parts,
+                            Some(plan.auth.scope.service.as_str()),
+                            code,
+                            Topic::Error,
+                            format!("AWS rule {rule}: the request could not be re-signed: {err}"),
+                            "CredShimResignFailed",
+                        );
                         Err(Box::new(Relayed::new(
                             Outcome::Failed(rule),
-                            status(code),
+                            response,
                             Some(labels),
                         )))
                     }
@@ -699,7 +781,7 @@ impl Session {
                 port = self.target.port,
                 "upstream sent an encoded response that cannot be scrubbed"
             );
-            return status(StatusCode::BAD_GATEWAY);
+            return unscrubbable(&self.target);
         }
         if scrubber.scrub_headers(&mut parts.headers) > 0 {
             tracing::warn!(host = %self.target.host, "scrubbed secret values from response headers");
@@ -729,7 +811,7 @@ impl Session {
                 port = self.target.port,
                 "upstream sent an encoded response that cannot be scrubbed"
             );
-            return status(StatusCode::BAD_GATEWAY);
+            return unscrubbable(&self.target);
         }
         let mut replaced = scrubber.scrub_headers(&mut parts.headers);
         let body = match scrubber.scrub(&body) {
@@ -757,10 +839,22 @@ impl Session {
                 parts.version = Version::HTTP_11;
                 Response::from_parts(parts, body.boxed())
             }
-            Err(SendError::BadUri) => status(StatusCode::BAD_REQUEST),
+            Err(SendError::BadUri) => refuse(
+                StatusCode::BAD_REQUEST,
+                Topic::Rejected,
+                SendError::BadUri.to_string(),
+            ),
             Err(err) => {
                 tracing::warn!(host = %target.host, port = target.port, error = %err, "intercepted request failed");
-                status(StatusCode::BAD_GATEWAY)
+                refuse(
+                    StatusCode::BAD_GATEWAY,
+                    Topic::Upstream,
+                    format!(
+                        "the request to {} failed: {}",
+                        target.authority(),
+                        error_chain(&err)
+                    ),
+                )
             }
         }
     }
@@ -816,12 +910,13 @@ impl Session {
                     "OAuth endpoint exchange failed"
                 );
                 let code = err.status();
-                let outcome = if code == StatusCode::FORBIDDEN {
-                    Outcome::Denied(rule)
+                let (outcome, topic) = if code == StatusCode::FORBIDDEN {
+                    (Outcome::Denied(rule.clone()), Topic::Deny)
                 } else {
-                    Outcome::Failed(rule)
+                    (Outcome::Failed(rule.clone()), Topic::Error)
                 };
-                (outcome, status(code))
+                let why = format!("the OAuth token exchange of {rule} failed: {err}");
+                (outcome, refuse(code, topic, why))
             }
         }
     }
@@ -840,7 +935,11 @@ impl Session {
             .insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
         parts.headers.insert(header::UPGRADE, protocol);
         let Ok(host) = HeaderValue::from_str(&target.authority()) else {
-            return status(StatusCode::BAD_REQUEST);
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                Topic::Rejected,
+                "the target is not a valid Host header",
+            );
         };
         parts.headers.insert(header::HOST, host);
         parts.uri = origin_form(&parts.uri);
@@ -849,7 +948,15 @@ impl Session {
             Ok(res) => res,
             Err(err) => {
                 tracing::warn!(host = %target.host, port = target.port, error = %err, "upgrade request failed");
-                return status(StatusCode::BAD_GATEWAY);
+                return refuse(
+                    StatusCode::BAD_GATEWAY,
+                    Topic::Upstream,
+                    format!(
+                        "the upgrade request to {} failed: {}",
+                        target.authority(),
+                        error_chain(&err)
+                    ),
+                );
             }
         };
         if res.status() != StatusCode::SWITCHING_PROTOCOLS {
@@ -858,7 +965,11 @@ impl Session {
             return Response::from_parts(parts, body.boxed());
         }
         let Some(downstream) = downstream else {
-            return status(StatusCode::BAD_GATEWAY);
+            return refuse(
+                StatusCode::BAD_GATEWAY,
+                Topic::Rejected,
+                "the client connection cannot be upgraded",
+            );
         };
         let upstream = hyper::upgrade::on(&mut res);
         let host = target.host.clone();
@@ -949,6 +1060,17 @@ impl<G: Unpin> http_body::Body for Holding<G> {
     fn size_hint(&self) -> http_body::SizeHint {
         self.body.size_hint()
     }
+}
+
+fn unscrubbable(target: &VerifiedTarget) -> Response<ProxyBody> {
+    refuse(
+        StatusCode::BAD_GATEWAY,
+        Topic::Error,
+        format!(
+            "{} sent a compressed response, which cannot be scrubbed of secrets",
+            target.authority()
+        ),
+    )
 }
 
 fn refusal_code(reason: Reason) -> &'static str {

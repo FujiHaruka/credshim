@@ -21,8 +21,8 @@ use clap::{Parser, Subcommand};
 use credshim_aws::{Aws, AwsCredentials, Signer, SsoOptions, SsoProvider, SsoSession};
 use credshim_core::{BaseUrls, Rule, RuleSet, Secrets};
 use credshim_mitm::{
-    AUDIT_TARGET, CertificateAuthority, Proxy, ProxyConfig, Reloader, Stats, Upstream,
-    UpstreamTransport,
+    AUDIT_TARGET, CertificateAuthority, Details, Guide, Proxy, ProxyConfig, Reloader, Stats,
+    Upstream, UpstreamTransport,
 };
 use credshim_oauth::{DEFAULT_MAX_BODY, OAuth, Provider, Vault};
 use credshim_secrets::SecretStore;
@@ -104,6 +104,8 @@ enum Command {
         lines: usize,
         #[arg(long)]
         no_follow: bool,
+        #[arg(long, value_name = "REQUEST_ID", conflicts_with_all = ["lines", "no_follow"])]
+        id: Option<String>,
     },
     Service {
         #[command(subcommand)]
@@ -274,10 +276,14 @@ async fn main() -> anyhow::Result<()> {
             config,
             lines,
             no_follow,
+            id,
         } => {
             let config = load_config(config.as_deref())?.config;
             let path = config.audit.path.context("no [audit] path is configured")?;
-            tail::run(&path, lines, !no_follow).await
+            match id {
+                Some(id) => tail::show(&path, &id),
+                None => tail::run(&path, lines, !no_follow).await,
+            }
         }
         Command::Service {
             command:
@@ -405,6 +411,39 @@ async fn run_doctor(
     Ok(())
 }
 
+fn details(config: &config::Config, source: Option<&Path>) -> Details {
+    if config.audit.path.is_none() {
+        return Details::NoAuditLog;
+    }
+    let exe = std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .unwrap_or_else(|_| PathBuf::from("credshim"));
+    let mut command = if exe == Path::new(service::INSTALLED) {
+        format!("sudo -u {} {}", service::SERVICE_USER, shell_word(&exe))
+    } else {
+        shell_word(&exe)
+    };
+    command.push_str(" tail");
+    if let Some(source) = source {
+        command.push_str(" --config ");
+        command.push_str(&shell_word(source));
+    }
+    command.push_str(" --id");
+    Details::Command(command)
+}
+
+fn shell_word(path: &Path) -> String {
+    let text = path.display().to_string();
+    if text
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "/._-+".contains(c))
+    {
+        text
+    } else {
+        format!("'{}'", text.replace('\'', r"'\''"))
+    }
+}
+
 fn load_config(path: Option<&Path>) -> anyhow::Result<config::Loaded> {
     let loaded = config::load(path)?;
     if let Some(source) = &loaded.source {
@@ -492,6 +531,7 @@ async fn run(config_path: Option<&Path>, listen: Option<SocketAddr>) -> anyhow::
     proxy_config.aws = routing.aws;
     proxy_config.scrub = routing.scrub;
     proxy_config.base_urls = routing.base_urls;
+    proxy_config.guide = Guide::new(details(&config, loaded.source.as_deref()));
     let _status = config
         .status
         .socket

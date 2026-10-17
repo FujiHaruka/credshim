@@ -136,11 +136,12 @@ socket = "/var/lib/credshim/status.sock"
 ```
 
 - `credshim-svc tail` は監査ログをライブで表示する。エージェントがいまどこを呼んでいるか、何が拒否されたかが分かる。
+- `credshim-svc tail --id <id>` は1件のリクエストの記録をすべて表示する。CredShim が止めた応答には、その id とこのコマンドが入る（[止められたリクエスト](troubleshooting.md#止められたリクエスト)）。
 - `credshim-svc status` はルールごとのカウンタを表示する。
 
 どちらにも秘密やダミーの値は出ない。どちらも専用ユーザーだけが読める場所にあるので、開発ユーザーからは見えない。
 
 ```text
-2026-09-30T03:31:37.5Z inject      200 POST https://api.openai.com:443/v1/chat/completions [openai] via connect
-2026-09-30T03:31:40.1Z deny        403 POST https://attacker.example:443/collect [openai] via connect
+2026-09-30T03:31:37.5Z inject      200 POST https://api.openai.com:443/v1/chat/completions [openai] via connect id=8d41c07a2b9e
+2026-09-30T03:31:40.1Z deny        403 POST https://attacker.example:443/collect [openai] via connect id=3f9c2a7b1e04
 ```

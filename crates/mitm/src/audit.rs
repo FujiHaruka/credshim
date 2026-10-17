@@ -2,9 +2,13 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::sync::Mutex;
 
-use http::{Method, StatusCode};
+use http::{Method, Response, StatusCode};
 
 pub use credshim_core::AUDIT_TARGET;
+
+use crate::guide::{Refusal, RequestId};
+use crate::live::Live;
+use crate::proxy::ProxyBody;
 
 #[derive(Debug)]
 pub(crate) enum Outcome {
@@ -216,21 +220,73 @@ impl Stats {
     }
 }
 
-pub(crate) fn record(entry: &Entry<'_>, outcome: &Outcome, status: StatusCode, stats: &Stats) {
-    record_labelled(entry, None, outcome, status, stats);
+pub(crate) fn record(
+    entry: &Entry<'_>,
+    aws: Option<&AwsLabels>,
+    outcome: &Outcome,
+    response: Response<ProxyBody>,
+    live: &Live,
+) -> Response<ProxyBody> {
+    let id = RequestId::new();
+    let detail = response.extensions().get::<Refusal>().map(Refusal::why);
+    write(
+        entry,
+        aws,
+        outcome,
+        response.status(),
+        &id,
+        detail,
+        live.stats(),
+    );
+    live.guide().finish(Some(&id), response)
 }
 
-pub(crate) fn record_labelled(
+pub(crate) fn record_unanswered(
+    entry: &Entry<'_>,
+    outcome: &Outcome,
+    status: StatusCode,
+    detail: Option<&str>,
+    stats: &Stats,
+) {
+    write(
+        entry,
+        None,
+        outcome,
+        status,
+        &RequestId::new(),
+        detail,
+        stats,
+    );
+}
+
+pub(crate) fn connect_entry<'a>(scheme: &'static str, host: &'a str, port: u16) -> Entry<'a> {
+    Entry {
+        ingress: "connect",
+        scheme,
+        host,
+        port,
+        method: &CONNECT,
+        path: "",
+    }
+}
+
+static CONNECT: Method = Method::CONNECT;
+
+fn write(
     entry: &Entry<'_>,
     aws: Option<&AwsLabels>,
     outcome: &Outcome,
     status: StatusCode,
+    id: &RequestId,
+    detail: Option<&str>,
     stats: &Stats,
 ) {
     stats.record(outcome);
     if let Some(aws) = aws {
         tracing::info!(
             target: AUDIT_TARGET,
+            id = id.as_str(),
+            detail,
             ingress = entry.ingress,
             scheme = entry.scheme,
             host = entry.host,
@@ -250,6 +306,8 @@ pub(crate) fn record_labelled(
     }
     tracing::info!(
         target: AUDIT_TARGET,
+        id = id.as_str(),
+        detail,
         ingress = entry.ingress,
         scheme = entry.scheme,
         host = entry.host,
@@ -261,35 +319,4 @@ pub(crate) fn record_labelled(
         status = status.as_u16(),
         "request"
     );
-}
-
-pub(crate) fn record_connect(
-    scheme: &'static str,
-    host: &str,
-    port: u16,
-    outcome: &Outcome,
-    status: StatusCode,
-    stats: &Stats,
-) {
-    record_connect_labelled(scheme, host, port, None, outcome, status, stats);
-}
-
-pub(crate) fn record_connect_labelled(
-    scheme: &'static str,
-    host: &str,
-    port: u16,
-    aws: Option<&AwsLabels>,
-    outcome: &Outcome,
-    status: StatusCode,
-    stats: &Stats,
-) {
-    let entry = Entry {
-        ingress: "connect",
-        scheme,
-        host,
-        port,
-        method: &Method::CONNECT,
-        path: "",
-    };
-    record_labelled(&entry, aws, outcome, status, stats);
 }

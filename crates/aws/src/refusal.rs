@@ -6,6 +6,63 @@ use crate::policy::S3;
 
 const EC2: &str = "ec2";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Format {
+    S3,
+    Ec2,
+    Json,
+    Query,
+}
+
+impl Format {
+    pub fn of(parts: &Parts, service: Option<&str>) -> Self {
+        match service {
+            Some(S3) => Self::S3,
+            Some(EC2) => Self::Ec2,
+            _ if speaks_json(parts) => Self::Json,
+            _ => Self::Query,
+        }
+    }
+
+    pub fn render(self, status: StatusCode, code: &str, message: &str) -> Response<Bytes> {
+        let (content_type, body) = match self {
+            Self::S3 => (
+                "application/xml",
+                format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>{code}</Code><Message>{}</Message></Error>",
+                    xml_escape(message)
+                ),
+            ),
+            Self::Ec2 => (
+                "text/xml",
+                format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Response><Errors><Error><Code>{code}</Code><Message>{}</Message></Error></Errors><RequestID>credshim</RequestID></Response>",
+                    xml_escape(message)
+                ),
+            ),
+            Self::Json => (
+                "application/json",
+                serde_json::json!({ "__type": code, "message": message }).to_string(),
+            ),
+            Self::Query => (
+                "text/xml",
+                format!(
+                    "<ErrorResponse><Error><Type>Sender</Type><Code>{code}</Code><Message>{}</Message></Error><RequestId>credshim</RequestId></ErrorResponse>",
+                    xml_escape(message)
+                ),
+            ),
+        };
+        let mut response = Response::new(Bytes::from(body));
+        *response.status_mut() = status;
+        let headers = response.headers_mut();
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+        if let Ok(code) = HeaderValue::from_str(code) {
+            headers.insert("x-amzn-errortype", code);
+        }
+        response
+    }
+}
+
 pub fn error_response(
     parts: &Parts,
     service: Option<&str>,
@@ -13,41 +70,7 @@ pub fn error_response(
     code: &str,
     message: &str,
 ) -> Response<Bytes> {
-    let (content_type, body) = match service {
-        Some(S3) => (
-            "application/xml",
-            format!(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>{code}</Code><Message>{}</Message></Error>",
-                xml_escape(message)
-            ),
-        ),
-        Some(EC2) => (
-            "text/xml",
-            format!(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Response><Errors><Error><Code>{code}</Code><Message>{}</Message></Error></Errors><RequestID>credshim</RequestID></Response>",
-                xml_escape(message)
-            ),
-        ),
-        _ if speaks_json(parts) => (
-            "application/json",
-            serde_json::json!({ "__type": code, "message": message }).to_string(),
-        ),
-        _ => (
-            "text/xml",
-            format!(
-                "<ErrorResponse><Error><Type>Sender</Type><Code>{code}</Code><Message>{}</Message></Error><RequestId>credshim</RequestId></ErrorResponse>",
-                xml_escape(message)
-            ),
-        ),
-    };
-    let mut response = Response::new(Bytes::from(body));
-    *response.status_mut() = status;
-    let headers = response.headers_mut();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
-    if let Ok(code) = HeaderValue::from_str(code) {
-        headers.insert("x-amzn-errortype", code);
-    }
-    response
+    Format::of(parts, service).render(status, code, message)
 }
 
 fn speaks_json(parts: &Parts) -> bool {

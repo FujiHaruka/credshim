@@ -1,6 +1,6 @@
 # Troubleshooting
 
-First run `credshim doctor` in the developer session. To see why a request was refused, use `credshim-svc tail` in the admin session (in the trial setup, the terminal running `credshim run`). For `credshim-svc`, see [the install variables](install.md#set-the-variables).
+First run `credshim doctor` in the developer session. A request that CredShim refused says why in its response, along with the command that shows its audit log entry (see [Refused requests](#refused-requests)). To watch every request, use `credshim-svc tail` in the admin session (in the trial setup, `credshim tail`). For `credshim-svc`, see [the install variables](install.md#set-the-variables).
 
 ## credshim doctor
 
@@ -31,20 +31,56 @@ What to check when something fails:
 - **AWS.** doctor uses `aws` on PATH to send a request with the dummy key to `credshim.test`, and checks that it goes through the proxy and trusts the CA. `AWS_CA_BUNDLE` replaces the trust store, so it must point at the combined bundle.
 - **Leftover real credentials (files).** doctor reports private keys in `~/.ssh`, real access keys and `credential_process` and SSO profiles in `~/.aws/credentials` and `~/.aws/config`, `~/.aws/sso/cache` and `~/.aws/cli/cache`, and real keys and session tokens in environment variables, by path and profile name only (without printing the values). To clean them up, see [Replace existing credentials](install.md#6-replace-existing-credentials).
 
-## 403 or 429 responses
+## Refused requests
 
-For a request that CredShim stops, it returns 403 or 429 and sends nothing upstream. The body is empty (except for AWS, which gets an error in the AWS format), so check the audit log for the reason.
+When CredShim stops a request, it sends nothing upstream and answers itself. The response says that it came from CredShim, why, and which commands show more.
 
-| Audit log verdict | Status | Meaning and fix |
-| --- | --- | --- |
-| `deny` | 403 | A dummy was sent to a host that is not that rule's destination. Sending over plaintext HTTP and connecting to a cloud metadata address also land here. If the destination is correct, fix the rule's `host`, `port`, `path_prefix` |
-| `not_allowed` | 403 | The destination is right, but the request is outside `allow_methods`, `allow_paths` (`operations` for AWS). If needed, add it to the rule's allowlist |
-| `limited` | 429 | A limit in `limits` was exceeded. Check the counters with `credshim-svc status` |
-| `misdirected` | 421 | The connection target and the Host inside the request disagree |
-| `error` | 500, 502 | Replacing failed (the rule's secret is not registered, is empty, and so on), or the role credentials for AWS SSO could not be obtained. The reason is in the service log |
-| `tunnel` | 502 | On a CONNECT to a host with no rule, the proxy could not open a TCP connection upstream (name resolution failed, the connection was refused, timeout). The reason is in the service log |
+```text
+HTTP/1.1 403 Forbidden
+credshim-error: not_allowed
+credshim-request-id: 3f9c2a7b1e04
+content-type: text/plain; charset=utf-8
 
-If the host has a rule but neither `inject` nor `deny` appears, and the app gets a TLS certificate error, the app does not read the proxy environment variables or the CA. Check with `credshim doctor`.
+credshim: POST /v1/files is outside the allow_methods or allow_paths of rule "openai"
+details: sudo -u credshim /usr/local/libexec/credshim/credshim tail --config /var/lib/credshim/config.toml --id 3f9c2a7b1e04
+docs: credshim docs troubleshooting#not_allowed
+```
+
+- `credshim-error` is the kind of refusal, and each kind has a section below.
+- `details` is the command that prints the whole audit log entry of this request. In the recommended setup only the admin can read the audit log, so an agent passes this line to a person. In the trial setup, the developer user can run it as is. If no audit log is configured, this line says so.
+- `docs` prints the matching section of this page.
+- AWS SDKs and the aws CLI get the same text as the message of an AWS-format error (for example, `CredShimOperationNotAllowed`).
+- Every response that went through a rule's host carries `credshim-request-id`, including the ones the upstream answered, so you can also look up a request that the upstream refused (for example, to see whether the real key was put in).
+
+If the host has a rule but the app gets a TLS certificate error and no `credshim-error`, the app does not read the proxy environment variables or the CA. Check with `credshim doctor`.
+
+### `deny`
+
+403 (400 or 413 for some AWS refusals). A dummy was sent to a host that is not that rule's destination, a dummy was sent over plain HTTP, or the target is a link-local or cloud metadata address or an AWS sign-in or SSO endpoint. If the destination is correct, fix the rule's `host`, `port`, `path_prefix`. For AWS, the message gives the reason (for example, an operation that issues credentials).
+
+### `not_allowed`
+
+403. The destination is right, but the request is outside `allow_methods`, `allow_paths` (`operations` for AWS). If it should be allowed, add it to the rule's allowlist.
+
+### `limited`
+
+429. A limit in `limits` (`per_minute`, `per_day`, `concurrent`) was exceeded. Retrying right away fails again. Check the counters with `credshim-svc status`.
+
+### `misdirected`
+
+421. The host the connection was opened to and the Host inside the request disagree, or a request to the base URL listener names another host.
+
+### `error`
+
+500 or 502. CredShim could not complete its own part: the rule's secret is not registered or is empty, the AWS SSO role credentials could not be obtained (the message says when `credshim aws sso login` is needed), the request could not be re-signed, or the upstream sent a compressed response that cannot be scrubbed of secrets.
+
+### `upstream`
+
+502. The proxy could not connect to the upstream or the request to it failed (name resolution failed, the connection was refused, timeout, or the upstream's certificate could not be verified). The first line has the error. In the audit log, a CONNECT to a host with no rule appears as `tunnel`.
+
+### `rejected`
+
+400, 404, 405, or 503. The request itself could not be handled: it was not a valid proxy request, no rule's `base_url_prefix` matched the path on the base URL listener, or too many AWS request bodies were being buffered (retry shortly).
 
 ## Go tools on macOS
 

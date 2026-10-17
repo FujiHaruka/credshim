@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 use credshim_core::BaseUrls;
 
 use crate::audit::Stats;
+use crate::guide::Guide;
 use crate::intercept::{Intercept, Services};
 
 pub(crate) struct Routing {
@@ -15,13 +16,15 @@ pub(crate) struct Routing {
 pub(crate) struct Live {
     routing: Arc<RwLock<Arc<Routing>>>,
     stats: Arc<Stats>,
+    guide: Arc<Guide>,
 }
 
 impl Live {
-    pub(crate) fn new(routing: Routing, stats: Arc<Stats>) -> Self {
+    pub(crate) fn new(routing: Routing, stats: Arc<Stats>, guide: Arc<Guide>) -> Self {
         Self {
             routing: Arc::new(RwLock::new(Arc::new(routing))),
             stats,
+            guide,
         }
     }
 
@@ -41,5 +44,9 @@ impl Live {
 
     pub(crate) fn stats(&self) -> &Arc<Stats> {
         &self.stats
+    }
+
+    pub(crate) fn guide(&self) -> &Guide {
+        &self.guide
     }
 }

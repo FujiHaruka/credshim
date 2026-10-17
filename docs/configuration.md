@@ -136,11 +136,12 @@ socket = "/var/lib/credshim/status.sock"
 ```
 
 - `credshim-svc tail` shows the audit log live. You can see where the agent is calling now and what was denied.
+- `credshim-svc tail --id <id>` prints the whole entry of one request. A response that CredShim refused gives its id and this command (see [Refused requests](troubleshooting.md#refused-requests)).
 - `credshim-svc status` shows the counters for each rule.
 
 Neither shows secret or dummy values. Both are in a location that only the service user can read, so the developer user cannot see them.
 
 ```text
-2026-09-30T03:31:37.5Z inject      200 POST https://api.openai.com:443/v1/chat/completions [openai] via connect
-2026-09-30T03:31:40.1Z deny        403 POST https://attacker.example:443/collect [openai] via connect
+2026-09-30T03:31:37.5Z inject      200 POST https://api.openai.com:443/v1/chat/completions [openai] via connect id=8d41c07a2b9e
+2026-09-30T03:31:40.1Z deny        403 POST https://attacker.example:443/collect [openai] via connect id=3f9c2a7b1e04
 ```
