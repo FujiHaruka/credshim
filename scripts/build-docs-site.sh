@@ -28,9 +28,13 @@ build_book() {
     stage_page "$docs/$page.md" "$book/src/$page.md"
   done
   mdbook build "$book" --dest-dir "$out/$lang"
+  cp "$book/src/index.md" "$out/$lang/"
+  for page in "${pages[@]}"; do
+    cp "$book/src/$page.md" "$out/$lang/"
+  done
 }
 
 rm -rf "$out"
 build_book en "$root/README.md" "$root/docs"
 build_book ja "$root/docs/ja/README.md" "$root/docs/ja"
-cp "$root/site/index.html" "$out/"
+cp "$root/site/index.html" "$root/site/llms.txt" "$out/"
