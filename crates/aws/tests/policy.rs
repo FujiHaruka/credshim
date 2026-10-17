@@ -1081,6 +1081,12 @@ fn greedy_routes_dot_segments_bucket_labels_and_spoofed_names_never_hide_an_oper
         )
         .is_empty()
     );
+    for method in ["GET", "PUT", "DELETE"] {
+        assert!(
+            identified(method, s3, "//", "s3", &[]).is_empty(),
+            "{method} //"
+        );
+    }
     assert_eq!(identified("GET", s3, "/dir/", "s3", &[]), ["GetObject"]);
     assert_eq!(
         identified(

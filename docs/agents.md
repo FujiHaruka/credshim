@@ -24,7 +24,7 @@ In the recommended setup the agent can read neither the config nor the secrets, 
 
 1. Write the sections to add in a file of your own. `credshim preset <name>` prints a ready-made rule for common APIs; for others, see `credshim docs configuration#writing-rules`.
 2. Run `credshim config check <file>` and fix every problem it lists. Each comes with the docs section to read.
-3. Give the person the draft, the table of where each real key goes, and the steps that `config check` printed. Point out every line marked `!!`. Some of them, such as `secret set` and `aws sso login`, are for a person at a terminal: do not pipe a value into them or fake a terminal.
+3. Give the person the draft's path and the steps that `config check` printed. The person copies the draft to a file you cannot change, runs `config check` on that copy, and reads the table of where each real key goes from their own terminal before adding the copy (the commands are in `credshim docs agent-setup#4-hand-over`). Some of the steps, such as `secret set` and `aws sso login`, are for a person at a terminal: do not pipe a value into them or fake a terminal.
 
 ## A note for the agent's instructions
 

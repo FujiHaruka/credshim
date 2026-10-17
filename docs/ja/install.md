@@ -130,7 +130,7 @@ for chunk in openai.OpenAI().chat.completions.create(
 
 ### ダミーのキーをプロジェクトに渡す
 
-ダミーのキーは `/etc/credshim/keys.env`（`credshim env --keys` の出力と同じ）に別に置いてある。中身は次のとおり。
+ダミーのキーは `/etc/credshim/keys.env`（`credshim env --keys` の出力と同じ）に別に置いてある。読めるのはインストールで指定した開発ユーザー（`--user`）だけで、指定が無ければ root だけが読める。そのときは `service reload` が開発ユーザーに渡す方法を示す。中身は次のとおり。
 
 - ルールに `env` があれば、そのダミーのキー（`OPENAI_API_KEY` など）
 - AWS のルールがちょうど1つなら、そのダミーの `AWS_ACCESS_KEY_ID` と `AWS_SECRET_ACCESS_KEY`（2つ以上なら、`~/.aws/credentials` に書くプロファイルをコメントで出す）
@@ -151,6 +151,7 @@ for chunk in openai.OpenAI().chat.completions.create(
 - サービスの定義とプロキシのバイナリを書き換えられない
 - SSH エージェントのディレクトリに書けず、エージェントから鍵の一覧は取れる
 - `/etc/credshim/env` の `AWS_CA_BUNDLE`・`SSH_AUTH_SOCK` が公開の場所を指し、ダミーのキーを含まない
+- `/etc/credshim/keys.env` が開発ユーザーのもので、ほかのユーザーには読めない
 - プロキシが専用ユーザーで動き、開発ユーザーからシグナルを送れずメモリも読めない。クラウドのメタデータのアドレスと AWS SSO のポータルへのトンネルをプロキシが拒否する（この2つはマシンの外へ何も出さない）
 
 `FAIL` の行は、開発ユーザーが何に届いてしまうかを示す。sudo や管理者グループの失敗は手順 1 に戻る。それ以外はたいてい導入後に変更が加えられたためで、`sudo $bin service install` で元に戻る。

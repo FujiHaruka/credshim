@@ -307,6 +307,30 @@ fn query_parameter_is_replaced_and_percent_encoded_leaving_other_pairs_intact() 
 }
 
 #[test]
+fn a_dangling_escape_before_the_query_dummy_cannot_merge_with_the_secret() {
+    let encoded_secret = "real%20gemini%2Fsecret%26x%3D1";
+    for (value, expected) in [
+        (format!("%4{GEMINI_DUMMY}"), format!("%4{GEMINI_DUMMY}")),
+        (format!("%{GEMINI_DUMMY}"), format!("%25{encoded_secret}")),
+        (
+            format!("%2{GEMINI_DUMMY}x{GEMINI_DUMMY}"),
+            format!("%2C{}x{encoded_secret}", &GEMINI_DUMMY[1..]),
+        ),
+    ] {
+        let mut parts = request(&format!("/v1/models?key={GEMINI_DUMMY}&key={value}"), &[]);
+
+        let verdict = injector().apply(GEMINI, &mut parts).unwrap();
+
+        assert_eq!(verdict, Verdict::Injected(vec!["gemini".to_string()]));
+        assert_eq!(
+            parts.uri.to_string(),
+            format!("/v1/models?key={encoded_secret}&key={expected}"),
+            "{value}"
+        );
+    }
+}
+
+#[test]
 fn percent_encoded_query_dummy_is_replaced() {
     let encoded: String = GEMINI_DUMMY.bytes().map(|b| format!("%{b:02x}")).collect();
     let mut parts = request(
@@ -488,7 +512,18 @@ fn invalid_rules_are_rejected() {
         with(|s| s.port = Some(0)),
         RuleError::InvalidPort(_)
     ));
-    for prefix in ["v1", "/v1/../x", "/v1/%2e", "/v1?x", "/v1#x", "/./v1"] {
+    for prefix in [
+        "v1",
+        "/v1/../x",
+        "/v1/%2e",
+        "/v1?x",
+        "/v1#x",
+        "/./v1",
+        "/v1\u{1b}[2K",
+        "/v1\r\n",
+        "/v 1",
+        "/v1/é",
+    ] {
         let mut spec = ok();
         spec.path_prefix = Some(prefix.to_string());
         assert!(

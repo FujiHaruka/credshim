@@ -49,7 +49,7 @@ pub enum PolicyError {
     #[error("allow_paths must list at least one path")]
     NoPaths,
     #[error(
-        "allow_paths entry {0:?} must start with '/' and contain no dot segments, '%', '?', '#' or '\\'"
+        "allow_paths entry {0:?} must start with '/', use only printable ASCII without spaces, and contain no dot segments, '%', '?', '#' or '\\'"
     )]
     InvalidPath(String),
     #[error("limits must be positive")]

@@ -226,6 +226,10 @@ fn invalid_policies_are_rejected() {
             r#"allow_paths = ["v1"]"#,
             PolicyError::InvalidPath("v1".into()),
         ),
+        (
+            r#"allow_paths = ["/", "/\u001b[1A\r"]"#,
+            PolicyError::InvalidPath("/\u{1b}[1A\r".into()),
+        ),
         ("limits = { per_minute = 0 }", PolicyError::ZeroLimit),
     ] {
         let err = RuleSet::new(vec![spec(extra)]).unwrap_err();

@@ -322,6 +322,9 @@ fn segments(path: &str) -> Vec<String> {
 
 fn literal_segments(path: &str) -> Option<Vec<String>> {
     let path = path.strip_prefix('/')?;
+    if path.starts_with('/') {
+        return None;
+    }
     let path = path.strip_suffix('/').unwrap_or(path);
     if path.is_empty() {
         return Some(Vec::new());

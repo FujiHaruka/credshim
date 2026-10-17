@@ -130,7 +130,7 @@ You can put `. /etc/credshim/env` in your shell config (`~/.zshrc` or similar). 
 
 ### Giving the dummy keys to a project
 
-The dummy keys are kept separately in `/etc/credshim/keys.env` (the same as the output of `credshim env --keys`). It contains:
+The dummy keys are kept separately in `/etc/credshim/keys.env` (the same as the output of `credshim env --keys`). Only the developer user given at install (`--user`) can read it; without one, only root can, and `service reload` says how to give it to the developer user. It contains:
 
 - For each rule with `env`, its dummy key (`OPENAI_API_KEY` and so on)
 - If there is exactly one AWS rule, its dummy `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (with two or more, the profiles to write in `~/.aws/credentials`, as comments)
@@ -151,6 +151,7 @@ Run `credshim verify` as the developer user (`credshim verify --print` shows the
 - It cannot modify the service definition or the proxy binary
 - It cannot write to the SSH agent's directory, and can list keys from the agent
 - `AWS_CA_BUNDLE` and `SSH_AUTH_SOCK` in `/etc/credshim/env` point to public locations, and the file contains no dummy keys
+- `/etc/credshim/keys.env` belongs to the developer user and other users cannot read it
 - The proxy runs as the service user, the developer user cannot signal it or read its memory, and it refuses a tunnel to the cloud metadata address and to the AWS SSO portal (nothing leaves the machine for these two)
 
 Each `FAIL` line names what the developer user could reach. A failure about sudo or admin groups goes back to step 1; the others usually mean the installation was changed afterwards, and `sudo $bin service install` restores it.

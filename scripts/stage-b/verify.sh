@@ -25,11 +25,13 @@ case $(uname -s) in
     service_user=_credshim
     service_file=/Library/LaunchDaemons/dev.credshim.proxy.plist
     owner_of() { stat -f %Su "$1"; }
+    mode_of() { stat -f %Lp "$1"; }
     ;;
   *)
     service_user=credshim
     service_file=/etc/systemd/system/credshim.service
     owner_of() { stat -c %U "$1"; }
+    mode_of() { stat -c %a "$1"; }
     ;;
 esac
 
@@ -87,6 +89,9 @@ check "public CA certificate is readable" test -r "$public/ca.pem"
 check "trust bundle is readable" test -r "$public/bundle.pem"
 check "shell environment file is readable" test -r "$public/env"
 check "dummy keys file is readable" test -r "$public/keys.env"
+check "dummy keys file is owned by the development user" test "$(owner_of "$public/keys.env" 2>/dev/null)" = "$(id -un)"
+private_to_owner() { (( (8#$(mode_of "$1") & 8#077) == 0 )); }
+check "dummy keys file is not readable by other users" private_to_owner "$public/keys.env"
 keys_absent_from_env() {
   local name
   for name in $(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$public/keys.env"); do
