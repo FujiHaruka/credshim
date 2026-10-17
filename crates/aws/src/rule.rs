@@ -322,7 +322,12 @@ impl AwsRule {
     }
 
     pub fn refuses(&self, scope: &Scope) -> Option<ScopeRefusal> {
-        if !reaches_service(self.services.as_ref(), &scope.service) {
+        if !reaches_service(
+            self.services
+                .as_ref()
+                .map(|allowed| allowed.contains(&scope.service)),
+            &scope.service,
+        ) {
             return Some(ScopeRefusal::Service);
         }
         if self
@@ -336,20 +341,19 @@ impl AwsRule {
     }
 }
 
-pub fn reaches_service<'a>(
-    services: Option<impl IntoIterator<Item = &'a String>>,
-    service: &str,
-) -> bool {
-    match services {
-        Some(allowed) => allowed.into_iter().any(|allowed| allowed == service),
-        None => !CUSTOMER_HOSTED_SERVICES.contains(&service),
-    }
+fn reaches_service(listed: Option<bool>, service: &str) -> bool {
+    listed.unwrap_or_else(|| !CUSTOMER_HOSTED_SERVICES.contains(&service))
 }
 
 pub fn customer_hosted_reach(services: Option<&[String]>) -> Vec<&'static str> {
     CUSTOMER_HOSTED_SERVICES
         .into_iter()
-        .filter(|service| reaches_service(services, service))
+        .filter(|service| {
+            reaches_service(
+                services.map(|allowed| allowed.iter().any(|allowed| allowed == service)),
+                service,
+            )
+        })
         .collect()
 }
 

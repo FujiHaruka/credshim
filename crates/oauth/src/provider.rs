@@ -85,6 +85,12 @@ pub(crate) struct Endpoint {
     pub path: String,
 }
 
+pub fn endpoint_host(url: &str) -> Option<String> {
+    Endpoint::parse("", "endpoint", url)
+        .ok()
+        .map(|endpoint| endpoint.host)
+}
+
 impl Endpoint {
     fn parse(provider: &str, field: &'static str, url: &str) -> Result<Self, ProviderError> {
         let invalid = || ProviderError::InvalidEndpoint {

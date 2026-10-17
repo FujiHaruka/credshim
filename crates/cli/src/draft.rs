@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::bail;
 
 use credshim_aws::rule::customer_hosted_reach;
-use credshim_core::Limits;
+use credshim_core::{DEFAULT_PORT, Limits};
 
 use crate::config::{self, Config};
 use crate::handoff::{Handoff, shell_word};
@@ -59,7 +59,7 @@ pub fn destinations(config: &Config) -> String {
         let target = format!(
             "{}:{}{}",
             rule.host,
-            rule.port.unwrap_or(443),
+            rule.port.unwrap_or(DEFAULT_PORT),
             rule.path_prefix.as_deref().unwrap_or_default()
         );
         let _ = writeln!(
@@ -159,8 +159,8 @@ pub fn destinations(config: &Config) -> String {
         for host in &provider.resource_hosts {
             let _ = writeln!(
                 out,
-                "      access tokens -> https://{host}:443{}",
-                origin(preset::preset_for_host(&host.to_ascii_lowercase()), "host")
+                "      access tokens -> https://{host}:{DEFAULT_PORT}{}",
+                origin(preset::preset_for_host(host), "host")
             );
         }
     }
@@ -178,9 +178,7 @@ fn origin(preset: Option<&str>, what: &str) -> String {
 }
 
 fn endpoint_preset(url: &str) -> Option<&'static str> {
-    let authority = url.strip_prefix("https://")?.split('/').next()?;
-    let host = authority.split(':').next()?;
-    preset::preset_for_host(&host.to_ascii_lowercase())
+    preset::preset_for_host(&credshim_oauth::endpoint_host(url)?)
 }
 
 fn aws_reach(services: Option<&[String]>) -> String {

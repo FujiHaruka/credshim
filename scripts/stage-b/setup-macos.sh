@@ -125,8 +125,11 @@ sudo -u "$user" HOME="$state" "$bin" env --config "$state/config.toml" \
 echo "# dummy keys, for a project's .env or direnv: $public/keys.env" >> "$tmp/env"
 install -m 0644 -o root -g wheel "$tmp/env" "$public/env"
 sudo -u "$user" HOME="$state" "$bin" env --keys --config "$state/config.toml" > "$tmp/keys.env"
-keys_owner=$(stat -f %u "$public/keys.env" 2>/dev/null || echo "${dev_uid:-0}")
-[[ $# -eq 1 ]] || keys_owner=$dev_uid
+if [[ -n ${2:-} ]]; then
+  keys_owner=$dev_uid
+else
+  keys_owner=$(stat -f %u "$public/keys.env" 2>/dev/null || echo "${dev_uid:-0}")
+fi
 install -m 0400 -o "$keys_owner" -g wheel "$tmp/keys.env" "$public/keys.env"
 [[ $keys_owner != 0 ]] || echo "note: only root can read $public/keys.env; give it to the development user with: sudo $bin service install --user <development-user>" >&2
 

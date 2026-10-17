@@ -321,14 +321,11 @@ fn segments(path: &str) -> Vec<String> {
 }
 
 fn literal_segments(path: &str) -> Option<Vec<String>> {
-    let path = path.strip_prefix('/')?;
-    if path.starts_with('/') {
-        return None;
-    }
-    let path = path.strip_suffix('/').unwrap_or(path);
-    if path.is_empty() {
+    if path == "/" {
         return Some(Vec::new());
     }
+    let path = path.strip_prefix('/')?;
+    let path = path.strip_suffix('/').unwrap_or(path);
     path.split('/')
         .map(|segment| {
             let segment = percent_decode_str(segment).decode_utf8_lossy().into_owned();
