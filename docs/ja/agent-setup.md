@@ -61,13 +61,11 @@ credshim config check draft.toml
 
 ### 4. 人に渡す
 
-次の内容を、この順で1つのメッセージにして人に渡す。
+`config check` が表示するコマンドは、それを実行したバイナリに合わせた形になる。管理者のセッション向けの形（`sudo -u $user $bin ...`）で出すのは入っているバイナリだけなので、落としたバイナリではなく、入っているバイナリの出力を渡す。
 
-1. 開発ユーザーが管理者なら、[導入の手順 1](install.md#1-開発ユーザーを管理者でなくする)。
-2. CredShim が入っていなければ、[手順 2](install.md#2-インストールする管理者のセッション) のインストールの1行。`--user` には開発ユーザーを指定する。
-3. `config check` が表示した「Where it lets each real key go」の表と、`!!` の付いた行をすべて確かめてほしいという依頼。
-4. 下書きを設定に足すコマンド（管理者のセッションで実行）。`sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/null < draft.toml`（`$user` は [専用ユーザー](install.md#変数を決める)）。
-5. `config check` が表示した残りの手順。`secret set`・`ssh keygen`・`aws sso login` のコマンドと、再読み込み。
+1. 開発ユーザーが管理者か、CredShim が入っていなければ、まず必要に応じて [導入の手順 1](install.md#1-開発ユーザーを管理者でなくする) と、[手順 2](install.md#2-インストールする管理者のセッション) のインストールの1行を人に渡す。`--user` には開発ユーザーを指定する。入ったと言われるまで待つ。
+2. 入っているバイナリ（[変数](install.md#変数を決める) の `$bin`）で、下書きにもう一度 `config check` を実行する。
+3. 次を1つのメッセージにして人に渡す。その実行が表示した「Where it lets each real key go」の表と、`!!` の付いた行をすべて確かめてほしいという依頼。管理者のセッションで下書きを設定に足すコマンド `sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/null < draft.toml`（`$user` は専用ユーザー）。その実行が続けて表示した手順（`secret set`・`ssh keygen`・`aws sso login` のコマンドと、再読み込み）。
 
 そのあと、人が終えたと言うまで待つ。
 
@@ -77,11 +75,12 @@ credshim config check draft.toml
 
 ```sh
 . /etc/credshim/env
+export PATH="/Library/CredShim/bin:$PATH"    # Linux は /usr/local/libexec/credshim
 credshim verify    # 開発ユーザーが本物のキーに届かず、プロキシが止めるべきものを止める
 credshim doctor    # このシェルのツールがプロキシを通り、CA を信頼している
 ```
 
-入っているバイナリ（[変数](install.md#変数を決める) の `$bin`）を使う。失敗ごとに、示された `credshim docs` のコマンドを実行する。管理者の権限が要る直し方は人に渡す。
+失敗ごとに、示された `credshim docs` のコマンドを実行する。管理者の権限が要る直し方は人に渡す。
 
 ### 6. 仕上げる
 

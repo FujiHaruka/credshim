@@ -61,13 +61,11 @@ Fix every problem it lists until it reports a valid config.
 
 ### 4. Hand over
 
-Give the person one message with, in order:
+The commands that `config check` prints follow the binary that ran it. Only the installed binary prints them in the form for the admin session (`sudo -u $user $bin ...`), so hand over its output, not the downloaded one's.
 
-1. If the developer user can administer the machine: [step 1 of the installation](install.md#1-make-the-developer-user-a-non-admin).
-2. If CredShim is not installed: the install one-liner from [step 2](install.md#2-install-admin-session), with `--user` set to the developer user.
-3. The "Where it lets each real key go" table that `config check` printed, and a request to confirm every line marked `!!`.
-4. The command that adds the draft to the config, in the admin session: `sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/null < draft.toml` (`$user` is [the service user](install.md#set-the-variables)).
-5. The steps that `config check` printed after that: the `secret set`, `ssh keygen`, and `aws sso login` commands, and the reload.
+1. If the developer user can administer the machine, or CredShim is not installed, first give the person [step 1 of the installation](install.md#1-make-the-developer-user-a-non-admin) as needed and the install one-liner from [step 2](install.md#2-install-admin-session), with `--user` set to the developer user. Wait until they say it is installed.
+2. Run `config check` on the draft again with the installed binary (`$bin` in [the install variables](install.md#set-the-variables)).
+3. Give the person one message with: the "Where it lets each real key go" table from that run and a request to confirm every line marked `!!`; the command that adds the draft to the config in the admin session, `sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/null < draft.toml` (`$user` is the service user); and the steps that run printed after that (the `secret set`, `ssh keygen`, and `aws sso login` commands, and the reload).
 
 Then wait until the person says they are done.
 
@@ -77,11 +75,12 @@ In the developer user's session:
 
 ```sh
 . /etc/credshim/env
+export PATH="/Library/CredShim/bin:$PATH"    # on Linux, /usr/local/libexec/credshim
 credshim verify    # the developer user cannot reach the real keys, and the proxy refuses what it must
 credshim doctor    # the tools in this shell go through the proxy and trust its CA
 ```
 
-Use the installed binary (`$bin` in [the install variables](install.md#set-the-variables)). For each failure, run the `credshim docs` command it points to, and give the person any fix that needs admin rights.
+For each failure, run the `credshim docs` command it points to, and give the person any fix that needs admin rights.
 
 ### 6. Finish
 
