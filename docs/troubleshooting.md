@@ -22,14 +22,47 @@ Checks, with this shell's environment as is, that curl, python3, node, go, ssh, 
 
 `credshim.test` is a reserved host name that the proxy itself answers; it does not exist in DNS. Reaching it shows that the traffic goes through the proxy, and a successful TLS handshake shows that the CA is trusted. `credshim doctor --snippets` prints one-liners that check the same thing from each language (requests, httpx, Node's fetch, Go).
 
-What to check when something fails:
+A line marked `fail` or `warn` names a check, and each check has a section below. At the end, doctor prints the command for each of those sections. `credshim doctor --verbose` also prints the full output of each failed probe.
 
-- **Node.** The built-in fetch does not look at `HTTPS_PROXY` without `NODE_USE_ENV_PROXY=1` (Node 24 and later). On older Node, pass undici's `EnvHttpProxyAgent` as the dispatcher. When the request failed without going through the proxy (`ENOTFOUND credshim.test`), doctor says so.
-- **Python.** The ssl module of Apple's bundled `/usr/bin/python3` does not read `SSL_CERT_FILE`. requests and httpx read `REQUESTS_CA_BUNDLE` and `SSL_CERT_FILE` themselves, so they work.
-- **Go.** On Linux, Go reads `SSL_CERT_FILE`. On macOS it often does not (see [Go tools on macOS](#go-tools-on-macos) below). doctor runs a temporary file with no go.mod through `go run`, so on macOS it reports a failure unless the CA is trusted in the keychain.
-- **SSH.** doctor asks the agent at `SSH_AUTH_SOCK` for its key list and, if there is no CredShim key (comment `credshim:<rule name>`), warns that it points at a different agent. It reports when `ssh` on PATH is older than OpenSSH 8.9 (which does not send session-bind).
-- **AWS.** doctor uses `aws` on PATH to send a request with the dummy key to `credshim.test`, and checks that it goes through the proxy and trusts the CA. `AWS_CA_BUNDLE` replaces the trust store, so it must point at the combined bundle.
-- **Leftover real credentials (files).** doctor reports private keys in `~/.ssh`, real access keys and `credential_process` and SSO profiles in `~/.aws/credentials` and `~/.aws/config`, `~/.aws/sso/cache` and `~/.aws/cli/cache`, and real keys and session tokens in environment variables, by path and profile name only (without printing the values). To clean them up, see [Replace existing credentials](install.md#6-replace-existing-credentials).
+### `proxy`
+
+doctor could not get an answer from `credshim.test` through the proxy, or the certificate did not chain to the CA. Check that the proxy is running (`credshim-svc status`, or the `credshim run` terminal in the trial setup) and that `HTTPS_PROXY` points at its address.
+
+### `env`
+
+An environment variable that apps need is missing or points at the wrong file. Load the variables with `. /etc/credshim/env` (in the trial setup, `eval "$(credshim env)"`). `SSL_CERT_FILE` and `AWS_CA_BUNDLE` must point at the combined bundle, not the CA alone, because they replace the trust store.
+
+### `curl`
+
+curl did not reach `credshim.test` through the proxy or did not trust the CA. curl reads `HTTPS_PROXY` and `SSL_CERT_FILE` (or `CURL_CA_BUNDLE`).
+
+### `python`
+
+The ssl module of Apple's bundled `/usr/bin/python3` does not read `SSL_CERT_FILE`. requests and httpx read `REQUESTS_CA_BUNDLE` and `SSL_CERT_FILE` themselves, so they work.
+
+### `node`
+
+The built-in fetch does not look at `HTTPS_PROXY` without `NODE_USE_ENV_PROXY=1` (Node 24 and later). On older Node, pass undici's `EnvHttpProxyAgent` as the dispatcher. When the request failed without going through the proxy (`ENOTFOUND credshim.test`), doctor says so. Node trusts the CA through `NODE_EXTRA_CA_CERTS`.
+
+### `go`
+
+On Linux, Go reads `SSL_CERT_FILE`. On macOS it often does not (see [Go tools on macOS](#go-tools-on-macos) below). doctor runs a temporary file with no go.mod through `go run`, so on macOS it reports a failure unless the CA is trusted in the keychain.
+
+### `ssh`
+
+doctor asks the agent at `SSH_AUTH_SOCK` for its key list and, if there is no CredShim key (comment `credshim:<rule name>`), warns that it points at a different agent. If the agent does not answer, check that the proxy is running and that this uid is in `[ssh] client_uids`.
+
+### `openssh`
+
+The `ssh` on PATH is older than OpenSSH 8.9, or is not OpenSSH. The CredShim agent needs session-bind, which OpenSSH sends from 8.9.
+
+### `aws`
+
+doctor uses `aws` on PATH to send a request with the dummy key to `credshim.test`, and checks that it goes through the proxy and trusts the CA. `AWS_CA_BUNDLE` replaces the trust store, so it must point at the combined bundle.
+
+### `files`
+
+doctor reports private keys in `~/.ssh`, real access keys and `credential_process` and SSO profiles in `~/.aws/credentials` and `~/.aws/config`, `~/.aws/sso/cache` and `~/.aws/cli/cache`, and real keys and session tokens in environment variables, by path and profile name only (without printing the values). To clean them up, see [Replace existing credentials](install.md#6-replace-existing-credentials).
 
 ## Refused requests
 

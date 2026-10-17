@@ -59,7 +59,8 @@ async fn run_refuses_a_config_others_could_rewrite() {
 async fn every_config_reading_command_refuses_a_config_others_could_rewrite() {
     let (home, config) = ready_home().await;
     chmod(Path::new(&config), 0o664);
-    let run_error = run_refused(home.path(), &config).await;
+    let error = |stderr: &str| stderr.split("\ndocs: ").next().unwrap().to_string();
+    let run_error = error(&run_refused(home.path(), &config).await);
 
     for args in [
         vec!["secret", "set", "openai", "--config", &config],
@@ -72,11 +73,9 @@ async fn every_config_reading_command_refuses_a_config_others_could_rewrite() {
         let output = output(home.path(), &args).await;
 
         assert!(!output.status.success(), "{args:?}");
-        assert_eq!(
-            String::from_utf8_lossy(&output.stderr),
-            run_error,
-            "{args:?}"
-        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(error(&stderr), run_error, "{args:?}");
+        assert!(stderr.contains("\ndocs: credshim docs "), "{args:?}");
     }
 }
 

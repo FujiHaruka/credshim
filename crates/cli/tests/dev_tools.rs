@@ -349,6 +349,22 @@ async fn doctor_fails_when_the_proxy_is_not_running() {
         "{}",
         text(&doctor)
     );
+    assert!(
+        stdout.contains("\n  credshim docs troubleshooting#proxy\n"),
+        "{}",
+        text(&doctor)
+    );
+    assert!(
+        stdout.contains("Full output of each failed probe: credshim doctor --verbose"),
+        "{}",
+        text(&doctor)
+    );
+    assert!(
+        String::from_utf8_lossy(&doctor.stderr)
+            .ends_with("docs: credshim docs troubleshooting#credshim-doctor\n"),
+        "{}",
+        text(&doctor)
+    );
 }
 
 #[tokio::test]

@@ -1,4 +1,5 @@
 mod config;
+mod docs;
 mod doctor;
 mod env;
 mod harden;
@@ -14,10 +15,11 @@ use std::io::{IsTerminal, Write};
 use std::net::SocketAddr;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, bail};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use credshim_aws::{Aws, AwsCredentials, Signer, SsoOptions, SsoProvider, SsoSession};
 use credshim_core::{BaseUrls, Rule, RuleSet, Secrets};
 use credshim_mitm::{
@@ -96,6 +98,16 @@ enum Command {
         snippets: bool,
         #[arg(long)]
         no_runtimes: bool,
+        #[arg(long)]
+        verbose: bool,
+    },
+    Docs {
+        #[arg(value_name = "PAGE[#SECTION]")]
+        topic: Option<String>,
+        #[arg(long)]
+        toc: bool,
+        #[arg(long, value_enum)]
+        lang: Option<docs::Lang>,
     },
     Tail {
         #[arg(long, value_name = "FILE")]
@@ -201,13 +213,63 @@ enum SecretCommand {
     },
 }
 
+const COMMAND_TOPICS: &[(&str, &str)] = &[
+    ("run", "configuration"),
+    ("ca", "install#2-install-admin-session"),
+    ("secret", "configuration#secret-stores"),
+    ("status", "configuration#audit-log-and-status"),
+    ("preset", "configuration#writing-rules"),
+    ("env", "install#4-use-it-developer-session"),
+    ("doctor", "troubleshooting#credshim-doctor"),
+    ("tail", credshim_mitm::guide::AUDIT_LOG_TOPIC),
+    ("service", "install"),
+    ("ssh", "ssh"),
+    ("aws", "aws"),
+    ("docs", ""),
+];
+
+fn docs_command(name: Option<&str>) -> String {
+    let topic = name
+        .and_then(|name| COMMAND_TOPICS.iter().find(|(command, _)| *command == name))
+        .map_or("troubleshooting", |(_, topic)| topic);
+    format!("credshim docs {topic}").trim_end().to_string()
+}
+
+fn cli() -> clap::Command {
+    COMMAND_TOPICS.iter().fold(
+        Cli::command().after_help(
+            "Docs: credshim docs (built in, for this version); when something fails: credshim docs troubleshooting",
+        ),
+        |cli, (name, _)| {
+            cli.mut_subcommand(name, |sub| {
+                sub.after_help(format!("Docs: {}", docs_command(Some(name))))
+            })
+        },
+    )
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> ExitCode {
+    let matches = cli().get_matches();
+    let name = matches.subcommand_name().map(str::to_string);
+    let parsed = Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
+    match dispatch(parsed.command).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            let mut stderr = std::io::stderr();
+            let _ = writeln!(stderr, "Error: {err:?}");
+            let _ = writeln!(stderr, "docs: {}", docs_command(name.as_deref()));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn dispatch(command: Command) -> anyhow::Result<()> {
     harden::disable_core_dumps()?;
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .map_err(|_| anyhow::anyhow!("a rustls crypto provider is already installed"))?;
-    match Cli::parse().command {
+    match command {
         Command::Run {
             config,
             check: true,
@@ -265,12 +327,22 @@ async fn main() -> anyhow::Result<()> {
             ca_cert,
             snippets,
             no_runtimes,
+            verbose,
         } => {
             if snippets {
                 write!(std::io::stdout(), "{}", doctor::snippets())?;
                 return Ok(());
             }
-            run_doctor(config.as_deref(), proxy, ca_cert, !no_runtimes).await
+            run_doctor(config.as_deref(), proxy, ca_cert, !no_runtimes, verbose).await
+        }
+        Command::Docs { topic, toc, lang } => {
+            let lang = lang.unwrap_or_else(docs::Lang::from_env);
+            write!(
+                std::io::stdout(),
+                "{}",
+                docs::render(topic.as_deref(), toc, lang)?
+            )?;
+            Ok(())
         }
         Command::Tail {
             config,
@@ -383,6 +455,7 @@ async fn run_doctor(
     proxy: Option<SocketAddr>,
     ca_cert: Option<PathBuf>,
     runtimes: bool,
+    verbose: bool,
 ) -> anyhow::Result<()> {
     let proxy = proxy.or_else(doctor::proxy_from_env);
     let ca_cert = ca_cert.or_else(|| std::env::var_os("NODE_EXTRA_CA_CERTS").map(PathBuf::from));
@@ -403,6 +476,7 @@ async fn run_doctor(
         proxy,
         ca_cert,
         runtimes,
+        verbose,
     })
     .await?;
     if !passed {
@@ -966,5 +1040,38 @@ mod tests {
             err.to_string(),
             "the value for openai is empty; nothing was stored"
         );
+    }
+
+    #[test]
+    fn every_docs_topic_the_binary_points_to_exists_in_both_languages() {
+        let topics = COMMAND_TOPICS
+            .iter()
+            .map(|(_, topic)| topic.to_string())
+            .filter(|topic| !topic.is_empty())
+            .chain(credshim_mitm::Topic::ALL.iter().map(|topic| {
+                format!(
+                    "{}#{}",
+                    credshim_mitm::guide::TROUBLESHOOTING,
+                    topic.anchor()
+                )
+            }))
+            .chain(
+                doctor::CHECKS
+                    .iter()
+                    .map(|check| format!("troubleshooting#{check}")),
+            )
+            .chain(
+                [
+                    "troubleshooting",
+                    credshim_mitm::guide::AUDIT_LOG_TOPIC,
+                    "troubleshooting#go-tools-on-macos",
+                ]
+                .map(str::to_string),
+            );
+        for topic in topics {
+            for lang in [docs::Lang::En, docs::Lang::Ja] {
+                assert!(docs::resolves(&topic, lang), "{topic} ({lang:?})");
+            }
+        }
     }
 }

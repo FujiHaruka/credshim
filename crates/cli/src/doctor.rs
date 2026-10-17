@@ -55,28 +55,77 @@ pub fn snippets() -> String {
     )
 }
 
+pub const CHECKS: [&str; 10] = [
+    "proxy", "env", "curl", "python", "node", "go", "ssh", "openssh", "aws", "files",
+];
+
 pub struct Inputs {
     pub proxy: SocketAddr,
     pub ca_cert: PathBuf,
     pub runtimes: bool,
+    pub verbose: bool,
 }
 
 #[derive(Default)]
 struct Tally {
     failed: usize,
+    warned: usize,
+    verbose: bool,
+    to_read: Vec<String>,
 }
 
 impl Tally {
     fn line(&mut self, mark: &str, what: &str, detail: &str) {
-        if mark == "fail" {
-            self.failed += 1;
+        debug_assert!(CHECKS.contains(&what), "{what} has no docs section");
+        match mark {
+            "fail" => self.failed += 1,
+            "warn" => self.warned += 1,
+            _ => {}
+        }
+        if matches!(mark, "fail" | "warn") && !self.to_read.iter().any(|seen| seen == what) {
+            self.to_read.push(what.to_string());
         }
         let _ = writeln!(std::io::stdout(), "[{mark:<4}] {what:<8} {detail}");
+    }
+
+    fn raw(&self, output: &str) {
+        if !self.verbose {
+            return;
+        }
+        let mut stdout = std::io::stdout();
+        for line in output.lines().filter(|line| !line.trim().is_empty()) {
+            let _ = writeln!(stdout, "         | {line}");
+        }
+    }
+
+    fn summary(&self) {
+        let mut stdout = std::io::stdout();
+        if self.to_read.is_empty() {
+            let _ = writeln!(stdout, "\nall checks passed");
+            return;
+        }
+        let _ = writeln!(
+            stdout,
+            "\n{} failed, {} warnings. What each means and how to fix it:",
+            self.failed, self.warned
+        );
+        for what in &self.to_read {
+            let _ = writeln!(stdout, "  credshim docs troubleshooting#{what}");
+        }
+        if !self.verbose {
+            let _ = writeln!(
+                stdout,
+                "Full output of each failed probe: credshim doctor --verbose"
+            );
+        }
     }
 }
 
 pub async fn run(inputs: &Inputs) -> anyhow::Result<bool> {
-    let mut tally = Tally::default();
+    let mut tally = Tally {
+        verbose: inputs.verbose,
+        ..Tally::default()
+    };
     let ca_pem = std::fs::read_to_string(&inputs.ca_cert).with_context(|| {
         format!(
             "could not read the CA certificate {}; create it with `credshim ca init`",
@@ -106,7 +155,10 @@ pub async fn run(inputs: &Inputs) -> anyhow::Result<bool> {
             "proxy",
             &format!("unexpected doctor response: {}", probe.body.trim()),
         ),
-        Err(err) => tally.line("fail", "proxy", &err.to_string()),
+        Err(err) => {
+            tally.line("fail", "proxy", &err.to_string());
+            tally.raw(&format!("{err:?}"));
+        }
     }
     check_environment(&mut tally, &ca_pem);
     let credshim_agent = check_agent(&mut tally).await;
@@ -118,6 +170,7 @@ pub async fn run(inputs: &Inputs) -> anyhow::Result<bool> {
         check_aws(&mut tally).await;
     }
     check_leftovers(&mut tally);
+    tally.summary();
     Ok(tally.failed == 0)
 }
 
@@ -355,6 +408,7 @@ async fn check_aws(tally: &mut Tally) {
         ""
     };
     tally.line("fail", "aws", &format!("{last}{hint}"));
+    tally.raw(&stderr);
 }
 
 fn check_leftovers(tally: &mut Tally) {
@@ -565,6 +619,8 @@ impl Runtime {
             .trim();
         let last: String = last.chars().take(240).collect();
         tally.line("fail", self.name, &format!("{last}{}", self.hint(&stderr)));
+        tally.raw(&stdout);
+        tally.raw(&stderr);
     }
 
     fn hint(&self, stderr: &str) -> String {
@@ -588,7 +644,7 @@ impl Runtime {
             (_, true, _) => format!("\n         {} did not use the proxy: check HTTPS_PROXY/https_proxy", self.name),
             ("node", _, true) => "\n         set NODE_EXTRA_CA_CERTS to the CA certificate".into(),
             ("python", _, true) => "\n         this Python's ssl module ignores SSL_CERT_FILE (Apple's /usr/bin/python3 does); requests and httpx read REQUESTS_CA_BUNDLE/SSL_CERT_FILE themselves".into(),
-            ("go", _, true) if cfg!(target_os = "macos") => "\n         Go on macOS verifies against the keychain and ignores SSL_CERT_FILE, unless the program was built with Go 1.27+ and either its go.mod says go 1.27+ or it runs with GODEBUG=x509sslcertoverrideplatform=1; see \"Go tools on macOS\" in docs/troubleshooting.md".into(),
+            ("go", _, true) if cfg!(target_os = "macos") => "\n         Go on macOS verifies against the keychain and ignores SSL_CERT_FILE, unless the program was built with Go 1.27+ and either its go.mod says go 1.27+ or it runs with GODEBUG=x509sslcertoverrideplatform=1; see `credshim docs troubleshooting#go-tools-on-macos`".into(),
             (_, _, true) => format!("\n         {} does not trust the CA: check SSL_CERT_FILE (and REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE)", self.name),
             _ => String::new(),
         }

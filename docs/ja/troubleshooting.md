@@ -22,14 +22,47 @@
 
 `credshim.test` はプロキシ自身が答える予約ホスト名で、DNS には存在しない。そこへ届けばプロキシを通っている、TLS が通れば CA を信頼している、と分かる。各言語から同じことを確かめるワンライナー（requests、httpx、Node の fetch、Go）は `credshim doctor --snippets` で表示できる。
 
-失敗したときに見るところ：
+`fail` か `warn` の行にはチェックの名前があり、チェックごとに下に節がある。最後に、それらの節を表示するコマンドが出る。`credshim doctor --verbose` は、失敗した確認の出力もすべて表示する。
 
-- **Node。** 組み込みの fetch は `NODE_USE_ENV_PROXY=1`（Node 24 以降）がないと `HTTPS_PROXY` を見ない。古い Node では undici の `EnvHttpProxyAgent` を dispatcher に渡す。プロキシを通らずに失敗した（`ENOTFOUND credshim.test`）ときは、doctor がそう案内する。
-- **Python。** Apple 同梱の `/usr/bin/python3` の ssl モジュールは `SSL_CERT_FILE` を読まない。requests と httpx は `REQUESTS_CA_BUNDLE`・`SSL_CERT_FILE` を自分で読むので動く。
-- **Go。** Linux では `SSL_CERT_FILE` を読む。macOS では読まないことが多い（下の [macOS の Go 製ツール](#macos-の-go-製ツール)）。doctor は go.mod の無い一時ファイルを `go run` するので、macOS ではキーチェーンで CA を信頼させていない限り失敗と報告する。
-- **SSH。** `SSH_AUTH_SOCK` の先のエージェントに鍵の一覧を求め、CredShim の鍵（コメントが `credshim:<ルール名>`）が無ければ、別のエージェントを指していると警告する。PATH の `ssh` が OpenSSH 8.9 より前（session-bind を送らない）なら報告する。
-- **AWS。** PATH の `aws` で `credshim.test` にダミーのキーのリクエストを送り、プロキシを通って CA を信頼しているかを見る。`AWS_CA_BUNDLE` は信頼ストアを置き換えるので、結合バンドルを指している必要がある。
-- **残った本物（files）。** `~/.ssh` の秘密鍵、`~/.aws/credentials`・`~/.aws/config` の本物のアクセスキーと `credential_process`・SSO のプロファイル、`~/.aws/sso/cache`・`~/.aws/cli/cache`、環境変数の本物のキーとセッショントークンを、パスとプロファイル名だけで報告する（値は出さない）。片付け方は [既存の認証情報を入れ替える](install.md#6-既存の認証情報を入れ替える)。
+### `proxy`
+
+プロキシ経由で `credshim.test` から応答が無かったか、証明書が CA につながらなかった。プロキシが動いているか（`credshim-svc status`、お試し構成では `credshim run` の端末）と、`HTTPS_PROXY` がそのアドレスを指しているかを確かめる。
+
+### `env`
+
+アプリに要る環境変数が無いか、違うファイルを指している。`. /etc/credshim/env`（お試し構成では `eval "$(credshim env)"`）で読み込む。`SSL_CERT_FILE` と `AWS_CA_BUNDLE` は信頼ストアを置き換えるので、CA 単体ではなく結合バンドルを指す必要がある。
+
+### `curl`
+
+curl がプロキシを通って `credshim.test` に届かなかったか、CA を信頼しなかった。curl は `HTTPS_PROXY` と `SSL_CERT_FILE`（か `CURL_CA_BUNDLE`）を読む。
+
+### `python`
+
+Apple 同梱の `/usr/bin/python3` の ssl モジュールは `SSL_CERT_FILE` を読まない。requests と httpx は `REQUESTS_CA_BUNDLE`・`SSL_CERT_FILE` を自分で読むので動く。
+
+### `node`
+
+組み込みの fetch は `NODE_USE_ENV_PROXY=1`（Node 24 以降）がないと `HTTPS_PROXY` を見ない。古い Node では undici の `EnvHttpProxyAgent` を dispatcher に渡す。プロキシを通らずに失敗した（`ENOTFOUND credshim.test`）ときは、doctor がそう案内する。Node は `NODE_EXTRA_CA_CERTS` で CA を信頼する。
+
+### `go`
+
+Linux では `SSL_CERT_FILE` を読む。macOS では読まないことが多い（下の [macOS の Go 製ツール](#macos-の-go-製ツール)）。doctor は go.mod の無い一時ファイルを `go run` するので、macOS ではキーチェーンで CA を信頼させていない限り失敗と報告する。
+
+### `ssh`
+
+`SSH_AUTH_SOCK` の先のエージェントに鍵の一覧を求め、CredShim の鍵（コメントが `credshim:<ルール名>`）が無ければ、別のエージェントを指していると警告する。エージェントが応答しないときは、プロキシが動いているかと、この uid が `[ssh] client_uids` に入っているかを確かめる。
+
+### `openssh`
+
+PATH の `ssh` が OpenSSH 8.9 より前か、OpenSSH ではない。CredShim のエージェントは session-bind を要し、OpenSSH は 8.9 からそれを送る。
+
+### `aws`
+
+PATH の `aws` で `credshim.test` にダミーのキーのリクエストを送り、プロキシを通って CA を信頼しているかを見る。`AWS_CA_BUNDLE` は信頼ストアを置き換えるので、結合バンドルを指している必要がある。
+
+### `files`
+
+`~/.ssh` の秘密鍵、`~/.aws/credentials`・`~/.aws/config` の本物のアクセスキーと `credential_process`・SSO のプロファイル、`~/.aws/sso/cache`・`~/.aws/cli/cache`、環境変数の本物のキーとセッショントークンを、パスとプロファイル名だけで報告する（値は出さない）。片付け方は [既存の認証情報を入れ替える](install.md#6-既存の認証情報を入れ替える)。
 
 ## 止められたリクエスト
 
