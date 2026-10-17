@@ -32,19 +32,19 @@ credshim-svc secret set github               # paste the token
 sudo $bin service reload
 ```
 
-In the developer session, `/etc/credshim/keys.env` now has `GH_TOKEN` with the dummy. `gh` uses `GH_TOKEN` before any stored login.
+In the developer session, `/etc/credshim/keys.env` now has `GH_TOKEN` with the dummy. `gh` uses `GH_TOKEN` before any stored login. `gh auth status` also calls the API root, which the preset does not allow, so check with `gh api`.
 
 ```sh
 set -a; . /etc/credshim/keys.env; set +a
-gh auth status
+gh api user --jq .login
 ```
 
 ## Replacing an existing gh login
 
-`gh auth login` stores its token in `~/.config/gh/hosts.yml` or in the system keyring, where an agent running as the developer user can read it. `credshim doctor` reports both (`files`). Before moving to CredShim:
+`gh auth login` stores its token in `~/.config/gh/hosts.yml` or in the system keyring, where an agent running as the developer user can read it. `credshim doctor` reports both (`files`). Remove it; `gh` refuses to log out while `GH_TOKEN` is set, so clear it for the command:
 
 ```sh
-gh auth logout --hostname github.com
+env -u GH_TOKEN -u GITHUB_TOKEN gh auth logout --hostname github.com
 ```
 
 Then revoke the old token on GitHub: Settings → Applications → Authorized OAuth Apps → GitHub CLI for a `gh auth login` token, or Settings → Developer settings → Personal access tokens for a token you created. Also delete any real `GH_TOKEN` or `GITHUB_TOKEN` from shell config and .env files.
@@ -52,7 +52,7 @@ Then revoke the old token on GitHub: Settings → Applications → Authorized OA
 ## What the preset allows
 
 - Methods `GET`, `POST`, `PATCH`, `PUT`, and `DELETE`, which merging, editing, and deleting a branch need.
-- Paths `/graphql`, `/repos`, `/user`, `/users`, `/orgs`, `/search`, `/notifications`, `/gists`, and `/rate_limit`. Most `gh` commands go through `/graphql`, so paths narrow little. The token's repositories and permissions are the real limit.
+- Paths `/graphql`, `/repos`, `/user`, `/users`, `/orgs`, `/search`, `/notifications`, `/gists`, `/rate_limit`, `/licenses`, and `/gitignore`. Most `gh` commands go through `/graphql`, so paths narrow little. The token's repositories and permissions are the real limit.
 - Only `api.github.com`. Anywhere else the dummy is not replaced, so GitHub answers 401. This includes `uploads.github.com`, so `gh release upload` and `gh release create` with files fail; publish releases from CI instead. `git` over HTTPS is not covered either; use SSH.
 - For GitHub Enterprise Server, write the rule yourself with your server's host ([Writing rules](configuration.md#writing-rules)).
 

@@ -670,7 +670,7 @@ async fn doctor_reports_an_unreachable_agent_an_old_openssh_and_leftover_credent
             "~/.config/gh/hosts.yml [github.com] holds a real gh token",
         ),
         (
-            "warn",
+            "fail",
             "files",
             "~/.config/gh/hosts.yml [ghe.example.com] is a gh login whose token is in the system keyring",
         ),

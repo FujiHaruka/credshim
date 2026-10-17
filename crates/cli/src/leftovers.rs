@@ -5,6 +5,7 @@ const REAL_KEY_PREFIXES: [&str; 4] = ["AKIA", "ASIA", "ABIA", "ACCA"];
 const AWS_CACHES: [&str; 3] = ["sso/cache", "cli/cache", "login/cache"];
 const FIRST_LINE_LIMIT: u64 = 128;
 const GITHUB_TOKEN_PREFIXES: [&str; 6] = ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"];
+const CLASSIC_TOKEN_LEN: usize = 40;
 const GITHUB_TOKEN_VARS: [&str; 4] = [
     "GH_TOKEN",
     "GITHUB_TOKEN",
@@ -257,21 +258,28 @@ fn gh_hosts(places: &Places, findings: &mut Vec<Finding>) {
         return;
     };
     let shown = places.show(&path);
-    for (host, stores_token) in gh_logins(&text) {
-        findings.push(if stores_token {
-            Finding::fail(format!(
-                "{shown} [{host}] holds a real gh token; run `gh auth logout --hostname {host}`, then revoke the token on GitHub"
-            ))
+    for login in gh_logins(&text) {
+        let place = if login.token_in_file {
+            "holds a real gh token"
         } else {
-            Finding::warn(format!(
-                "{shown} [{host}] is a gh login whose token is in the system keyring; run `gh auth logout --hostname {host}`, then revoke the token on GitHub"
-            ))
-        });
+            "is a gh login whose token is in the system keyring"
+        };
+        findings.push(Finding::fail(format!(
+            "{shown} [{host}] {place}; run `env -u GH_TOKEN -u GITHUB_TOKEN gh auth logout --hostname {host}`, then revoke the token on GitHub",
+            host = login.host
+        )));
     }
 }
 
-fn gh_logins(text: &str) -> Vec<(String, bool)> {
-    let mut logins: Vec<(String, bool)> = Vec::new();
+#[derive(Debug, PartialEq, Eq)]
+struct GhLogin {
+    host: String,
+    signed_in: bool,
+    token_in_file: bool,
+}
+
+fn gh_logins(text: &str) -> Vec<GhLogin> {
+    let mut hosts: Vec<GhLogin> = Vec::new();
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -279,23 +287,43 @@ fn gh_logins(text: &str) -> Vec<(String, bool)> {
         }
         if !line.starts_with([' ', '\t']) {
             if let Some(host) = trimmed.strip_suffix(':') {
-                logins.push((printable(host.trim_matches(['"', '\''])), false));
+                hosts.push(GhLogin {
+                    host: printable(unquoted(host)),
+                    signed_in: false,
+                    token_in_file: false,
+                });
             }
         } else if let (Some(login), Some((key, value))) =
-            (logins.last_mut(), trimmed.split_once(':'))
-            && key.trim() == "oauth_token"
-            && !value.trim().is_empty()
+            (hosts.last_mut(), trimmed.split_once(':'))
         {
-            login.1 = true;
+            let has_value = !unquoted(value).is_empty();
+            match key.trim() {
+                "oauth_token" if has_value => {
+                    login.signed_in = true;
+                    login.token_in_file = true;
+                }
+                "user" if has_value => login.signed_in = true,
+                "users" => login.signed_in = true,
+                _ => {}
+            }
         }
     }
-    logins
+    hosts.retain(|login| login.signed_in);
+    hosts
+}
+
+fn unquoted(value: &str) -> &str {
+    value.trim().trim_matches(['"', '\''])
 }
 
 fn is_real_github_token(value: &str) -> bool {
     GITHUB_TOKEN_PREFIXES
         .iter()
         .any(|prefix| value.starts_with(prefix))
+        || (value.len() == CLASSIC_TOKEN_LEN
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
 }
 
 fn github_environment(var: &impl Fn(&str) -> Option<String>, findings: &mut Vec<Finding>) {
@@ -323,13 +351,15 @@ mod tests {
 
     #[test]
     fn gh_logins_say_whether_the_token_is_in_the_file() {
-        let hosts = "github.com:\n    users:\n        me:\n            oauth_token: gho_x\n    git_protocol: ssh\n    oauth_token: gho_x\n    user: me\nghe.example.com:\n    git_protocol: https\n    user: me\n";
+        let hosts = "github.com:\n    users:\n        me:\n            oauth_token: gho_x\n    git_protocol: ssh\n    oauth_token: gho_x\n    user: me\nghe.example.com:\n    git_protocol: https\n    user: me\n    oauth_token: \"\"\nsettings.example.com:\n    git_protocol: ssh\n";
+        let logins = gh_logins(hosts);
+        let found: Vec<(&str, bool)> = logins
+            .iter()
+            .map(|login| (login.host.as_str(), login.token_in_file))
+            .collect();
         assert_eq!(
-            gh_logins(hosts),
-            vec![
-                ("github.com".to_string(), true),
-                ("ghe.example.com".to_string(), false)
-            ]
+            found,
+            vec![("github.com", true), ("ghe.example.com", false)]
         );
     }
 
@@ -337,6 +367,9 @@ mod tests {
     fn real_github_tokens_are_recognised_by_prefix() {
         assert!(is_real_github_token("ghp_0123456789"));
         assert!(is_real_github_token("github_pat_0123456789"));
+        assert!(is_real_github_token(
+            "0123456789abcdef0123456789abcdef01234567"
+        ));
         assert!(!is_real_github_token("credshim-github-0123456789"));
     }
 

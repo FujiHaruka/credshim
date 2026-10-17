@@ -35,7 +35,7 @@ https://fujiharuka.github.io/credshim/ja/agent-setup.md に従って、このマ
 - CredShim が入っているか。Linux は `/usr/local/libexec/credshim/credshim --version`、macOS は `/Library/CredShim/bin/credshim --version`。
 - プロジェクトが呼ぶ API。依存関係のファイルにある SDK（`openai`、`anthropic` か `@anthropic-ai/sdk`、`@google/genai`、`boto3` か `@aws-sdk/*` など）、コード中の base URL、コードが呼ぶパス。
 - 使われている認証情報の名前（値は見ない）。たとえば `env | cut -d= -f1 | grep -E '_(KEY|TOKEN|SECRET|PASSWORD)$'`、各プロジェクトで `grep -ohE '^[A-Za-z_]+_(KEY|TOKEN|SECRET|PASSWORD)=' .env*`。
-- AWS のプロファイル名（`grep '^\[' ~/.aws/config`）と、SSO を使っているか。SSH を使う git のリモート（`git remote -v`）。`gh` にログインしているか（`~/.config/gh/hosts.yml` にホストが並ぶ。`gh auth status` や `gh auth token` は実行しない）。
+- AWS のプロファイル名（`grep '^\[' ~/.aws/config`）と、SSO を使っているか。SSH を使う git のリモート（`git remote -v`）。`gh` にログインしているか（`grep -E '^[^ #]' ~/.config/gh/hosts.yml` でホストが並ぶ。ファイルには本物のトークンが入っていることがあるので残りは読まず、`gh auth token` も実行しない）。
 
 CredShim を入れる前に設定を書いて確かめるには、[お試し構成](README.md#お試し構成) と同じようにリリースのバイナリを自分のディレクトリ（`~/.cache/credshim-setup` など）に落とす。`PATH` には置かない。使うのは `docs`・`preset`・`config check` だけ。CredShim が入っていれば、入っているバイナリを使う。
 

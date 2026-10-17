@@ -32,19 +32,19 @@ credshim-svc secret set github               # トークンを貼り付ける
 sudo $bin service reload
 ```
 
-開発ユーザーのセッションでは、`/etc/credshim/keys.env` に `GH_TOKEN` のダミーが入る。`gh` は、保存されたログインより `GH_TOKEN` を先に使う。
+開発ユーザーのセッションでは、`/etc/credshim/keys.env` に `GH_TOKEN` のダミーが入る。`gh` は、保存されたログインより `GH_TOKEN` を先に使う。`gh auth status` はプリセットが許さない API のルートも呼ぶので、`gh api` で確かめる。
 
 ```sh
 set -a; . /etc/credshim/keys.env; set +a
-gh auth status
+gh api user --jq .login
 ```
 
 ## 既存の gh のログインを入れ替える
 
-`gh auth login` はトークンを `~/.config/gh/hosts.yml` かシステムのキーリングに保存し、開発ユーザーとして動くエージェントはそれを読める。`credshim doctor` は両方を報告する（`files`）。CredShim に移す前に実行する。
+`gh auth login` はトークンを `~/.config/gh/hosts.yml` かシステムのキーリングに保存し、開発ユーザーとして動くエージェントはそれを読める。`credshim doctor` は両方を報告する（`files`）。これを消す。`GH_TOKEN` があると `gh` はログアウトを拒むので、そのコマンドだけ外して実行する。
 
 ```sh
-gh auth logout --hostname github.com
+env -u GH_TOKEN -u GITHUB_TOKEN gh auth logout --hostname github.com
 ```
 
 そのあと、GitHub で古いトークンを無効にする。`gh auth login` のトークンは Settings → Applications → Authorized OAuth Apps → GitHub CLI、自分で作ったトークンは Settings → Developer settings → Personal access tokens。シェルの設定や .env に本物の `GH_TOKEN`・`GITHUB_TOKEN` が残っていれば消す。
@@ -52,7 +52,7 @@ gh auth logout --hostname github.com
 ## プリセットが許すもの
 
 - メソッドは `GET`・`POST`・`PATCH`・`PUT`・`DELETE`。マージ、編集、ブランチの削除に要る。
-- パスは `/graphql`・`/repos`・`/user`・`/users`・`/orgs`・`/search`・`/notifications`・`/gists`・`/rate_limit`。`gh` のコマンドの多くは `/graphql` を通るので、パスではあまり絞れない。実際の制限は、トークンのリポジトリと権限。
+- パスは `/graphql`・`/repos`・`/user`・`/users`・`/orgs`・`/search`・`/notifications`・`/gists`・`/rate_limit`・`/licenses`・`/gitignore`。`gh` のコマンドの多くは `/graphql` を通るので、パスではあまり絞れない。実際の制限は、トークンのリポジトリと権限。
 - 宛先は `api.github.com` だけ。ほかへ送られたダミーは差し替えないので、GitHub が 401 を返す。`uploads.github.com` もこれに含まれるので、`gh release upload` と、ファイルを付けた `gh release create` は失敗する。リリースは CI から出す。HTTPS での `git` も対象外なので、SSH を使う。
 - GitHub Enterprise Server では、自分のサーバーのホストでルールを手で書く（[ルールを書く](configuration.md#ルールを書く)）。
 

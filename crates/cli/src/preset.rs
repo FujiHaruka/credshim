@@ -50,7 +50,7 @@ pub const PRESETS: &[Preset] = &[
         dummy_prefix: "credshim-github-",
         allow_methods: r#"["GET", "POST", "PATCH", "PUT", "DELETE"]"#,
         inject: r#"{ header = "authorization" }"#,
-        allow_paths: r#"["/graphql", "/repos", "/user", "/users", "/orgs", "/search", "/notifications", "/gists", "/rate_limit"]"#,
+        allow_paths: r#"["/graphql", "/repos", "/user", "/users", "/orgs", "/search", "/notifications", "/gists", "/rate_limit", "/licenses", "/gitignore"]"#,
         env: "GH_TOKEN",
         base_url_prefix: "/github",
     },
