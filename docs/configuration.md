@@ -76,7 +76,8 @@ credshim config check draft.toml
 ```
 
 - It lists every problem it finds at once, each with the `credshim docs` section to read. An error in the config, from any command, points to the section for the part of the file it is in.
-- When the draft is valid, it prints where it lets each real key go: for each rule, the secret, the destination, and the allowed methods, paths, and limits. A destination that does not come from a preset is marked `!!`; confirm it with the service before applying.
+- When the draft is valid, it prints where it lets each real key go: for each rule, the secret, the destination, and the allowed methods, paths, and limits. An OAuth provider lists its token endpoint, its revoke endpoint, and each resource host, with what each receives. A destination that does not come from a preset is marked `!!`, and so is an AWS key or role that may call `execute-api`, whose endpoints any AWS account can run; confirm them with the service before applying.
+- Review the table that your own run prints, on a copy of the draft that its author cannot change, and apply that copy. A table relayed in a message, or a check of a file the author can still edit, does not show what will be applied. Control characters in the output are printed escaped, so a draft cannot redraw the table.
 - It then prints the steps that apply it: the secrets to store, the AWS SSO sessions to log in to, and the reload command. Run them in the admin session. A person types `secret set` and `aws sso login` at a terminal.
 - It cannot see clashes with what is already in the config, such as a rule name used twice. `service reload` checks the whole config before it applies anything and keeps the running config if the check fails.
 

@@ -108,7 +108,8 @@ sudo -u "$user" HOME="$state" "$bin" env --config "$state/config.toml" \
 echo "# dummy keys, for a project's .env or direnv: $public/keys.env" >> "$tmp/env"
 install -m 0644 -o root -g root "$tmp/env" "$public/env"
 sudo -u "$user" HOME="$state" "$bin" env --keys --config "$state/config.toml" > "$tmp/keys.env"
-install -m 0644 -o root -g root "$tmp/keys.env" "$public/keys.env"
+install -m 0400 -o "${dev_uid:-0}" -g root "$tmp/keys.env" "$public/keys.env"
+[[ -n $dev_uid ]] || echo "note: no development user given (--user, or run through sudo); only root can read $public/keys.env" >&2
 
 cat > /etc/systemd/system/credshim.service <<UNIT
 [Unit]

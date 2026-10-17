@@ -4,6 +4,7 @@ use std::path::Path;
 
 use anyhow::bail;
 
+use credshim_aws::hosts::CUSTOMER_HOSTED_SERVICES;
 use credshim_core::Limits;
 
 use crate::config::{self, Config};
@@ -40,7 +41,7 @@ pub fn check(path: &Path, handoff: &Handoff) -> anyhow::Result<String> {
         "Check every destination above, then add it to the config (credshim docs {RULES_TOPIC})."
     )];
     steps.extend(apply_steps(&config, &table, handoff));
-    Ok(format!(
+    Ok(printable(&format!(
         "{} is a valid config.\n\
          Not checked here: whether its secrets are stored, the CA, and file permissions. `credshim run --check` checks them, and `service reload` runs it before it applies anything.\n\n\
          {}\n\
@@ -48,7 +49,19 @@ pub fn check(path: &Path, handoff: &Handoff) -> anyhow::Result<String> {
         path.display(),
         destinations(&config),
         numbered(&steps)
-    ))
+    )))
+}
+
+fn printable(text: &str) -> String {
+    text.chars()
+        .flat_map(|c| {
+            if c.is_control() && c != '\n' {
+                c.escape_default().collect::<Vec<_>>()
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
 }
 
 pub fn destinations(config: &Config) -> String {
@@ -78,8 +91,11 @@ pub fn destinations(config: &Config) -> String {
     for key in &config.aws_keys {
         let _ = writeln!(
             out,
-            "  aws_key {:?}: secrets {} and {} -> AWS endpoints only",
-            key.name, key.access_key_id, key.secret_access_key
+            "  aws_key {:?}: secrets {} and {} -> {}",
+            key.name,
+            key.access_key_id,
+            key.secret_access_key,
+            aws_reach(key.services.as_deref())
         );
         aws_scope(
             &mut out,
@@ -99,8 +115,12 @@ pub fn destinations(config: &Config) -> String {
     for role in &config.aws_sso_roles {
         let _ = writeln!(
             out,
-            "  aws_sso_role {:?}: role {} in account {} through session {:?} -> AWS endpoints only",
-            role.name, role.role_name, role.account_id, role.session
+            "  aws_sso_role {:?}: role {} in account {} through session {:?} -> {}",
+            role.name,
+            role.role_name,
+            role.account_id,
+            role.session,
+            aws_reach(role.services.as_deref())
         );
         aws_scope(
             &mut out,
@@ -122,17 +142,38 @@ pub fn destinations(config: &Config) -> String {
         );
     }
     for provider in &config.oauth {
+        let (refresh, revoke_receives) = if provider.client_secret.is_some() {
+            (
+                "client secret and refresh tokens",
+                "client secret, access and refresh tokens",
+            )
+        } else {
+            ("refresh tokens", "access and refresh tokens")
+        };
         let _ = writeln!(
             out,
-            "  oauth {:?}: tokens from {} -> {}",
+            "  oauth {:?}: {refresh} -> {}{}",
             provider.name,
             provider.token_endpoint,
-            if provider.resource_hosts.is_empty() {
-                "no resource hosts".to_string()
-            } else {
-                provider.resource_hosts.join(", ")
-            }
+            origin(endpoint_preset(&provider.token_endpoint), "host")
         );
+        if let Some(revoke) = &provider.revoke_endpoint {
+            let _ = writeln!(
+                out,
+                "      revoke: {revoke_receives} -> {revoke}{}",
+                origin(endpoint_preset(revoke), "host")
+            );
+        }
+        if provider.resource_hosts.is_empty() {
+            let _ = writeln!(out, "      access tokens: no resource hosts");
+        }
+        for host in &provider.resource_hosts {
+            let _ = writeln!(
+                out,
+                "      access tokens -> https://{host}:443{}",
+                origin(preset::preset_for_host(&host.to_ascii_lowercase()), "host")
+            );
+        }
     }
     if out.lines().count() == 1 {
         out.push_str("  nowhere: it names no rules\n");
@@ -144,6 +185,29 @@ fn origin(preset: Option<&str>, what: &str) -> String {
     match preset {
         Some(name) => format!("  ({name} preset {what})"),
         None => format!("  !! {what} not from a preset: confirm with the service"),
+    }
+}
+
+fn endpoint_preset(url: &str) -> Option<&'static str> {
+    let authority = url.strip_prefix("https://")?.split('/').next()?;
+    let host = authority.split(':').next()?;
+    preset::preset_for_host(&host.to_ascii_lowercase())
+}
+
+fn aws_reach(services: Option<&[String]>) -> String {
+    let customer_hosted: Vec<&str> = services
+        .unwrap_or_default()
+        .iter()
+        .map(String::as_str)
+        .filter(|service| CUSTOMER_HOSTED_SERVICES.contains(service))
+        .collect();
+    if customer_hosted.is_empty() {
+        "AWS endpoints only".to_string()
+    } else {
+        format!(
+            "AWS endpoints, including {} in any AWS account  !! whoever runs such an endpoint gets the request: confirm the rule needs it",
+            customer_hosted.join(", ")
+        )
     }
 }
 
@@ -268,4 +332,17 @@ pub fn numbered(steps: &[String]) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn printed_text_keeps_its_lines_but_cannot_drive_the_terminal() {
+        assert_eq!(
+            printable("a\n\u{1b}[1A\r\u{1b}[2Kb\t"),
+            "a\n\\u{1b}[1A\\r\\u{1b}[2Kb\\t"
+        );
+    }
 }

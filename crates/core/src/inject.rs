@@ -360,7 +360,7 @@ fn replace_in_query(parts: &mut Parts, param: &str, dummy: &str, secret: &[u8]) 
                 if scan::decode(name) != param.as_bytes() {
                     return raw.to_string();
                 }
-                if value.contains(dummy) {
+                if value.contains(dummy) && !follows_an_escape(value, dummy) {
                     return format!("{name}={}", value.replace(dummy, &encoded_secret));
                 }
                 let decoded = Zeroizing::new(scan::decode(value));
@@ -380,6 +380,12 @@ fn replace_in_query(parts: &mut Parts, param: &str, dummy: &str, secret: &[u8]) 
     uri.path_and_query = Some(path_and_query);
     parts.uri = http::Uri::from_parts(uri).ok()?;
     Some(())
+}
+
+fn follows_an_escape(value: &str, dummy: &str) -> bool {
+    value
+        .match_indices(dummy)
+        .any(|(at, _)| value[at.saturating_sub(2)..at].contains('%'))
 }
 
 fn replace_all(haystack: &[u8], needle: &[u8], with: &[u8]) -> Zeroizing<Vec<u8>> {

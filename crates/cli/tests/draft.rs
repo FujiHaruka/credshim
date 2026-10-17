@@ -127,6 +127,72 @@ async fn the_github_preset_sits_beside_github_ssh_and_lets_gh_change_pull_reques
 }
 
 #[tokio::test]
+async fn every_host_an_oauth_provider_sends_its_secrets_to_is_listed_and_marked() {
+    let home = tempfile::tempdir().unwrap();
+    let draft = write_draft(
+        home.path(),
+        "[[oauth]]\nname = \"example\"\ntoken_endpoint = \"https://oauth.example.com/token\"\nrevoke_endpoint = \"https://revoke.example.net:8443/revoke\"\nclient_secret = { secret = \"example-client\", dummy = \"credshim-example-client-0123456789abcdef\" }\nresource_hosts = [\"api.example.com\", \"api.github.com\"]\n",
+    );
+
+    let checked = output(home.path(), &["config", "check", &draft]).await;
+
+    assert!(checked.status.success(), "{}", text(&checked.stderr));
+    let stdout = text(&checked.stdout);
+    let not_preset = "  !! host not from a preset: confirm with the service\n";
+    for line in [
+        format!(
+            "  oauth \"example\": client secret and refresh tokens -> https://oauth.example.com/token{not_preset}"
+        ),
+        format!(
+            "      revoke: client secret, access and refresh tokens -> https://revoke.example.net:8443/revoke{not_preset}"
+        ),
+        format!("      access tokens -> https://api.example.com:443{not_preset}"),
+        "      access tokens -> https://api.github.com:443  (github preset host)\n".to_string(),
+    ] {
+        assert!(stdout.contains(&line), "{line}\n{stdout}");
+    }
+}
+
+#[tokio::test]
+async fn an_aws_key_that_reaches_api_gateway_is_marked() {
+    let home = tempfile::tempdir().unwrap();
+    let draft = write_draft(
+        home.path(),
+        "[[aws_key]]\nname = \"gateway\"\ndummy_access_key_id = \"CREDSHIMAWS0123456789ABCDEF\"\naccess_key_id = \"aws-access-key-id\"\nsecret_access_key = \"aws-secret-access-key\"\nservices = [\"s3\", \"execute-api\"]\n\n[[aws_key]]\nname = \"storage\"\ndummy_access_key_id = \"CREDSHIMAWS9876543210ZYXWVU\"\naccess_key_id = \"aws-access-key-id\"\nsecret_access_key = \"aws-secret-access-key\"\nservices = [\"s3\"]\n",
+    );
+
+    let checked = output(home.path(), &["config", "check", &draft]).await;
+
+    assert!(checked.status.success(), "{}", text(&checked.stderr));
+    let stdout = text(&checked.stdout);
+    assert!(
+        stdout.contains("  aws_key \"gateway\": secrets aws-access-key-id and aws-secret-access-key -> AWS endpoints, including execute-api in any AWS account  !! whoever runs such an endpoint gets the request: confirm the rule needs it\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("  aws_key \"storage\": secrets aws-access-key-id and aws-secret-access-key -> AWS endpoints only\n"),
+        "{stdout}"
+    );
+}
+
+#[tokio::test]
+async fn control_characters_in_a_draft_cannot_redraw_the_destinations() {
+    let home = tempfile::tempdir().unwrap();
+    let draft = write_draft(
+        home.path(),
+        "[[rule]]\nname = \"openai-v2\"\nhost = \"attacker.example\"\nsecret = \"openai\"\ndummy = \"sk-credshim-openai-0123456789abcdefghij\"\ninject = { header = \"authorization\" }\nallow_paths = [\"/\", \"/\\u001b[1A\\r\\u001b[2K  rule\"]\n",
+    );
+
+    let checked = output(home.path(), &["config", "check", &draft]).await;
+
+    assert!(!checked.status.success());
+    let stderr = text(&checked.stderr);
+    assert!(stderr.contains("allow_paths entry"), "{stderr}");
+    assert!(!stderr.contains('\u{1b}'), "{stderr:?}");
+    assert!(!stderr.contains('\r'), "{stderr:?}");
+}
+
+#[tokio::test]
 async fn a_preset_prints_only_the_rule_on_stdout_and_the_next_steps_on_stderr() {
     let home = tempfile::tempdir().unwrap();
 

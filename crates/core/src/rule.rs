@@ -76,7 +76,7 @@ pub enum BindingError {
     #[error("port must not be 0")]
     InvalidPort,
     #[error(
-        "path_prefix {0:?} must start with '/' and contain no dot segments, '%', '?', '#' or '\\'"
+        "path_prefix {0:?} must start with '/', use only printable ASCII without spaces, and contain no dot segments, '%', '?', '#' or '\\'"
     )]
     InvalidPathPrefix(String),
 }
@@ -92,7 +92,7 @@ pub enum RuleError {
     #[error("rule {0:?}: port must not be 0")]
     InvalidPort(String),
     #[error(
-        "rule {rule:?}: path_prefix {prefix:?} must start with '/' and contain no dot segments, '%', '?', '#' or '\\'"
+        "rule {rule:?}: path_prefix {prefix:?} must start with '/', use only printable ASCII without spaces, and contain no dot segments, '%', '?', '#' or '\\'"
     )]
     InvalidPathPrefix { rule: String, prefix: String },
     #[error("rule {rule:?}: secret name {secret:?} must use only letters, digits, '.', '_' or '-'")]
@@ -388,7 +388,10 @@ pub fn is_valid_dummy(dummy: &str) -> bool {
 }
 
 pub(crate) fn is_clean_path_prefix(prefix: &str) -> bool {
-    prefix.starts_with('/') && !prefix.contains(['%', '?', '#', '\\']) && !has_dot_segment(prefix)
+    prefix.starts_with('/')
+        && prefix.bytes().all(|b| b.is_ascii_graphic())
+        && !prefix.contains(['%', '?', '#', '\\'])
+        && !has_dot_segment(prefix)
 }
 
 fn has_dot_segment(path: &str) -> bool {

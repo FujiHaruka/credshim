@@ -22,6 +22,8 @@ sudo -u "$user" HOME="$state" "$bin" env --config "$state/config.toml" \
 echo "# dummy keys, for a project's .env or direnv: $public/keys.env" >> "$tmp/env"
 sudo -u "$user" HOME="$state" "$bin" env --keys --config "$state/config.toml" > "$tmp/keys.env"
 install -m 0644 -o root -g root "$tmp/env" "$public/env"
-install -m 0644 -o root -g root "$tmp/keys.env" "$public/keys.env"
+keys_owner=$(stat -c %u "$public/keys.env" 2>/dev/null || echo 0)
+install -m 0400 -o "$keys_owner" -g root "$tmp/keys.env" "$public/keys.env"
+[[ $keys_owner != 0 ]] || echo "note: only root can read $public/keys.env; give it to the development user with: sudo $bin service install --user <development-user>" >&2
 systemctl kill --signal=HUP --kill-whom=main credshim.service
 echo "credshim is reloading its config; journalctl -u credshim records the result"

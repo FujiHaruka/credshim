@@ -12,7 +12,7 @@ Set up CredShim on this machine by following https://fujiharuka.github.io/credsh
 
 The agent asks you one combined question, then hands you a short list of commands to run in the admin session (see [Two sessions](install.md#two-sessions)). Before you run them:
 
-- Read the "Where it lets each real key go" table. A line marked `!!` names a destination that does not come from a preset. Confirm with the service's own documentation that the host, or the SSH host keys, really belong to it. A wrong host here sends a real key to that host.
+- Check the draft yourself. The commands start by copying it to a file the developer user cannot change and running `config check` on that copy. Read the "Where it lets each real key go" table that check prints in your terminal, not a table in the agent's message. A line marked `!!` names a destination that does not come from a preset. Confirm with the service's own documentation that the host, or the SSH host keys, really belong to it. A wrong host here sends a real key to that host. Add the copy to the config only after that.
 - Create new keys with each service for `secret set`. Keys that were on this machine before should be treated as already read by an agent (see [Replace existing credentials](install.md#6-replace-existing-credentials)).
 
 ## For the agent
@@ -65,7 +65,14 @@ The commands that `config check` prints follow the binary that ran it. Only the 
 
 1. If the developer user can administer the machine, or CredShim is not installed, first give the person [step 1 of the installation](install.md#1-make-the-developer-user-a-non-admin) as needed and the install one-liner from [step 2](install.md#2-install-admin-session), with `--user` set to the developer user. Wait until they say it is installed.
 2. Run `config check` on the draft again with the installed binary (`$bin` in [the install variables](install.md#set-the-variables)).
-3. Give the person one message with: the "Where it lets each real key go" table from that run and a request to confirm every line marked `!!`; the command that adds the draft to the config in the admin session, `sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/null < draft.toml` (`$user` is the service user); and the steps that run printed after that (the `secret set`, `ssh keygen`, and `aws sso login` commands, and the reload).
+3. Give the person one message with: the commands below for the admin session, with the draft's absolute path filled in (`$user` is the service user); a request to read the "Where it lets each real key go" table that the check prints in their terminal, confirm every line marked `!!`, and run the last command only after that; and the steps your run printed after the table (the `secret set`, `ssh keygen`, and `aws sso login` commands, and the reload). Do not put the table in the message: the person reads the one their own check prints, from a copy you cannot change.
+
+   ```sh
+   draft=$(mktemp)                               # a copy the developer user cannot change
+   sudo cat /home/dev/draft.toml > "$draft"
+   $bin config check "$draft"
+   sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/null < "$draft"
+   ```
 
 Then wait until the person says they are done.
 

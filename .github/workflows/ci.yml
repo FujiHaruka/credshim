@@ -126,6 +126,7 @@ jobs:
           for _ in $(seq 50); do sudo journalctl -u credshim --no-pager | grep -q 'reloaded config' && break; sleep 0.2; done
           sudo journalctl -u credshim --no-pager | grep -q 'reloaded config'
           [ "$(systemctl show -p MainPID --value credshim.service)" = "$pid" ]
+          [ "$(stat -c %U /etc/credshim/keys.env)" = devtest ]
       - name: service reload refuses a rule whose secret is not set, and the proxy keeps running
         run: |
           /usr/local/libexec/credshim/credshim preset openai | sudo -u credshim tee -a /var/lib/credshim/config.toml >/dev/null
@@ -136,6 +137,10 @@ jobs:
           sudo /usr/local/libexec/credshim/credshim service install --user devtest
           sudo -u devtest grep -q '^OPENAI_API_KEY=' /etc/credshim/keys.env
           ! sudo -u devtest grep -q OPENAI_API_KEY /etc/credshim/env
+      - name: another local account cannot read the dummy keys
+        run: |
+          sudo useradd --no-create-home othertest
+          ! sudo -u othertest cat /etc/credshim/keys.env
       - name: diagnostics
         if: failure()
         run: ls -ld / /usr /usr/local /usr/local/libexec /usr/local/libexec/credshim /usr/local/libexec/credshim/credshim
