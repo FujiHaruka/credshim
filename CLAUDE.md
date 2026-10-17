@@ -10,7 +10,7 @@
 - 新しい挙動には統合テストを付ける。完了の条件は `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`、`scripts/check-secret-exposure.sh` がすべて通ること。
 - 実運用の設定ディレクトリや秘密ストア（`~/.config/credshim`、`/var/lib/credshim`、キーチェーンの credshim 項目）を読まない・編集しない。開発中も本物の鍵は使わない。
 - `docs/install.md` と `docs/ja/install.md` のインストールの1行は `scripts/install.sh` をコミットの SHA で指す。スクリプトを変えたら、CI の `stage-b` が通ったあとで両方の SHA をそのコミットに書き換える。README と `docs/ja/README.md` のお試し構成のバージョン（`v=`）は、リリースのたびに上げる。
-- ユーザー向けドキュメントは英語が `README.md` と `docs/*.md`、日本語が `docs/ja/` で、内容を揃える。片方を変えたらもう片方も同じコミットで直す。両方から GitHub Pages のサイトを `scripts/build-docs-site.sh`（mdBook）で作り、main への push で `.github/workflows/docs-site.yml` がデプロイする。ページを足すときは `site/en/SUMMARY.md`、`site/ja/SUMMARY.md` とスクリプトの `pages` にも足す。
+- ユーザー向けドキュメントは英語が `README.md` と `docs/*.md`、日本語が `docs/ja/` で、内容を揃える。片方を変えたらもう片方も同じコミットで直す。両方から GitHub Pages のサイトを `scripts/build-docs-site.sh`（mdBook）で作り、main への push で `.github/workflows/docs-site.yml` がデプロイする。ページを足すときは `site/en/SUMMARY.md`、`site/ja/SUMMARY.md`、`site/llms.txt` とスクリプトの `pages` にも足す。
 - `testing` フィーチャー（上流の追加信頼アンカーとDNS上書き）はテスト専用。リリースビルドでは `compile_error!` で止まり、`scripts/check-release-excludes-testing.sh` が検査する。
 
 ## 構成
