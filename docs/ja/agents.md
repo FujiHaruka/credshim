@@ -24,7 +24,7 @@ CredShim の失敗は、どれも詳しく見る方法を示す。CredShim が�
 
 1. 足すセクションを自分のファイルに書く。よく使う API は `credshim preset <名前>` が出来合いのルールを表示する。それ以外は `credshim docs configuration#writing-rules` を参照。
 2. `credshim config check <ファイル>` を実行し、挙がった問題をすべて直す。どの問題にも読む節が付く。
-3. 下書きと、`config check` が表示した手順を人に渡す。`secret set` や `aws sso login` などは端末の前の人が打つもので、値をパイプで渡したり端末を偽装したりしない。
+3. 下書き、各キーの行き先の表、`config check` が表示した手順を人に渡す。`!!` の付いた行は必ず指摘する。`secret set` や `aws sso login` などは端末の前の人が打つもので、値をパイプで渡したり端末を偽装したりしない。
 
 ## エージェントへの指示に入れる文
 

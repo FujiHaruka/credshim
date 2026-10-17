@@ -120,6 +120,26 @@ host=${addr%:*}
 port=${addr##*:}
 check "proxy accepts connections on $addr" bash -c "exec 3<>/dev/tcp/$host/$port"
 
+connect_reply() {
+  local target=$1 line reply=
+  exec 3<>"/dev/tcp/$host/$port" 2>/dev/null || return 1
+  printf 'CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n' "$target" "$target" >&3
+  while IFS= read -r -t 10 line <&3; do
+    line=${line%$'\r'}
+    [[ -z $line ]] && break
+    reply+="$line"$'\n'
+  done
+  exec 3<&-
+  printf '%s' "$reply"
+}
+refused_by_proxy() {
+  local reply
+  reply=$(connect_reply "$1")
+  [[ $reply == "HTTP/1.1 403"* ]] && grep -qix 'credshim-error: deny' <<<"$reply"
+}
+check "proxy refuses a tunnel to the cloud metadata address" refused_by_proxy 169.254.169.254:80
+check "proxy refuses a tunnel to the AWS SSO portal, where a person could be asked to approve a login" refused_by_proxy portal.sso.us-east-1.amazonaws.com:443
+
 if [[ $failures -gt 0 ]]; then
   echo "$failures check(s) failed"
   exit 1

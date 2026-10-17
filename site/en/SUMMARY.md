@@ -3,6 +3,7 @@
 [CredShim](index.md)
 
 - [Installing the recommended setup](install.md)
+- [Setting up with a coding agent](agent-setup.md)
 - [Configuration](configuration.md)
 - [AWS](aws.md)
 - [SSH agent](ssh.md)

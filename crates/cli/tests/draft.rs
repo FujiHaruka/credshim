@@ -22,7 +22,7 @@ async fn a_draft_is_checked_without_the_secret_store_and_says_how_to_apply_it() 
     let draft = write_draft(
         home.path(),
         &format!(
-            "{}\n[[ssh_key]]\nname = \"github\"\nsecret = \"ssh-github\"\nusers = [\"git\"]\nhost_keys = [\"SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU\"]\n",
+            "{}\n[[rule]]\nname = \"echo\"\nhost = \"echo.example.com\"\nport = 8443\npath_prefix = \"/v1\"\nsecret = \"echo\"\ndummy = \"sk-credshim-echo-0123456789abcdefghij\"\ninject = {{ header = \"authorization\" }}\nlimits = {{ per_minute = 5 }}\n\n[[ssh_key]]\nname = \"github\"\nsecret = \"ssh-github\"\nusers = [\"git\"]\nhost_keys = [\"SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU\"]\n",
             text(&preset.stdout)
         ),
     );
@@ -35,6 +35,17 @@ async fn a_draft_is_checked_without_the_secret_store_and_says_how_to_apply_it() 
         stdout.starts_with(&format!("{draft} is a valid config.\n")),
         "{stdout}"
     );
+    assert!(
+        stdout.contains(
+            "  rule \"openai\": secret openai -> https://api.openai.com:443  (openai preset host)\n"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("  rule \"echo\": secret echo -> https://echo.example.com:8443/v1  !! host not from a preset: confirm with the service\n      methods: all; paths: all; limits: per_minute 5\n"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("(github-ssh preset host keys)"), "{stdout}");
     assert!(stdout.contains(" secret set openai\n"), "{stdout}");
     assert!(stdout.contains(" ssh keygen ssh-github "), "{stdout}");
     assert!(

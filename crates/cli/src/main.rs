@@ -177,6 +177,13 @@ enum Command {
         )]
         id: Option<String>,
     },
+    #[command(
+        about = "Check, as the developer user, that the recommended setup keeps the real keys out of reach"
+    )]
+    Verify {
+        #[arg(long, help = "Print the check script instead of running it")]
+        print: bool,
+    },
     #[command(about = "Install, reload or upgrade the system service (admin, with sudo)")]
     Service {
         #[command(subcommand)]
@@ -330,6 +337,7 @@ const COMMAND_TOPICS: &[(&str, &str)] = &[
     ("doctor", "troubleshooting#credshim-doctor"),
     ("docs", ""),
     ("tail", credshim_mitm::guide::AUDIT_LOG_TOPIC),
+    ("verify", "install#5-verify-the-isolation-developer-session"),
     ("service", "install"),
     ("service reload", "configuration#applying-changes"),
     (
@@ -514,6 +522,7 @@ async fn dispatch(command: Command) -> anyhow::Result<()> {
                 None => tail::run(&path, lines, !no_follow).await,
             }
         }
+        Command::Verify { print } => service::verify(print),
         Command::Service {
             command:
                 ServiceCommand::Install {

@@ -68,6 +68,11 @@ pub const PAGES: &[Page] = &[
     page!("overview", "README.md", "docs/ja/README.md"),
     page!("install", "docs/install.md", "docs/ja/install.md"),
     page!(
+        "agent-setup",
+        "docs/agent-setup.md",
+        "docs/ja/agent-setup.md"
+    ),
+    page!(
         "configuration",
         "docs/configuration.md",
         "docs/ja/configuration.md"

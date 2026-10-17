@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, bail};
 
 const UPGRADE: &str = include_str!("../../../scripts/install.sh");
+const VERIFY: &str = include_str!("../../../scripts/stage-b/verify.sh");
 #[cfg(target_os = "linux")]
 const SETUP: &str = include_str!("../../../scripts/stage-b/setup-linux.sh");
 #[cfg(target_os = "linux")]
@@ -88,6 +89,20 @@ pub fn upgrade(print: bool, version: Option<String>) -> anyhow::Result<()> {
     let version = version.unwrap_or_else(|| "latest".to_owned());
     run_script(UPGRADE, "credshim-service-upgrade", [OsStr::new(&version)])
         .context("service upgrade failed")
+}
+
+pub fn verify(print: bool) -> anyhow::Result<()> {
+    if print {
+        std::io::stdout().write_all(VERIFY.as_bytes())?;
+        return Ok(());
+    }
+    if rustix::process::geteuid().is_root() {
+        bail!(
+            "`credshim verify` checks what the developer user can reach; run it as that user, without sudo"
+        );
+    }
+    run_script(VERIFY, "credshim-verify", std::iter::empty::<&OsStr>())
+        .context("some isolation checks above failed")
 }
 
 fn run_script<'a>(

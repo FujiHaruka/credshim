@@ -3,6 +3,7 @@
 [CredShim](index.md)
 
 - [推奨構成の導入](install.md)
+- [コーディングエージェントに導入を任せる](agent-setup.md)
 - [設定](configuration.md)
 - [AWS](aws.md)
 - [SSH エージェント](ssh.md)
