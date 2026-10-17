@@ -8,5 +8,6 @@
 - [SSH agent](ssh.md)
 - [Container isolation](container.md)
 - [Troubleshooting](troubleshooting.md)
+- [Coding agents](agents.md)
 - [Threat model and design principles](threat-model.md)
 - [Development](development.md)

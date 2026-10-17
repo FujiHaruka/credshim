@@ -80,6 +80,7 @@ pub const PAGES: &[Page] = &[
         "docs/troubleshooting.md",
         "docs/ja/troubleshooting.md"
     ),
+    page!("agents", "docs/agents.md", "docs/ja/agents.md"),
     page!(
         "threat-model",
         "docs/threat-model.md",

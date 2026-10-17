@@ -10,7 +10,8 @@
 - 新しい挙動には統合テストを付ける。完了の条件は `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`、`scripts/check-secret-exposure.sh` がすべて通ること。
 - 実運用の設定ディレクトリや秘密ストア（`~/.config/credshim`、`/var/lib/credshim`、キーチェーンの credshim 項目）を読まない・編集しない。開発中も本物の鍵は使わない。
 - `docs/install.md` と `docs/ja/install.md` のインストールの1行は `scripts/install.sh` をコミットの SHA で指す。スクリプトを変えたら、CI の `stage-b` が通ったあとで両方の SHA をそのコミットに書き換える。README と `docs/ja/README.md` のお試し構成のバージョン（`v=`）は、リリースのたびに上げる。
-- ユーザー向けドキュメントは英語が `README.md` と `docs/*.md`、日本語が `docs/ja/` で、内容を揃える。片方を変えたらもう片方も同じコミットで直す。両方から GitHub Pages のサイトを `scripts/build-docs-site.sh`（mdBook）で作り、main への push で `.github/workflows/docs-site.yml` がデプロイする。ページを足すときは `site/en/SUMMARY.md`、`site/ja/SUMMARY.md`、`site/llms.txt` とスクリプトの `pages` にも足す。
+- ユーザー向けドキュメントは英語が `README.md` と `docs/*.md`、日本語が `docs/ja/` で、内容を揃える。片方を変えたらもう片方も同じコミットで直す。両方から GitHub Pages のサイトを `scripts/build-docs-site.sh`（mdBook）で作り、main への push で `.github/workflows/docs-site.yml` がデプロイする。ページを足すときは `site/en/SUMMARY.md`、`site/ja/SUMMARY.md`、`site/llms.txt`、スクリプトの `pages`、`credshim docs` の表（`crates/cli/src/docs.rs` の `PAGES`）にも足す。
+- 失敗はすべて、詳しく見る方法を示す。CredShim が止めた応答は `credshim-error` と理由と `details:`・`docs:` のコマンドを返し、CLI のエラーと `--help` は `credshim docs <トピック>` で終わり、`credshim doctor` は失敗したチェックの節を示す。新しい拒否・エラー・doctor のチェックを足したら、指す節を英日両方のドキュメントに書く。指す先は見出しのアンカーで、英語のアンカーは日本語版でも同じ位置の見出しに解決するので、英日の見出しの階層を揃える。`credshim` の単体テストが、バイナリが示すトピックがすべて両言語で解決することを確かめる。
 - `testing` フィーチャー（上流の追加信頼アンカーとDNS上書き）はテスト専用。リリースビルドでは `compile_error!` で止まり、`scripts/check-release-excludes-testing.sh` が検査する。
 
 ## 構成
@@ -22,7 +23,7 @@
 - `crates/ssh` ssh-agent（session-bind の検証と署名の判定、鍵の生成）
 - `crates/aws` SigV4 の解析と再署名、認証情報を発行する操作の拒否と操作の許可リスト（操作の表は `scripts/aws/credential-operations.py` で botocore から生成）
 - `crates/testkit` テスト用CA、モック上流（echo・SSE・大容量・WebSocket、h1/h2）、モック AWS（SigV4 検証）、テスト用 sshd、ログキャプチャ
-- `crates/cli` `credshim` バイナリ（設定ファイル、`secret set/list`、`preset`、監査ログ）
+- `crates/cli` `credshim` バイナリ（設定ファイル、`secret set/list`、`preset`、監査ログ、`docs`）
 - `crates/e2e` 実SDK（Python、Node）と `aws` CLI v2 の E2E。`#[ignore]` なので `mise exec -- cargo test -p credshim-e2e -- --ignored`（Node は先に `crates/e2e/sdk/node` で `npm ci`）
 
 ## 環境メモ

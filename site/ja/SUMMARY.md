@@ -8,5 +8,6 @@
 - [SSH エージェント](ssh.md)
 - [コンテナ分離](container.md)
 - [うまく動かないとき](troubleshooting.md)
+- [コーディングエージェント](agents.md)
 - [脅威モデルと設計原則](threat-model.md)
 - [開発](development.md)

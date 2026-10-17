@@ -6,7 +6,7 @@ out=${1:-$root/target/docs-site}
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 blob=https://github.com/FujiHaruka/credshim/blob/main
-pages=(install configuration aws ssh container troubleshooting threat-model development)
+pages=(install configuration aws ssh container troubleshooting agents threat-model development)
 
 stage_page() {
   sed -E \
