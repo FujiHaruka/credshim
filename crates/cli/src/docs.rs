@@ -188,7 +188,12 @@ pub fn find(name: &str) -> anyhow::Result<&'static Page> {
     }
 }
 
-pub fn section(page: &Page, anchor: &str, lang: Lang) -> Option<String> {
+pub struct Section {
+    pub anchor: String,
+    pub text: String,
+}
+
+pub fn section(page: &Page, anchor: &str, lang: Lang) -> Option<Section> {
     let text = page.text(lang);
     let own = headings(text);
     let index = own
@@ -210,7 +215,10 @@ pub fn section(page: &Page, anchor: &str, lang: Lang) -> Option<String> {
         .skip(start.line)
         .take(end.saturating_sub(start.line))
         .collect();
-    Some(lines.join("\n").trim_end().to_string() + "\n")
+    Some(Section {
+        anchor: start.anchor.clone(),
+        text: lines.join("\n").trim_end().to_string() + "\n",
+    })
 }
 
 #[cfg(test)]
@@ -238,10 +246,10 @@ pub fn render(topic: Option<&str>, toc: bool, lang: Lang) -> anyhow::Result<Stri
     if toc {
         return Ok(contents(page, lang));
     }
-    let text = match anchor {
-        None => page.text(lang).to_string(),
+    let (text, anchor) = match anchor {
+        None => (page.text(lang).to_string(), None),
         Some(anchor) => match section(page, anchor, lang) {
-            Some(text) => text,
+            Some(section) => (section.text, Some(section.anchor)),
             None => bail!(
                 "page {name} has no section #{anchor}; list its sections with `credshim docs {name} --toc`"
             ),
@@ -400,13 +408,18 @@ mod tests {
     fn an_english_anchor_finds_the_same_section_in_japanese() {
         let page = find("configuration").unwrap();
         let section = section(page, "audit-log-and-status", Lang::Ja).unwrap();
-        assert!(section.starts_with("## 監査ログと状態\n"), "{section}");
+        assert!(
+            section.text.starts_with("## 監査ログと状態\n"),
+            "{}",
+            section.text
+        );
+        assert_eq!(section.anchor, "監査ログと状態");
     }
 
     #[test]
     fn a_section_ends_at_the_next_heading_of_its_level() {
         let page = find("troubleshooting").unwrap();
-        let section = section(page, "not_allowed", Lang::En).unwrap();
+        let section = section(page, "not_allowed", Lang::En).unwrap().text;
         assert!(section.starts_with("### `not_allowed`\n"), "{section}");
         assert!(!section.contains("### `limited`"), "{section}");
     }

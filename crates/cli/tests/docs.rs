@@ -62,7 +62,14 @@ async fn an_english_anchor_prints_the_japanese_section() {
     .await;
 
     assert!(section.status.success(), "{}", stderr(&section));
-    assert!(stdout(&section).starts_with("## 監査ログと状態\n"));
+    let text = stdout(&section);
+    assert!(text.starts_with("## 監査ログと状態\n"), "{text}");
+    assert!(
+        text.ends_with(
+            "web: https://fujiharuka.github.io/credshim/ja/configuration.html#監査ログと状態\n"
+        ),
+        "{text}"
+    );
 }
 
 #[tokio::test]

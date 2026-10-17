@@ -14,7 +14,7 @@ CredShim の失敗は、どれも詳しく見る方法を示す。CredShim が�
 
 1. **応答に `credshim-error` ヘッダーがあるか、ボディが `credshim:` で始まる。** CredShim がリクエストを止め、上流へは何も送っていない。1行目が理由。`docs:` はこの種類の拒否を説明するコマンド（`credshim docs troubleshooting#<種類>`）、`details:` はそのリクエストの監査ログの記録をすべて表示するコマンド。推奨構成では `details:` は管理者の権限が要る（`sudo -u` で始まる）ので、実行せずにその行を人に渡す。`limited` は再試行を繰り返さない。`deny` と `not_allowed` は、別のホストや別のキーで回避しない。許可するべきリクエストなら、ルールを変えるよう人に頼む。AWS の SDK と aws CLI では、同じ内容が `CredShim...` のエラーコードのメッセージとして出る。
 2. **API 自身がエラーを返し（401、403 など）、応答に `credshim-request-id` はあるが `credshim-error` が無い。** リクエストは CredShim を通り、上流が断った。人にその id を `tail --id` のコマンドで引いてもらう。`inject` なら本物のキーが送られているので、キーの権限かリクエスト自体の問題。`pass` なら、ルールが期待する場所にダミーが無かった（別のヘッダーに入れたなど）。
-3. **キーが無効だという 401 で、`credshim-request-id` が無い。** リクエストが CredShim を通っていない。ツールが `HTTPS_PROXY` を見ていないか、このシェルで環境変数を読み込んでいない。`credshim doctor` を実行する。
+3. **キーが無効だという 401 で、`credshim-request-id` が無い。** CredShim はこのリクエストを見ていない。ツールがプロキシを通っていない（`HTTPS_PROXY` を見ていないか、このシェルで環境変数を読み込んでいない。`credshim doctor` を実行する）か、そのホストにルールが無くダミーがそのまま送られた（ルールの `host`・`port` を確かめるよう人に頼む）かのどちらか。
 4. **ルールのあるホストで TLS の証明書エラーになる。** ツールが開発用の CA を信頼していない。`credshim doctor` を実行する。macOS の Go 製ツールは `credshim docs troubleshooting#go-tools-on-macos` を参照。
 5. **SSH が `agent refused operation` と言う。** CredShim のエージェントが、そのホストかユーザーへの署名を断った。`credshim docs ssh` を参照。
 
