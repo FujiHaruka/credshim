@@ -101,6 +101,7 @@ The steps are in [docs/install.md](docs/install.md).
 | `openai` | `api.openai.com` | `OPENAI_API_KEY` | |
 | `anthropic` | `api.anthropic.com` | `ANTHROPIC_API_KEY` | |
 | `gemini` | `generativelanguage.googleapis.com` | `GEMINI_API_KEY` | |
+| `github` | `api.github.com` | `GH_TOKEN` | [GitHub CLI](docs/github.md) |
 | `github-ssh` | `github.com` (SSH) | | [SSH agent](docs/ssh.md) |
 | `aws` | AWS services | `AWS_ACCESS_KEY_ID` and others | [AWS](docs/aws.md) |
 | `aws-sso` | AWS services | `AWS_ACCESS_KEY_ID` and others | [AWS (SSO)](docs/aws.md#aws-iam-identity-center-sso) |
@@ -131,6 +132,7 @@ When a request fails, CredShim's response says why and which command shows more.
 - [Configuration](docs/configuration.md): writing rules, applying changes, base URL mode, OAuth, audit log
 - [AWS](docs/aws.md): static access keys and IAM Identity Center (SSO)
 - [SSH agent](docs/ssh.md)
+- [GitHub CLI (gh)](docs/github.md): a fine-grained token for `gh`, and replacing an existing `gh` login
 - [Container isolation](docs/container.md)
 - [Troubleshooting](docs/troubleshooting.md): `credshim doctor`, refused requests, Go tools on macOS
 - [Coding agents](docs/agents.md): what an agent holds, what to do when a request fails, a note for the agent's instructions

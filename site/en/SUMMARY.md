@@ -7,6 +7,7 @@
 - [Configuration](configuration.md)
 - [AWS](aws.md)
 - [SSH agent](ssh.md)
+- [GitHub CLI (gh)](github.md)
 - [Container isolation](container.md)
 - [Troubleshooting](troubleshooting.md)
 - [Coding agents](agents.md)

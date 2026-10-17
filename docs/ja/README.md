@@ -101,6 +101,7 @@ curl https://api.openai.com/v1/chat/completions \
 | `openai` | `api.openai.com` | `OPENAI_API_KEY` | |
 | `anthropic` | `api.anthropic.com` | `ANTHROPIC_API_KEY` | |
 | `gemini` | `generativelanguage.googleapis.com` | `GEMINI_API_KEY` | |
+| `github` | `api.github.com` | `GH_TOKEN` | [GitHub CLI](github.md) |
 | `github-ssh` | `github.com`（SSH） | | [SSH エージェント](ssh.md) |
 | `aws` | AWS の各サービス | `AWS_ACCESS_KEY_ID` など | [AWS](aws.md) |
 | `aws-sso` | AWS の各サービス | `AWS_ACCESS_KEY_ID` など | [AWS（SSO）](aws.md#aws-iam-identity-centersso) |
@@ -131,6 +132,7 @@ set -a; . /etc/credshim/keys.env; set +a         # ダミーのキー。お試�
 - [設定](configuration.md)：ルールの書き方、設定の反映、base URL モード、OAuth、監査ログ
 - [AWS](aws.md)：静的アクセスキーと IAM Identity Center（SSO）
 - [SSH エージェント](ssh.md)
+- [GitHub CLI（gh）](github.md)：`gh` 用の fine-grained トークンと、既存の `gh` のログインの入れ替え
 - [コンテナ分離](container.md)
 - [うまく動かないとき](troubleshooting.md)：`credshim doctor`、止められたリクエスト、macOS の Go 製ツール
 - [コーディングエージェント](agents.md)：エージェントが持っているもの、リクエストが失敗したときの対処、エージェントへの指示に入れる文

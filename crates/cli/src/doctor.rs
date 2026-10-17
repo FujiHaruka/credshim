@@ -422,7 +422,7 @@ fn check_leftovers(tally: &mut Tally) {
         tally.line(
             "ok",
             "files",
-            "no private keys in ~/.ssh and no real AWS credentials in ~/.aws or the environment",
+            "no private keys in ~/.ssh, no gh login, and no real AWS or GitHub credentials in ~/.aws or the environment",
         );
     }
     for finding in findings {

@@ -5,16 +5,20 @@ pub struct Preset {
     host: &'static str,
     dummy_prefix: &'static str,
     inject: &'static str,
+    allow_methods: &'static str,
     allow_paths: &'static str,
     env: &'static str,
     base_url_prefix: &'static str,
 }
+
+const GET_POST: &str = r#"["GET", "POST"]"#;
 
 pub const PRESETS: &[Preset] = &[
     Preset {
         name: "openai",
         host: "api.openai.com",
         dummy_prefix: "sk-credshim-openai-",
+        allow_methods: GET_POST,
         inject: r#"{ header = "authorization" }"#,
         allow_paths: r#"["/v1/chat/completions", "/v1/responses", "/v1/completions", "/v1/embeddings", "/v1/models", "/v1/moderations", "/v1/audio", "/v1/images"]"#,
         env: "OPENAI_API_KEY",
@@ -24,6 +28,7 @@ pub const PRESETS: &[Preset] = &[
         name: "anthropic",
         host: "api.anthropic.com",
         dummy_prefix: "sk-ant-credshim-",
+        allow_methods: GET_POST,
         inject: r#"{ header = "x-api-key" }"#,
         allow_paths: r#"["/v1/messages", "/v1/models", "/v1/complete"]"#,
         env: "ANTHROPIC_API_KEY",
@@ -33,10 +38,21 @@ pub const PRESETS: &[Preset] = &[
         name: "gemini",
         host: "generativelanguage.googleapis.com",
         dummy_prefix: "credshim-gemini-",
+        allow_methods: GET_POST,
         inject: r#"{ header = "x-goog-api-key", query = "key" }"#,
         allow_paths: r#"["/v1beta/models", "/v1/models", "/v1beta/files", "/upload/v1beta/files"]"#,
         env: "GEMINI_API_KEY",
         base_url_prefix: "/gemini",
+    },
+    Preset {
+        name: "github",
+        host: "api.github.com",
+        dummy_prefix: "credshim-github-",
+        allow_methods: r#"["GET", "POST", "PATCH", "PUT", "DELETE"]"#,
+        inject: r#"{ header = "authorization" }"#,
+        allow_paths: r#"["/graphql", "/repos", "/user", "/users", "/orgs", "/search", "/notifications", "/gists", "/rate_limit"]"#,
+        env: "GH_TOKEN",
+        base_url_prefix: "/github",
     },
 ];
 
@@ -143,11 +159,12 @@ impl Preset {
     fn render(&self) -> String {
         let dummy = dummy::generate(self.dummy_prefix);
         format!(
-            "[[rule]]\nname = \"{name}\"\nhost = \"{host}\"\nsecret = \"{name}\"\ndummy = \"{dummy}\"\nenv = \"{env}\"\ninject = {inject}\nallow_methods = [\"GET\", \"POST\"]\nallow_paths = {allow_paths}\nbase_url_prefix = \"{base_url_prefix}\"\n",
+            "[[rule]]\nname = \"{name}\"\nhost = \"{host}\"\nsecret = \"{name}\"\ndummy = \"{dummy}\"\nenv = \"{env}\"\ninject = {inject}\nallow_methods = {allow_methods}\nallow_paths = {allow_paths}\nbase_url_prefix = \"{base_url_prefix}\"\n",
             env = self.env,
             name = self.name,
             host = self.host,
             inject = self.inject,
+            allow_methods = self.allow_methods,
             allow_paths = self.allow_paths,
             base_url_prefix = self.base_url_prefix,
         )

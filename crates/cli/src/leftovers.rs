@@ -4,6 +4,13 @@ use std::path::{Path, PathBuf};
 const REAL_KEY_PREFIXES: [&str; 4] = ["AKIA", "ASIA", "ABIA", "ACCA"];
 const AWS_CACHES: [&str; 3] = ["sso/cache", "cli/cache", "login/cache"];
 const FIRST_LINE_LIMIT: u64 = 128;
+const GITHUB_TOKEN_PREFIXES: [&str; 6] = ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"];
+const GITHUB_TOKEN_VARS: [&str; 4] = [
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+];
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Finding {
@@ -31,6 +38,7 @@ pub struct Places {
     pub home: PathBuf,
     pub aws_credentials: PathBuf,
     pub aws_config: PathBuf,
+    pub gh_config: PathBuf,
 }
 
 impl Places {
@@ -40,6 +48,10 @@ impl Places {
             aws_credentials: var("AWS_SHARED_CREDENTIALS_FILE")
                 .map_or_else(|| aws.join("credentials"), PathBuf::from),
             aws_config: var("AWS_CONFIG_FILE").map_or_else(|| aws.join("config"), PathBuf::from),
+            gh_config: var("GH_CONFIG_DIR")
+                .map(PathBuf::from)
+                .or_else(|| var("XDG_CONFIG_HOME").map(|dir| PathBuf::from(dir).join("gh")))
+                .unwrap_or_else(|| home.join(".config").join("gh")),
             home,
         }
     }
@@ -58,6 +70,8 @@ pub fn scan(places: &Places, var: impl Fn(&str) -> Option<String>) -> Vec<Findin
     aws_files(places, &mut findings);
     aws_caches(places, &mut findings);
     aws_environment(&var, &mut findings);
+    gh_hosts(places, &mut findings);
+    github_environment(&var, &mut findings);
     findings
 }
 
@@ -237,6 +251,63 @@ fn aws_environment(var: &impl Fn(&str) -> Option<String>, findings: &mut Vec<Fin
     }
 }
 
+fn gh_hosts(places: &Places, findings: &mut Vec<Finding>) {
+    let path = places.gh_config.join("hosts.yml");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let shown = places.show(&path);
+    for (host, stores_token) in gh_logins(&text) {
+        findings.push(if stores_token {
+            Finding::fail(format!(
+                "{shown} [{host}] holds a real gh token; run `gh auth logout --hostname {host}`, then revoke the token on GitHub"
+            ))
+        } else {
+            Finding::warn(format!(
+                "{shown} [{host}] is a gh login whose token is in the system keyring; run `gh auth logout --hostname {host}`, then revoke the token on GitHub"
+            ))
+        });
+    }
+}
+
+fn gh_logins(text: &str) -> Vec<(String, bool)> {
+    let mut logins: Vec<(String, bool)> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if !line.starts_with([' ', '\t']) {
+            if let Some(host) = trimmed.strip_suffix(':') {
+                logins.push((printable(host.trim_matches(['"', '\''])), false));
+            }
+        } else if let (Some(login), Some((key, value))) =
+            (logins.last_mut(), trimmed.split_once(':'))
+            && key.trim() == "oauth_token"
+            && !value.trim().is_empty()
+        {
+            login.1 = true;
+        }
+    }
+    logins
+}
+
+fn is_real_github_token(value: &str) -> bool {
+    GITHUB_TOKEN_PREFIXES
+        .iter()
+        .any(|prefix| value.starts_with(prefix))
+}
+
+fn github_environment(var: &impl Fn(&str) -> Option<String>, findings: &mut Vec<Finding>) {
+    for name in GITHUB_TOKEN_VARS {
+        if var(name).is_some_and(|value| is_real_github_token(&value)) {
+            findings.push(Finding::fail(format!(
+                "{name} in this environment is a real GitHub token"
+            )));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,6 +319,25 @@ mod tests {
         assert!(!is_real_access_key_id("CREDSHIMAWSxxxxxxxxxxxxxxxxxxxx"));
         assert!(!is_real_access_key_id("AKIAIOSFODNN7EXAMPL"));
         assert!(!is_real_access_key_id("akiaiosfodnn7example"));
+    }
+
+    #[test]
+    fn gh_logins_say_whether_the_token_is_in_the_file() {
+        let hosts = "github.com:\n    users:\n        me:\n            oauth_token: gho_x\n    git_protocol: ssh\n    oauth_token: gho_x\n    user: me\nghe.example.com:\n    git_protocol: https\n    user: me\n";
+        assert_eq!(
+            gh_logins(hosts),
+            vec![
+                ("github.com".to_string(), true),
+                ("ghe.example.com".to_string(), false)
+            ]
+        );
+    }
+
+    #[test]
+    fn real_github_tokens_are_recognised_by_prefix() {
+        assert!(is_real_github_token("ghp_0123456789"));
+        assert!(is_real_github_token("github_pat_0123456789"));
+        assert!(!is_real_github_token("credshim-github-0123456789"));
     }
 
     #[test]

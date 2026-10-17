@@ -17,6 +17,7 @@ Each page below is the Markdown source of the HTML page with the same name endin
 - [Configuration](https://fujiharuka.github.io/credshim/en/configuration.md): writing rules, applying changes, base URL mode, OAuth, audit log
 - [AWS](https://fujiharuka.github.io/credshim/en/aws.md): static access keys and IAM Identity Center (SSO)
 - [SSH agent](https://fujiharuka.github.io/credshim/en/ssh.md): CredShim as an ssh-agent that keeps the keys and signs only for allowed hosts and users
+- [GitHub CLI (gh)](https://fujiharuka.github.io/credshim/en/github.md): a fine-grained token for `gh` bound to api.github.com, and replacing an existing `gh` login
 - [Container isolation](https://fujiharuka.github.io/credshim/en/container.md): routing all agent traffic through the proxy's checks and audit
 - [Troubleshooting](https://fujiharuka.github.io/credshim/en/troubleshooting.md): `credshim doctor` and its checks, refused requests (`credshim-error` kinds), Go tools on macOS
 - [Threat model and design principles](https://fujiharuka.github.io/credshim/en/threat-model.md): what an agent can and cannot do in each setup

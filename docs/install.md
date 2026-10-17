@@ -161,9 +161,10 @@ Treat any keys you had before installing CredShim as already read by an agent. D
 
 - **API keys.** Create a new key with the issuer and register it with `credshim-svc secret set`. Delete the old key from .env files and shell config, then revoke it with the issuer. Recreate keys you registered in the trial setup the same way.
 - **SSH.** Create a new key with `credshim-svc ssh keygen` and register the public key on the server (GitHub or similar). After `ssh -T` confirms it works, remove the old public key from the server and delete the old private key in `~/.ssh`. For the steps, see [SSH agent](ssh.md).
+- **GitHub CLI.** Run `gh auth logout`, revoke the old token on GitHub, and give `gh` a fine-grained token through the `github` preset. For the steps, see [GitHub CLI](github.md).
 - **AWS static keys.** Create a new access key in IAM, register it with `credshim-svc secret set`, and rewrite `~/.aws/credentials` with the dummy. Once it works, deactivate the old key (`aws iam update-access-key --status Inactive`), then delete it.
 - **AWS SSO.** Before moving to CredShim, run `aws sso logout` to revoke the cached tokens, and delete `~/.aws/sso/cache` and `~/.aws/cli/cache`. Replace the `sso_session` and `sso_start_url` profiles in `~/.aws/config` with profiles that use the dummy static keys.
-- **Environment variables.** If your shell config or .env files still hold a real `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, or `AWS_SESSION_TOKEN`, delete it.
+- **Environment variables.** If your shell config or .env files still hold a real `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `GH_TOKEN`, or `GITHUB_TOKEN`, delete it.
 
 ## Updating to a new release (admin session)
 

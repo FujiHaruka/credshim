@@ -17,7 +17,7 @@ Checks, with this shell's environment as is, that curl, python3, node, go, ssh, 
 [ok  ] ssh      SSH_AUTH_SOCK=/var/lib/credshim-ssh/agent.sock is the credshim agent (rules: github)
 [ok  ] openssh  /usr/bin/ssh is OpenSSH 9.9, which sends session-bind
 [ok  ] aws      the aws CLI reached credshim.test through the proxy and trusted the CA
-[ok  ] files    no private keys in ~/.ssh and no real AWS credentials in ~/.aws or the environment
+[ok  ] files    no private keys in ~/.ssh, no gh login, and no real AWS or GitHub credentials in ~/.aws or the environment
 ```
 
 `credshim.test` is a reserved host name that the proxy itself answers; it does not exist in DNS. Reaching it shows that the traffic goes through the proxy, and a successful TLS handshake shows that the CA is trusted. `credshim doctor --snippets` prints one-liners that check the same thing from each language (requests, httpx, Node's fetch, Go).
@@ -62,7 +62,7 @@ doctor uses `aws` on PATH to send a request with the dummy key to `credshim.test
 
 ### `files`
 
-doctor reports private keys in `~/.ssh`, real access keys and `credential_process` and SSO profiles in `~/.aws/credentials` and `~/.aws/config`, `~/.aws/sso/cache` and `~/.aws/cli/cache`, and real keys and session tokens in environment variables, by path and profile name only (without printing the values). To clean them up, see [Replace existing credentials](install.md#6-replace-existing-credentials).
+doctor reports private keys in `~/.ssh`, real access keys and `credential_process` and SSO profiles in `~/.aws/credentials` and `~/.aws/config`, `~/.aws/sso/cache` and `~/.aws/cli/cache`, `gh` logins in `~/.config/gh/hosts.yml` (whether the token is in the file or in the system keyring), and real AWS keys, session tokens, and GitHub tokens in environment variables, by path, profile name, and host only (without printing the values). To clean them up, see [Replace existing credentials](install.md#6-replace-existing-credentials).
 
 ## Refused requests
 
