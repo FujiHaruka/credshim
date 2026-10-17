@@ -419,11 +419,7 @@ fn check_leftovers(tally: &mut Tally) {
     let places = Places::from_env(PathBuf::from(home), var);
     let findings = leftovers::scan(&places, var);
     if findings.is_empty() {
-        tally.line(
-            "ok",
-            "files",
-            "no private keys in ~/.ssh, no gh login, and no real AWS or GitHub credentials in ~/.aws or the environment",
-        );
+        tally.line("ok", "files", "no leftover keys, tokens or logins found");
     }
     for finding in findings {
         tally.line(finding.mark, "files", &finding.detail);

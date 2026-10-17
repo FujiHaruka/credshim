@@ -39,7 +39,7 @@ pub struct Places {
     pub home: PathBuf,
     pub aws_credentials: PathBuf,
     pub aws_config: PathBuf,
-    pub gh_config: PathBuf,
+    pub gh_hosts: PathBuf,
 }
 
 impl Places {
@@ -49,10 +49,11 @@ impl Places {
             aws_credentials: var("AWS_SHARED_CREDENTIALS_FILE")
                 .map_or_else(|| aws.join("credentials"), PathBuf::from),
             aws_config: var("AWS_CONFIG_FILE").map_or_else(|| aws.join("config"), PathBuf::from),
-            gh_config: var("GH_CONFIG_DIR")
+            gh_hosts: var("GH_CONFIG_DIR")
                 .map(PathBuf::from)
                 .or_else(|| var("XDG_CONFIG_HOME").map(|dir| PathBuf::from(dir).join("gh")))
-                .unwrap_or_else(|| home.join(".config").join("gh")),
+                .unwrap_or_else(|| home.join(".config").join("gh"))
+                .join("hosts.yml"),
             home,
         }
     }
@@ -253,62 +254,45 @@ fn aws_environment(var: &impl Fn(&str) -> Option<String>, findings: &mut Vec<Fin
 }
 
 fn gh_hosts(places: &Places, findings: &mut Vec<Finding>) {
-    let path = places.gh_config.join("hosts.yml");
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    let Ok(text) = std::fs::read_to_string(&places.gh_hosts) else {
         return;
     };
-    let shown = places.show(&path);
-    for login in gh_logins(&text) {
-        let place = if login.token_in_file {
+    let shown = places.show(&places.gh_hosts);
+    for host in hosts_yml(&text) {
+        let place = if host.has("oauth_token") {
             "holds a real gh token"
-        } else {
+        } else if host.has("user") || host.get("users").is_some() {
             "is a gh login whose token is in the system keyring"
+        } else {
+            continue;
         };
         findings.push(Finding::fail(format!(
-            "{shown} [{host}] {place}; run `env -u GH_TOKEN -u GITHUB_TOKEN gh auth logout --hostname {host}`, then revoke the token on GitHub",
-            host = login.host
+            "{shown} [{name}] {place}; run `env -u GH_TOKEN -u GITHUB_TOKEN gh auth logout --hostname {name}`, then revoke the token on GitHub",
+            name = host.name
         )));
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct GhLogin {
-    host: String,
-    signed_in: bool,
-    token_in_file: bool,
-}
-
-fn gh_logins(text: &str) -> Vec<GhLogin> {
-    let mut hosts: Vec<GhLogin> = Vec::new();
+fn hosts_yml(text: &str) -> Vec<Section> {
+    let mut hosts: Vec<Section> = Vec::new();
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
         if !line.starts_with([' ', '\t']) {
-            if let Some(host) = trimmed.strip_suffix(':') {
-                hosts.push(GhLogin {
-                    host: printable(unquoted(host)),
-                    signed_in: false,
-                    token_in_file: false,
+            if let Some(name) = trimmed.strip_suffix(':') {
+                hosts.push(Section {
+                    name: printable(unquoted(name)),
+                    keys: Vec::new(),
                 });
             }
-        } else if let (Some(login), Some((key, value))) =
-            (hosts.last_mut(), trimmed.split_once(':'))
+        } else if let (Some(host), Some((key, value))) = (hosts.last_mut(), trimmed.split_once(':'))
         {
-            let has_value = !unquoted(value).is_empty();
-            match key.trim() {
-                "oauth_token" if has_value => {
-                    login.signed_in = true;
-                    login.token_in_file = true;
-                }
-                "user" if has_value => login.signed_in = true,
-                "users" => login.signed_in = true,
-                _ => {}
-            }
+            host.keys
+                .push((key.trim().to_string(), unquoted(value).to_string()));
         }
     }
-    hosts.retain(|login| login.signed_in);
     hosts
 }
 
@@ -323,7 +307,7 @@ fn is_real_github_token(value: &str) -> bool {
         || (value.len() == CLASSIC_TOKEN_LEN
             && value
                 .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
 }
 
 fn github_environment(var: &impl Fn(&str) -> Option<String>, findings: &mut Vec<Finding>) {
@@ -350,16 +334,26 @@ mod tests {
     }
 
     #[test]
-    fn gh_logins_say_whether_the_token_is_in_the_file() {
+    fn gh_logins_say_whether_the_token_is_in_the_file_and_skip_settings_only_hosts() {
         let hosts = "github.com:\n    users:\n        me:\n            oauth_token: gho_x\n    git_protocol: ssh\n    oauth_token: gho_x\n    user: me\nghe.example.com:\n    git_protocol: https\n    user: me\n    oauth_token: \"\"\nsettings.example.com:\n    git_protocol: ssh\n";
-        let logins = gh_logins(hosts);
-        let found: Vec<(&str, bool)> = logins
+        let home = tempfile::tempdir().unwrap();
+        let places = Places::from_env(home.path().to_path_buf(), |_| None);
+        std::fs::create_dir_all(places.gh_hosts.parent().unwrap()).unwrap();
+        std::fs::write(&places.gh_hosts, hosts).unwrap();
+        let mut findings = Vec::new();
+
+        gh_hosts(&places, &mut findings);
+
+        let found: Vec<&str> = findings
             .iter()
-            .map(|login| (login.host.as_str(), login.token_in_file))
+            .map(|finding| finding.detail.split("; ").next().unwrap())
             .collect();
         assert_eq!(
             found,
-            vec![("github.com", true), ("ghe.example.com", false)]
+            vec![
+                "~/.config/gh/hosts.yml [github.com] holds a real gh token",
+                "~/.config/gh/hosts.yml [ghe.example.com] is a gh login whose token is in the system keyring"
+            ]
         );
     }
 

@@ -17,7 +17,7 @@
 [ok  ] ssh      SSH_AUTH_SOCK=/var/lib/credshim-ssh/agent.sock is the credshim agent (rules: github)
 [ok  ] openssh  /usr/bin/ssh is OpenSSH 9.9, which sends session-bind
 [ok  ] aws      the aws CLI reached credshim.test through the proxy and trusted the CA
-[ok  ] files    no private keys in ~/.ssh, no gh login, and no real AWS or GitHub credentials in ~/.aws or the environment
+[ok  ] files    no leftover keys, tokens or logins found
 ```
 
 `credshim.test` はプロキシ自身が答える予約ホスト名で、DNS には存在しない。そこへ届けばプロキシを通っている、TLS が通れば CA を信頼している、と分かる。各言語から同じことを確かめるワンライナー（requests、httpx、Node の fetch、Go）は `credshim doctor --snippets` で表示できる。
