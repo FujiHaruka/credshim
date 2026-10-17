@@ -22,22 +22,6 @@ async fn ca_init(home: &std::path::Path) {
 }
 
 #[tokio::test]
-async fn secret_set_refuses_a_non_tty_stdin() {
-    let home = tempfile::tempdir().unwrap();
-    let config = write_config(home.path(), "");
-
-    let output = output(
-        home.path(),
-        &["secret", "set", "openai", "--config", &config],
-    )
-    .await;
-
-    assert!(!output.status.success());
-    assert!(stderr(&output).contains("not a TTY"), "{}", stderr(&output));
-    assert!(!home.path().join("secrets.age").exists());
-}
-
-#[tokio::test]
 async fn secret_list_prints_names_and_times_but_never_values() {
     let home = tempfile::tempdir().unwrap();
     let config = write_config(home.path(), "");

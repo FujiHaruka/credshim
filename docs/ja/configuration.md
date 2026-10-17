@@ -66,6 +66,19 @@ sudo $bin service reload
 | --- | --- |
 | `[[rule]]`、`[scrub]`、AWS（`[aws]`、`[[aws_key]]`、`[[aws_sso_session]]`、`[[aws_sso_role]]`） | `[listen]`、`[ca]`、`[secrets]`、`[audit]`、`[status]`、SSH（`[ssh]`、`[[ssh_key]]`）、OAuth（`[[oauth]]`、`[vault]`、`[limits]`） |
 
+## 下書きを確かめる
+
+`credshim config check <ファイル>` は、秘密ストア・CA・ファイルの権限を読まずに設定ファイルを確かめる。本物の設定を読めない開発ユーザーやコーディングエージェントでも、下書きに対して実行できる。下書きには足すセクションだけを書けばよい（`credshim preset` の出力など）。
+
+```sh
+credshim preset openai > draft.toml
+credshim config check draft.toml
+```
+
+- 見つけた問題をまとめて挙げ、それぞれに読む `credshim docs` の節を添える。設定のエラーは、どのコマンドでも、ファイルのどのセクションにあるかに応じた節を示す。
+- 下書きに問題が無ければ、反映する手順を表示する。登録する秘密、ログインする AWS SSO のセッション、再読み込みのコマンド。これらは管理者のセッションで実行する。`secret set` と `aws sso login` は端末の前の人が打つ。
+- 今の設定にあるものとの衝突（ルール名の重複など）は分からない。`service reload` が反映の前に設定全体を確かめ、失敗すれば動いている設定のまま続ける。
+
 ## base URL モード
 
 プロキシの環境変数や独自の CA を扱えないクライアント向けのモード。`http://127.0.0.1:8788/openai/...` を `https://api.openai.com/...` に決まった対応で転送するリバースプロキシで、ルール（宛先、許可リスト、上限、スクラブ）はそのまま掛かる。開発用の CA は要らない。

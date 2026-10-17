@@ -1,6 +1,6 @@
 # Coding agents
 
-This page is for a coding agent that runs behind CredShim, and for the person who sets it up. It covers what the agent holds, how to tell what happened when a request fails, and a short note to put in the agent's instructions.
+This page is for a coding agent that runs behind CredShim, and for the person who sets it up. It covers what the agent holds, how to tell what happened when a request fails, how to propose a change to the configuration, and a short note to put in the agent's instructions.
 
 ## What the agent holds
 
@@ -18,6 +18,14 @@ Go down this list and stop at the first case that fits.
 4. **A TLS certificate error for a host that has a rule.** The tool does not trust the development CA. Run `credshim doctor`; for Go tools on macOS, see `credshim docs troubleshooting#go-tools-on-macos`.
 5. **SSH says `agent refused operation`.** The CredShim agent refused to sign for that host or user. See `credshim docs ssh`.
 
+## Changing the configuration
+
+In the recommended setup the agent can read neither the config nor the secrets, and a real key must never pass through it. When a task needs a new rule, a wider allowlist, or another key, the agent prepares the change and a person applies it. Leave it to the person in the trial setup too, even though the agent could edit the config there.
+
+1. Write the sections to add in a file of your own. `credshim preset <name>` prints a ready-made rule for common APIs; for others, see `credshim docs configuration#writing-rules`.
+2. Run `credshim config check <file>` and fix every problem it lists. Each comes with the docs section to read.
+3. Give the person the draft and the steps that `config check` printed. Some of them, such as `secret set` and `aws sso login`, are for a person at a terminal: do not pipe a value into them or fake a terminal.
+
 ## A note for the agent's instructions
 
 Put this in the project's `AGENTS.md` or `CLAUDE.md` (or the agent's own instructions).
@@ -32,5 +40,7 @@ the destinations its rules allow; do not look for real keys or work around a ref
   by CredShim. Read its first line, run its `docs:` command, and do not retry a `limited`
   refusal in a loop. If its `details:` command starts with `sudo`, ask me to run it.
 - When a tool cannot connect or gets a certificate error, run `credshim doctor`.
+- To change CredShim's rules, write a draft, check it with `credshim config check <file>`,
+  and give me the draft and the steps it prints.
 - `credshim docs` prints the CredShim docs for this version.
 ```

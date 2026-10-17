@@ -66,6 +66,19 @@ The table shows which settings apply on reload and which need a restart. If you 
 | --- | --- |
 | `[[rule]]`, `[scrub]`, AWS (`[aws]`, `[[aws_key]]`, `[[aws_sso_session]]`, `[[aws_sso_role]]`) | `[listen]`, `[ca]`, `[secrets]`, `[audit]`, `[status]`, SSH (`[ssh]`, `[[ssh_key]]`), OAuth (`[[oauth]]`, `[vault]`, `[limits]`) |
 
+## Checking a draft
+
+`credshim config check <file>` checks a config file without reading the secret store, the CA, or file permissions. Anyone can run it on a draft, including the developer user and a coding agent, which cannot read the real config. A draft can hold only the sections to add, such as the output of `credshim preset`.
+
+```sh
+credshim preset openai > draft.toml
+credshim config check draft.toml
+```
+
+- It lists every problem it finds at once, each with the `credshim docs` section to read. An error in the config, from any command, points to the section for the part of the file it is in.
+- When the draft is valid, it prints the steps that apply it: the secrets to store, the AWS SSO sessions to log in to, and the reload command. Run them in the admin session. A person types `secret set` and `aws sso login` at a terminal.
+- It cannot see clashes with what is already in the config, such as a rule name used twice. `service reload` checks the whole config before it applies anything and keeps the running config if the check fails.
+
 ## Base URL mode
 
 A mode for clients that cannot use the proxy environment variables or a custom CA. It is a reverse proxy that forwards `http://127.0.0.1:8788/openai/...` to `https://api.openai.com/...` by a fixed mapping. Rules (destination, allowlists, limits, scrub) still apply. The development CA is not needed.
