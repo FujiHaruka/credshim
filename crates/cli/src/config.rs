@@ -132,7 +132,7 @@ pub fn load(explicit: Option<&Path>) -> anyhow::Result<Loaded> {
     };
     let invalid = |problem: Problem| problem.into_error(&path);
     let (config, table) = parse(&text).map_err(invalid)?;
-    if let Some(problem) = config.problems().into_iter().next() {
+    if let Some(problem) = config.basic_problems().into_iter().next() {
         return Err(invalid(problem));
     }
     Ok(Loaded {
@@ -249,8 +249,7 @@ fn note<E: Into<anyhow::Error>>(
 
 impl Config {
     pub fn problems(&self) -> Vec<Problem> {
-        let mut problems = Vec::new();
-        note(&mut problems, RULES_TOPIC, self.check_env_names());
+        let mut problems = self.basic_problems();
         let mut rules = Vec::new();
         for spec in &self.rules {
             match Rule::from_spec(spec.clone()) {
@@ -270,6 +269,22 @@ impl Config {
             BASE_URL_TOPIC,
             BaseUrls::from_specs(&self.rules).map(drop),
         );
+        for spec in &self.oauth {
+            let placeholder = spec
+                .client_secret_name()
+                .map(|_| SecretString::from(String::new()));
+            note(
+                &mut problems,
+                OAUTH_TOPIC,
+                Provider::new(spec.clone(), placeholder).map(drop),
+            );
+        }
+        problems
+    }
+
+    fn basic_problems(&self) -> Vec<Problem> {
+        let mut problems = Vec::new();
+        note(&mut problems, RULES_TOPIC, self.check_env_names());
         note(
             &mut problems,
             SSH_TOPIC,
@@ -292,16 +307,6 @@ impl Config {
             },
         );
         note(&mut problems, AWS_KEY_TOPIC, self.check_aws_keys());
-        for spec in &self.oauth {
-            let placeholder = spec
-                .client_secret_name()
-                .map(|_| SecretString::from(String::new()));
-            note(
-                &mut problems,
-                OAUTH_TOPIC,
-                Provider::new(spec.clone(), placeholder).map(drop),
-            );
-        }
         problems
     }
 

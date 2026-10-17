@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, bail};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use credshim_aws::{Aws, AwsCredentials, Signer, SsoOptions, SsoProvider, SsoSession};
-use credshim_core::{BaseUrls, RuleSet, Secrets};
+use credshim_core::{BaseUrls, Rule, RuleSet, Secrets};
 use credshim_mitm::{
     AUDIT_TARGET, CertificateAuthority, Details, Guide, Proxy, ProxyConfig, Reloader, Stats,
     Upstream, UpstreamTransport,
@@ -557,6 +557,9 @@ async fn dispatch(command: Command) -> anyhow::Result<()> {
 
 fn load_env_config(config_path: Option<&Path>) -> anyhow::Result<(config::Config, BaseUrls)> {
     let config = load_config(config_path)?.config;
+    for spec in &config.rules {
+        Rule::from_spec(spec.clone())?;
+    }
     let base_urls = BaseUrls::from_specs(&config.rules)?;
     Ok((config, base_urls))
 }
