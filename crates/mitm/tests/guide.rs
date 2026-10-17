@@ -175,9 +175,17 @@ async fn a_limited_request_says_which_rule_is_over_its_limits() {
 
     assert_eq!(response.status(), 429);
     assert_eq!(response.headers()["credshim-error"], "limited");
+    let retry_after: u64 = response.headers()["retry-after"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((1..=60).contains(&retry_after), "{retry_after}");
     let body = response.text().await.unwrap();
     assert!(
-        body.starts_with("credshim: rule \"openai\" is over its limits\n"),
+        body.starts_with(&format!(
+            "credshim: rule \"openai\" is over its per_minute limit; retry in {retry_after}s\n"
+        )),
         "{body}"
     );
     assert!(

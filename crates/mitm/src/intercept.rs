@@ -22,7 +22,7 @@ use credshim_oauth::{Exchange, OAuth};
 
 use crate::audit::{self, AwsLabels, Outcome};
 use crate::ca::CertificateAuthority;
-use crate::guide::{Topic, error_chain, refuse, refuse_aws};
+use crate::guide::{Topic, error_chain, over_limit, refuse, refuse_aws};
 use crate::live::Live;
 use crate::proxy::{ProxyBody, full, strip_hop_by_hop};
 use crate::relay::relay;
@@ -403,19 +403,16 @@ impl Session {
                     permit = Some(held);
                     Outcome::Injected(rules)
                 }
-                Err(rule) => {
+                Err(over) => {
                     tracing::warn!(
-                        %rule,
+                        rule = %over.rule,
+                        limit = over.limit,
                         host = %target.host,
                         port = target.port,
                         "request exceeds a rule's limits"
                     );
-                    let response = refuse(
-                        StatusCode::TOO_MANY_REQUESTS,
-                        Topic::Limited,
-                        format!("rule \"{rule}\" is over its limits"),
-                    );
-                    return Relayed::new(Outcome::Limited(rule), response, None);
+                    let response = over_limit(&over, None);
+                    return Relayed::new(Outcome::Limited(over.rule), response, None);
                 }
             },
             Ok(Verdict::NotAllowed(rule)) => {
@@ -670,21 +667,18 @@ impl Session {
             Decision::Resign(plan) => {
                 let rule = plan.rule.name().to_string();
                 let labels = AwsLabels::new(&plan.labels, None);
-                let Some(permit) = aws.admit(plan.rule) else {
-                    tracing::warn!(%rule, host = %target.host, "AWS request exceeds the rule's limits");
-                    let response = refuse_as_aws(
-                        parts,
-                        Some(plan.auth.scope.service.as_str()),
-                        StatusCode::TOO_MANY_REQUESTS,
-                        Topic::Limited,
-                        format!("AWS rule {rule} is over its limits"),
-                        "CredShimLimitExceeded",
-                    );
-                    return Err(Box::new(Relayed::new(
-                        Outcome::Limited(rule),
-                        response,
-                        Some(AwsLabels::new(&plan.labels, Some(Reason::Limited))),
-                    )));
+                let permit = match aws.admit(plan.rule) {
+                    Ok(permit) => permit,
+                    Err(over) => {
+                        tracing::warn!(%rule, limit = over.limit, host = %target.host, "AWS request exceeds the rule's limits");
+                        let format = Format::of(parts, Some(plan.auth.scope.service.as_str()));
+                        let response = over_limit(&over, Some((format, "CredShimLimitExceeded")));
+                        return Err(Box::new(Relayed::new(
+                            Outcome::Limited(rule),
+                            response,
+                            Some(AwsLabels::new(&plan.labels, Some(Reason::Limited))),
+                        )));
+                    }
                 };
                 let credentials = match aws.credentials(plan.rule).await {
                     Ok(credentials) => credentials,

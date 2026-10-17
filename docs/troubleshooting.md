@@ -97,7 +97,7 @@ If the host has a rule but the app gets a TLS certificate error and no `credshim
 
 ### `limited`
 
-429. A limit in `limits` (`per_minute`, `per_day`, `concurrent`) was exceeded. Retrying right away fails again. Check the counters with `credshim-svc status`.
+429. A limit in `limits` (`per_minute`, `per_day`, `concurrent`) was exceeded. The first line names the limit and says when to retry, and `Retry-After` gives the same wait in seconds (for `concurrent`, there is none: retry when one of the rule's requests finishes). Retrying before then fails again. Check the counters with `credshim-svc status`.
 
 ### `misdirected`
 

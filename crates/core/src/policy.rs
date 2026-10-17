@@ -150,6 +150,13 @@ pub struct Limiter {
     windows: Mutex<HashMap<String, Window>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OverLimit {
+    pub rule: String,
+    pub limit: &'static str,
+    pub retry_after: Option<Duration>,
+}
+
 #[derive(Debug, Default)]
 pub struct Permit {
     held: Vec<Arc<AtomicU32>>,
@@ -169,7 +176,7 @@ impl Limiter {
         rules: impl IntoIterator<Item = (&'a str, Limits)>,
         now: Instant,
         wall: SystemTime,
-    ) -> Result<Permit, String> {
+    ) -> Result<Permit, OverLimit> {
         let rules: Vec<(&str, Limits)> = rules
             .into_iter()
             .filter(|(_, limits)| !limits.is_unlimited())
@@ -194,15 +201,30 @@ impl Limiter {
                 window.day = day;
                 window.today = 0;
             }
-            let over = limits
-                .per_minute
-                .is_some_and(|max| window.recent.len() >= max as usize)
-                || limits.per_day.is_some_and(|max| window.today >= max)
-                || limits
-                    .concurrent
-                    .is_some_and(|max| window.active.load(Ordering::Acquire) >= max);
-            if over {
-                return Err((*name).to_string());
+            let over = |limit, retry_after| {
+                Err(OverLimit {
+                    rule: (*name).to_string(),
+                    limit,
+                    retry_after,
+                })
+            };
+            if limits.per_day.is_some_and(|max| window.today >= max) {
+                let into_day = wall
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map_or(0, |elapsed| elapsed.as_secs() % DAY_SECS);
+                return over("per_day", Some(Duration::from_secs(DAY_SECS - into_day)));
+            }
+            if let Some(max) = limits.per_minute
+                && window.recent.len() >= max as usize
+            {
+                let freed = window.recent[window.recent.len() - max as usize] + MINUTE;
+                return over("per_minute", Some(freed.saturating_duration_since(now)));
+            }
+            if limits
+                .concurrent
+                .is_some_and(|max| window.active.load(Ordering::Acquire) >= max)
+            {
+                return over("concurrent", None);
             }
         }
         let mut permit = Permit::default();

@@ -1,8 +1,8 @@
 use std::time::{Duration, Instant, SystemTime};
 
 use credshim_core::{
-    Destination, Injector, Limiter, Limits, Policy, PolicyError, RuleError, RuleSet, RuleSpec,
-    Secrets, Verdict,
+    Destination, Injector, Limiter, Limits, OverLimit, Policy, PolicyError, RuleError, RuleSet,
+    RuleSpec, Secrets, Verdict,
 };
 use http::{HeaderMap, Method, Request, Uri};
 use secrecy::SecretString;
@@ -281,7 +281,11 @@ fn per_minute_limit_uses_a_sliding_window() {
         limiter
             .admit(rule, start + Duration::from_secs(59), wall)
             .unwrap_err(),
-        "r"
+        OverLimit {
+            rule: "r".into(),
+            limit: "per_minute",
+            retry_after: Some(Duration::from_secs(1)),
+        }
     );
     assert!(
         limiter
@@ -307,10 +311,12 @@ fn per_day_limit_resets_at_the_utc_day_boundary() {
             .admit(rule, now, day + Duration::from_secs(10))
             .is_ok()
     );
-    assert!(
+    assert_eq!(
         limiter
             .admit(rule, now, day + Duration::from_secs(86_399))
-            .is_err()
+            .unwrap_err()
+            .retry_after,
+        Some(Duration::from_secs(1))
     );
     assert!(
         limiter
@@ -341,7 +347,11 @@ fn a_refused_request_consumes_no_quota_of_other_rules() {
     let full = ("full", limits(None, None, Some(1)));
 
     let _held = limiter.admit([full], now, wall).unwrap();
-    assert_eq!(limiter.admit([open, full], now, wall).unwrap_err(), "full");
+    let over = limiter.admit([open, full], now, wall).unwrap_err();
+    assert_eq!(
+        (over.rule.as_str(), over.limit, over.retry_after),
+        ("full", "concurrent", None)
+    );
     assert!(limiter.admit([open], now, wall).is_ok());
 }
 

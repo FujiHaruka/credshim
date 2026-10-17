@@ -1,10 +1,12 @@
 use std::fmt;
+use std::time::Duration;
 
 use bytes::Bytes;
 use http::header::{self, HeaderName, HeaderValue};
 use http::{Response, StatusCode};
 
 use credshim_aws::refusal::Format;
+use credshim_core::OverLimit;
 
 use crate::proxy::{ProxyBody, full};
 
@@ -204,6 +206,41 @@ fn refusal(status: StatusCode, refusal: Refusal) -> Response<ProxyBody> {
     *response.status_mut() = status;
     response.extensions_mut().insert(refusal);
     response
+}
+
+pub(crate) fn over_limit(
+    over: &OverLimit,
+    aws: Option<(Format, &'static str)>,
+) -> Response<ProxyBody> {
+    let kind = if aws.is_some() { "AWS rule" } else { "rule" };
+    let wait = match over.retry_after {
+        Some(after) => format!("retry in {}s", retry_secs(after)),
+        None => "retry when one of its requests finishes".to_string(),
+    };
+    let why = format!(
+        "{kind} \"{}\" is over its {} limit; {wait}",
+        over.rule, over.limit
+    );
+    let mut response = match aws {
+        Some((format, code)) => refuse_aws(
+            StatusCode::TOO_MANY_REQUESTS,
+            Topic::Limited,
+            why,
+            format,
+            code,
+        ),
+        None => refuse(StatusCode::TOO_MANY_REQUESTS, Topic::Limited, why),
+    };
+    if let Some(after) = over.retry_after {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from(retry_secs(after)));
+    }
+    response
+}
+
+fn retry_secs(after: Duration) -> u64 {
+    after.as_secs() + u64::from(after.subsec_nanos() > 0)
 }
 
 pub(crate) fn error_chain(err: &(dyn std::error::Error + 'static)) -> String {

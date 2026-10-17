@@ -97,7 +97,7 @@ docs: credshim docs troubleshooting#not_allowed
 
 ### `limited`
 
-429。`limits` の上限（`per_minute`・`per_day`・`concurrent`）を超えた。すぐに再試行しても同じく止まる。`credshim-svc status` でカウンタを見る。
+429。`limits` の上限（`per_minute`・`per_day`・`concurrent`）を超えた。1行目がどの上限か、いつ再試行できるかを言い、`Retry-After` が同じ待ち時間を秒で返す（`concurrent` には無い。そのルールのリクエストが1つ終われば再試行できる）。それより前に再試行しても同じく止まる。`credshim-svc status` でカウンタを見る。
 
 ### `misdirected`
 
