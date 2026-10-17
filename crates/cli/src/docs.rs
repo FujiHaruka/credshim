@@ -79,6 +79,7 @@ pub const PAGES: &[Page] = &[
     ),
     page!("aws", "docs/aws.md", "docs/ja/aws.md"),
     page!("ssh", "docs/ssh.md", "docs/ja/ssh.md"),
+    page!("github", "docs/github.md", "docs/ja/github.md"),
     page!("container", "docs/container.md", "docs/ja/container.md"),
     page!(
         "troubleshooting",

@@ -161,9 +161,10 @@ CredShim を入れる前から手元にあった鍵やキーは、エージェ�
 
 - **API キー。** 発行元で新しいキーを作って `credshim-svc secret set` で登録し、.env やシェルの設定に残った古いキーを消して、発行元で無効にする。お試し構成で登録したキーも同じように作り直す。
 - **SSH。** `credshim-svc ssh keygen` で新しい鍵を作って公開鍵をサーバー（GitHub など）に登録し、`ssh -T` で通ることを確かめてから、古い公開鍵をサーバーから外し、`~/.ssh` の古い秘密鍵を消す。手順は [SSH エージェント](ssh.md)。
+- **GitHub CLI。** `gh auth logout` を実行し、GitHub で古いトークンを無効にして、`github` プリセットで `gh` に fine-grained トークンを渡す。手順は [GitHub CLI](github.md)。
 - **AWS の静的キー。** IAM で新しいアクセスキーを作って `credshim-svc secret set` で登録し、`~/.aws/credentials` をダミーに書き換える。動作を確かめたら、古いキーを無効にして（`aws iam update-access-key --status Inactive`）から消す。
 - **AWS SSO。** CredShim に移す前に `aws sso logout` でキャッシュのトークンを失効させ、`~/.aws/sso/cache` と `~/.aws/cli/cache` を消す。`~/.aws/config` の `sso_session`・`sso_start_url` のプロファイルは、ダミーの静的キーのプロファイルに置き換える。
-- **環境変数。** シェルの設定や .env に本物の `AWS_ACCESS_KEY_ID`・`AWS_SECRET_ACCESS_KEY`・`AWS_SESSION_TOKEN` が残っていれば消す。
+- **環境変数。** シェルの設定や .env に本物の `AWS_ACCESS_KEY_ID`・`AWS_SECRET_ACCESS_KEY`・`AWS_SESSION_TOKEN`・`GH_TOKEN`・`GITHUB_TOKEN` が残っていれば消す。
 
 ## 新しいリリースに更新する（管理者のセッション）
 

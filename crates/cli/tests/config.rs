@@ -106,7 +106,7 @@ async fn presets_produce_rules_the_proxy_accepts() {
     let home = tempfile::tempdir().unwrap();
     ca_init(home.path()).await;
     let mut rules = String::new();
-    for name in ["openai", "anthropic", "gemini"] {
+    for name in ["openai", "anthropic", "gemini", "github"] {
         let first = output(home.path(), &["preset", name]).await;
         let second = output(home.path(), &["preset", name]).await;
         assert!(first.status.success(), "{}", stderr(&first));

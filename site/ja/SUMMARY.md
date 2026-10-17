@@ -7,6 +7,7 @@
 - [設定](configuration.md)
 - [AWS](aws.md)
 - [SSH エージェント](ssh.md)
+- [GitHub CLI（gh）](github.md)
 - [コンテナ分離](container.md)
 - [うまく動かないとき](troubleshooting.md)
 - [コーディングエージェント](agents.md)

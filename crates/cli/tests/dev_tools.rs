@@ -72,6 +72,9 @@ impl Home {
                     .contains(&name.as_str())
                 || name.starts_with("NODE_")
                 || name.starts_with("AWS_")
+                || name.starts_with("GH_")
+                || name.starts_with("GITHUB_")
+                || name == "XDG_CONFIG_HOME"
                 || name == "SSH_AUTH_SOCK"
             {
                 command.env_remove(name);
@@ -587,6 +590,16 @@ async fn doctor_reports_an_unreachable_agent_an_old_openssh_and_leftover_credent
     let ssh_secret = credshim_testkit::fake_secret("ssh-key-body");
     let aws_secret = credshim_testkit::fake_secret("aws-secret");
     let token = credshim_testkit::fake_secret("sso-token");
+    let gh_token = format!("gho_{}", credshim_testkit::fake_secret("gh-token"));
+    let gh_config = home.path().join(".config/gh");
+    std::fs::create_dir_all(&gh_config).unwrap();
+    std::fs::write(
+        gh_config.join("hosts.yml"),
+        format!(
+            "github.com:\n    oauth_token: {gh_token}\n    user: me\nghe.example.com:\n    user: me\n"
+        ),
+    )
+    .unwrap();
     let dot_ssh = home.path().join(".ssh");
     std::fs::create_dir_all(&dot_ssh).unwrap();
     std::fs::write(
@@ -621,7 +634,9 @@ async fn doctor_reports_an_unreachable_agent_an_old_openssh_and_leftover_credent
     let doctor = home
         .fresh_shell(
             &bin,
-            "SSH_AUTH_SOCK=\"$HOME/missing.sock\" AWS_SESSION_TOKEN=x \"$CREDSHIM\" doctor",
+            &format!(
+                "SSH_AUTH_SOCK=\"$HOME/missing.sock\" AWS_SESSION_TOKEN=x GITHUB_TOKEN={gh_token} GH_TOKEN=credshim-github-dummy \"$CREDSHIM\" doctor"
+            ),
         )
         .await;
 
@@ -649,6 +664,21 @@ async fn doctor_reports_an_unreachable_agent_an_old_openssh_and_leftover_credent
         ),
         ("fail", "files", "~/.aws/sso/cache holds 1 cached"),
         ("fail", "files", "AWS_SESSION_TOKEN is set"),
+        (
+            "fail",
+            "files",
+            "~/.config/gh/hosts.yml [github.com] holds a real gh token",
+        ),
+        (
+            "fail",
+            "files",
+            "~/.config/gh/hosts.yml [ghe.example.com] is a gh login whose token is in the system keyring",
+        ),
+        (
+            "fail",
+            "files",
+            "GITHUB_TOKEN in this environment is a real GitHub token",
+        ),
     ] {
         assert!(
             line_with(&doctor, mark, what, needle),
@@ -657,9 +687,10 @@ async fn doctor_reports_an_unreachable_agent_an_old_openssh_and_leftover_credent
         );
     }
     let all = text(&doctor);
+    assert!(!all.contains("GH_TOKEN in"), "{all}");
     assert!(!all.contains("id_ed25519.pub"), "{all}");
     assert!(!all.contains("[dummy]"), "{all}");
-    for secret in [&ssh_secret, &aws_secret, &token] {
+    for secret in [&ssh_secret, &aws_secret, &token, &gh_token] {
         assert!(!all.contains(secret.as_str()), "{all}");
     }
 }

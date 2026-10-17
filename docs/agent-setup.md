@@ -35,7 +35,7 @@ Collect the following without changing anything:
 - Whether CredShim is installed: `/usr/local/libexec/credshim/credshim --version` on Linux, `/Library/CredShim/bin/credshim --version` on macOS.
 - The APIs the projects call: SDKs in the dependency files (for example `openai`, `anthropic` or `@anthropic-ai/sdk`, `@google/genai`, `boto3` or `@aws-sdk/*`), base URLs in the code, and the paths the code calls.
 - The names of credentials in use, without values. For example, `env | cut -d= -f1 | grep -E '_(KEY|TOKEN|SECRET|PASSWORD)$'`, and `grep -ohE '^[A-Za-z_]+_(KEY|TOKEN|SECRET|PASSWORD)=' .env*` in each project.
-- AWS profile names (`grep '^\[' ~/.aws/config`) and whether they use SSO. Git remotes that use SSH (`git remote -v`).
+- AWS profile names (`grep '^\[' ~/.aws/config`) and whether they use SSO. Git remotes that use SSH (`git remote -v`). Whether `gh` is logged in: `grep -E '^[^ #]' ~/.config/gh/hosts.yml` lists the hosts (the file can hold a real token, so do not read the rest, and do not run `gh auth token`).
 
 To draft and check the configuration before CredShim is installed, download the release binary as in the [trial setup](../README.md#trial-setup) into a directory of your own (for example `~/.cache/credshim-setup`), not onto `PATH`. Use it only for `docs`, `preset`, and `config check`. If CredShim is already installed, use the installed binary.
 
@@ -47,7 +47,7 @@ Summarize what you found in a table: each service, the preset or hand-written ru
 - For a service without a preset, its API host and the paths the projects need.
 - The developer user's name, if it is not the account you run as.
 
-The presets are `openai`, `anthropic`, `gemini`, `github-ssh`, `aws`, and `aws-sso` (`credshim preset --help`).
+The presets are `openai`, `anthropic`, `gemini`, `github` (the `gh` CLI), `github-ssh`, `aws`, and `aws-sso` (`credshim preset --help`).
 
 ### 3. Draft and check
 

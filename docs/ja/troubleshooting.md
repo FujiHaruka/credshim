@@ -17,7 +17,7 @@
 [ok  ] ssh      SSH_AUTH_SOCK=/var/lib/credshim-ssh/agent.sock is the credshim agent (rules: github)
 [ok  ] openssh  /usr/bin/ssh is OpenSSH 9.9, which sends session-bind
 [ok  ] aws      the aws CLI reached credshim.test through the proxy and trusted the CA
-[ok  ] files    no private keys in ~/.ssh and no real AWS credentials in ~/.aws or the environment
+[ok  ] files    no leftover keys, tokens or logins found
 ```
 
 `credshim.test` はプロキシ自身が答える予約ホスト名で、DNS には存在しない。そこへ届けばプロキシを通っている、TLS が通れば CA を信頼している、と分かる。各言語から同じことを確かめるワンライナー（requests、httpx、Node の fetch、Go）は `credshim doctor --snippets` で表示できる。
@@ -62,7 +62,7 @@ PATH の `aws` で `credshim.test` にダミーのキーのリクエストを送
 
 ### `files`
 
-`~/.ssh` の秘密鍵、`~/.aws/credentials`・`~/.aws/config` の本物のアクセスキーと `credential_process`・SSO のプロファイル、`~/.aws/sso/cache`・`~/.aws/cli/cache`、環境変数の本物のキーとセッショントークンを、パスとプロファイル名だけで報告する（値は出さない）。片付け方は [既存の認証情報を入れ替える](install.md#6-既存の認証情報を入れ替える)。
+`~/.ssh` の秘密鍵、`~/.aws/credentials`・`~/.aws/config` の本物のアクセスキーと `credential_process`・SSO のプロファイル、`~/.aws/sso/cache`・`~/.aws/cli/cache`、`~/.config/gh/hosts.yml` の `gh` のログイン（トークンがファイルにあるか、システムのキーリングにあるか）、環境変数の本物の AWS のキーとセッショントークンと GitHub のトークンを、パスとプロファイル名とホストだけで報告する（値は出さない）。片付け方は [既存の認証情報を入れ替える](install.md#6-既存の認証情報を入れ替える)。
 
 ## 止められたリクエスト
 

@@ -103,6 +103,30 @@ async fn a_config_error_points_to_the_section_it_is_in() {
 }
 
 #[tokio::test]
+async fn the_github_preset_sits_beside_github_ssh_and_lets_gh_change_pull_requests() {
+    let home = tempfile::tempdir().unwrap();
+    let api = output(home.path(), &["preset", "github"]).await;
+    let ssh = output(home.path(), &["preset", "github-ssh"]).await;
+    let draft = write_draft(
+        home.path(),
+        &format!("{}\n{}", text(&api.stdout), text(&ssh.stdout)),
+    );
+
+    let checked = output(home.path(), &["config", "check", &draft]).await;
+
+    assert!(checked.status.success(), "{}", text(&checked.stderr));
+    let stdout = text(&checked.stdout);
+    assert!(
+        stdout.contains(
+            "  rule \"github\": secret github -> https://api.github.com:443  (github preset host)\n      methods: GET, POST, PATCH, PUT, DELETE; paths: /graphql, /repos,"
+        ),
+        "{stdout}"
+    );
+    assert!(stdout.contains("(github-ssh preset host keys)"), "{stdout}");
+    assert!(text(&api.stdout).contains("env = \"GH_TOKEN\""));
+}
+
+#[tokio::test]
 async fn a_preset_prints_only_the_rule_on_stdout_and_the_next_steps_on_stderr() {
     let home = tempfile::tempdir().unwrap();
 
