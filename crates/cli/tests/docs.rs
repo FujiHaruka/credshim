@@ -18,7 +18,10 @@ async fn docs_lists_pages_and_says_how_to_go_deeper_without_any_config() {
 
     assert!(listed.status.success(), "{}", stderr(&listed));
     let text = stdout(&listed);
-    assert!(text.contains("  troubleshooting  Troubleshooting\n"), "{text}");
+    assert!(
+        text.contains("  troubleshooting  Troubleshooting\n"),
+        "{text}"
+    );
     assert!(text.contains("credshim docs <page>#<section>"), "{text}");
 }
 
