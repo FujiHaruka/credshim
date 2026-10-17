@@ -1,0 +1,10 @@
+.lang-switch {
+  margin-inline-end: 1rem;
+  font-size: 1.4rem;
+  color: var(--icons);
+  text-decoration: none;
+}
+
+.lang-switch:hover {
+  color: var(--icons-hover);
+}

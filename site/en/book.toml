@@ -1,0 +1,9 @@
+[book]
+title = "CredShim"
+language = "en"
+
+[output.html]
+site-url = "/credshim/en/"
+git-repository-url = "https://github.com/FujiHaruka/credshim"
+additional-css = ["lang-switch.css"]
+additional-js = ["lang-switch.js"]

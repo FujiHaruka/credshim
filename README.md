@@ -2,6 +2,8 @@
 
 A local credential-injection proxy for developing without giving real API keys to coding agents or apps.
 
+Documentation site: <https://fujiharuka.github.io/credshim/> ([日本語](docs/ja/README.md))
+
 Apps and agents hold only dummy keys. Right before a request leaves for a registered destination, CredShim replaces the dummy with the real key. The real key never appears in .env, in app memory, in logs, or in the agent's context.
 
 ```text
