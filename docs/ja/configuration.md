@@ -13,7 +13,7 @@
 name = "stripe"
 host = "api.stripe.com"
 secret = "stripe"                                  # 秘密ストアに登録する名前
-dummy = "sk_credshim_stripe_0123456789abcdef"       # アプリに渡すダミー（自分でランダムな文字列にする）
+dummy = "sk_credshim_stripe_0123456789abcdef"       # アプリに渡すダミー（自分でランダムな文字列にする。openssl rand -hex 16 など）
 env = "STRIPE_API_KEY"                             # keys.env にダミーを載せる変数名
 inject = { header = "authorization" }              # ダミーを探して差し替える場所
 allow_methods = ["GET", "POST"]
@@ -45,7 +45,7 @@ sudo $bin service reload
 
 ### ルールの効き方
 
-- ダミーを本物に差し替えるのは、実際の接続先が `host`・`port`（と `path_prefix`）に一致し、その宛先の TLS 証明書をシステムの信頼ストアで検証できたときだけ。平文の HTTP には差し替えない。
+- ダミーを本物に差し替えるのは、実際の接続先が `host`・`port`（と `path_prefix`）に一致し、その宛先の TLS 証明書を OS の信頼ストアで検証できたときだけ（OS に入れた社内の CA も使える）。平文の HTTP には差し替えない。
 - ダミーが別の宛先に向かえば、差し替えずに 403 を返す。上流には何も送らない。
 - 宛先は合っていても、`allow_methods`・`allow_paths` の外なら 403、`limits` を超えれば 429。どちらも上流には送らない。
 - 応答に本物の値が含まれていれば、クライアントに返す前にダミーに戻す（スクラブ）。`[scrub] enabled = false` で止められるが、止めない方がよい。

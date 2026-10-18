@@ -1,6 +1,6 @@
 # Troubleshooting
 
-First run `credshim doctor` in the developer session. A request that CredShim refused says why in its response, along with the command that shows its audit log entry (see [Refused requests](#refused-requests)). To watch every request, use `credshim-svc tail` in the admin session (in the trial setup, `credshim tail`). For `credshim-svc`, see [the install variables](install.md#set-the-variables).
+First run `credshim doctor` in the developer session. A request that CredShim refused says why in its response, along with the command that shows its audit log entry (see [Refused requests](#refused-requests)). To watch every request, use `credshim-svc tail` in the admin session (in the trial setup, `credshim tail`). For `credshim-svc`, see [the install variables](install.md#set-the-variables). To go from a symptom (a 403, a 401, a certificate error) to its cause, see [When a request fails](agents.md#when-a-request-fails).
 
 ## credshim doctor
 
@@ -117,13 +117,15 @@ If the host has a rule but the app gets a TLS certificate error and no `credshim
 
 ## Go tools on macOS
 
+On Linux, Go reads `SSL_CERT_FILE`, so Go tools such as `gh` and Terraform work unchanged. This section is for macOS.
+
 The development CA is needed only for traffic to hosts that have a rule (all of `amazonaws.com` if there is an AWS rule). Traffic to other hosts is relayed without being inspected and gets the real certificate, so Go tools work there unchanged. For example, Terraform registry and provider downloads go through, but when there is an AWS rule, the AWS provider's API calls fail because they cannot trust the development CA.
 
 On macOS, Go leaves certificate verification to the keychain and does not read `SSL_CERT_FILE`. It reads it only when a program built with Go 1.27 or later has a `go` line of 1.27 or higher in its go.mod, or when the program runs with `GODEBUG=x509sslcertoverrideplatform=1`.
 
 Try these in order.
 
-1. If the tool was built with Go 1.27 or later, run it with `GODEBUG=x509sslcertoverrideplatform=1` (if `GODEBUG` already has other settings, join them with commas). For your own project, set the `go` line in go.mod to 1.27 or higher and you do not need it.
+1. Run the tool with `GODEBUG=x509sslcertoverrideplatform=1` (if `GODEBUG` already has other settings, join them with commas). This works if the tool was built with Go 1.27 or later; if the certificate error remains, go on to the next step. For your own project, set the `go` line in go.mod to 1.27 or higher and you do not need it.
 2. If the tool lets you change the API endpoint, use [base URL mode](configuration.md#base-url-mode) (it does not need the development CA).
 3. Only if neither works (for example, a distributed binary built with an old Go), trust the development CA in the developer user's login keychain. This does not need admin rights; it asks for your password.
 

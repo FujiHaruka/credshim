@@ -12,34 +12,29 @@ App / agent ──(dummy key)──▶ CredShim ──(real key)──▶ api.op
                               └─ stops a dummy headed to an unregistered destination with 403
 ```
 
-- An HTTPS proxy that sits in between through `HTTPS_PROXY`. It relays HTTP/1.1, HTTP/2, SSE, and WebSocket, and SDKs work without modification.
-- For clients that cannot handle proxy environment variables or a custom CA, there is also a mode that replaces the API endpoint (base URL).
-- Besides API keys, it handles SSH keys (it runs as an ssh-agent), AWS access keys and IAM Identity Center (SSO), and OAuth tokens the same way.
+- It is an HTTPS proxy that apps reach through `HTTPS_PROXY`, with its own development CA that apps trust through environment variables. SDKs work without modification.
+- [Presets](#presets) cover OpenAI, Anthropic, Gemini, GitHub, and AWS (including IAM Identity Center). It also runs as an ssh-agent and handles OAuth tokens. For other APIs, you write the rules.
+
+## Choosing a setup
+
+| Setup | Suited for | What it takes | Can the agent extract the real values? |
+| --- | --- | --- | --- |
+| [Trial setup](#trial-setup) | Seeing it work in 5 minutes | One binary, run as your everyday OS user | Yes |
+| [Recommended setup](#recommended-setup) | Everyday use with real keys | The proxy runs as a dedicated service user. Your everyday OS user (the developer user, which runs agents and apps) must not be an admin, and you register keys from a separate admin account | No |
+| [Container isolation](docs/container.md) | The recommended setup, plus all agent traffic goes through the proxy's checks and audit | The recommended setup, with agents in a container | No |
+
+Prebuilt binaries exist for macOS (Apple silicon) and Linux (x86_64 and aarch64, glibc 2.35 or later). Elsewhere (such as Intel Macs), build from source with Rust.
 
 ## What it protects and what it does not
 
-In the setup that runs the proxy as a dedicated service user (the recommended setup), an agent cannot extract the value of a real key, even if it goes rogue or is hijacked by prompt injection.
+In the recommended setup, an agent cannot extract the value of a real key, even if it goes rogue or is hijacked by prompt injection.
 
 It does not protect against the following.
 
 - **Using the key.** The agent can send requests that use the real key through the proxy. It can send them only within the destinations, paths, operations, and counts that the rules allow. Anything else gets 403 or 429.
-- **A developer user who is an admin.** With the permissions of the developer user (the normal OS user the agent runs as), the agent can plant something in the shell config, steal the sudo password, become root, and read the secrets. Do not make the developer user an admin.
-- **The trial setup.** The proxy runs as the developer user, so the agent can reach the secret store and the config.
+- **A developer user who is an admin.** The agent runs with the developer user's permissions. If that user can become root, the agent can plant something in the shell config, steal the sudo password, and read the secrets.
 
 See the [threat model](docs/threat-model.md) for details.
-
-## Supported platforms
-
-- Prebuilt binaries: macOS (Apple silicon), Linux (x86_64 and aarch64, glibc 2.35 or later)
-- Anything else (such as Intel Macs): build from source (requires Rust)
-
-## Choosing a setup
-
-| Setup | Suited for | Can the agent extract the real values? |
-| --- | --- | --- |
-| [Trial setup](#trial-setup) | Seeing it work in 5 minutes | Yes |
-| [Recommended setup](docs/install.md) | Everyday use with real keys entrusted to it. The proxy runs as a dedicated service user | No |
-| [Container isolation](docs/container.md) | The recommended setup, plus all agent traffic goes through the proxy's checks and audit | No |
 
 ## Trial setup
 
@@ -79,7 +74,7 @@ curl https://api.openai.com/v1/chat/completions \
 
 `$OPENAI_API_KEY` is a dummy, but the response is the same as when you send the real key. The `credshim run` terminal records the replaced request.
 
-The config is in `~/.config/credshim/config.toml` (it follows `$XDG_CONFIG_HOME`). Secrets are in the keychain (service name `credshim`) on macOS and in `~/.config/credshim/secrets.age` elsewhere. To stop using it, stop `credshim run` and delete `~/.config/credshim`. On macOS, also delete the keychain item (`security delete-generic-password -s credshim -a openai`).
+To stop using it, stop `credshim run` and delete `~/.config/credshim`. On macOS, also delete the keychain item (`security delete-generic-password -s credshim -a openai`).
 
 ## Recommended setup
 
@@ -90,40 +85,38 @@ For everyday use with real keys, run the proxy as a service under a dedicated se
 3. In an admin session, register the rules and the real keys
 4. In the developer session, load the environment variables and use it
 
-The steps are in [docs/install.md](docs/install.md).
+The steps are in [docs/install.md](docs/install.md). A coding agent can do most of them for you: give it the one line in [Setting up with a coding agent](docs/agent-setup.md). You run the admin commands it hands you and type the real keys.
 
 ## Presets
 
 `credshim preset <name>` generates rules for common services. The dummy keys are generated at random each time.
 
-| Name | Destination | Environment variable for the dummy | Description |
-| --- | --- | --- | --- |
-| `openai` | `api.openai.com` | `OPENAI_API_KEY` | |
-| `anthropic` | `api.anthropic.com` | `ANTHROPIC_API_KEY` | |
-| `gemini` | `generativelanguage.googleapis.com` | `GEMINI_API_KEY` | |
-| `github` | `api.github.com` | `GH_TOKEN` | [GitHub CLI](docs/github.md) |
-| `github-ssh` | `github.com` (SSH) | | [SSH agent](docs/ssh.md) |
-| `aws` | AWS services | `AWS_ACCESS_KEY_ID` and others | [AWS](docs/aws.md) |
-| `aws-sso` | AWS services | `AWS_ACCESS_KEY_ID` and others | [AWS (SSO)](docs/aws.md#aws-iam-identity-center-sso) |
+| Name | Destination | Environment variable for the dummy |
+| --- | --- | --- |
+| `openai` | `api.openai.com` | `OPENAI_API_KEY` |
+| `anthropic` | `api.anthropic.com` | `ANTHROPIC_API_KEY` |
+| `gemini` | `generativelanguage.googleapis.com` | `GEMINI_API_KEY` |
+| [`github`](docs/github.md) | `api.github.com` (the `gh` CLI) | `GH_TOKEN` |
+| [`github-ssh`](docs/ssh.md) | `github.com` (SSH) | |
+| [`aws`](docs/aws.md) | AWS services | `AWS_ACCESS_KEY_ID` and others |
+| [`aws-sso`](docs/aws.md#aws-iam-identity-center-sso) | AWS services | `AWS_ACCESS_KEY_ID` and others |
 
 For other APIs, write and register the rules yourself ([Configuration](docs/configuration.md#writing-rules)).
 
 ## Using it with coding agents
 
-In the shell that starts the agent, load the proxy environment variables and the dummy keys, then start the agent. Commands and apps that the agent runs inherit those environment variables.
+Start the agent from a shell that has loaded the proxy environment variables and the dummy keys. Commands and apps that the agent runs inherit them. In the trial setup, use the commands from [Trial setup](#trial-setup) instead.
 
 ```sh
-. /etc/credshim/env                              # recommended setup. For the trial setup: eval "$(credshim env)"
-set -a; . /etc/credshim/keys.env; set +a         # dummy keys. For the trial setup: set -a; eval "$(credshim env --keys)"; set +a
+. /etc/credshim/env                              # proxy and CA
+set -a; . /etc/credshim/keys.env; set +a         # dummy keys
 ```
 
-Traffic to destinations that have rules is relayed through the development CA, so an agent that itself talks to those destinations must also trust the CA through these environment variables. Traffic that contains no dummy is relayed as is, without using a real key.
+Load the dummy keys only in the shell that starts the agent, not in your shell config. A variable already in the shell wins over a project's .env, so a different key written there silently stops being used. For per-project ways, see [Giving the dummy keys to a project](docs/install.md#giving-the-dummy-keys-to-a-project).
 
-If you put the dummy keys into every shell, other keys written in a project's .env can stop being used. For how to pass them per project, see [docs/install.md](docs/install.md#giving-the-dummy-keys-to-a-project).
+If the agent itself calls a destination that has a rule (for example, `api.anthropic.com` with the dummy `ANTHROPIC_API_KEY`), these variables also make it trust the development CA. Traffic that contains no dummy is relayed as is.
 
-A coding agent can also do the setup for you: give it the one line in [Setting up with a coding agent](docs/agent-setup.md). You run the admin commands it hands you and type the real keys.
-
-When a request fails, CredShim's response says why and which command shows more. [Coding agents](docs/agents.md) explains how an agent tells what happened, and has a note to put in `AGENTS.md` or `CLAUDE.md`. `credshim docs` prints these docs for the installed version.
+When a request fails, CredShim's response says why and which command shows more. [Coding agents](docs/agents.md) explains how an agent reads it, and has a note to put in `AGENTS.md` or `CLAUDE.md`. `credshim docs` prints these docs for the installed version.
 
 ## Documentation
 

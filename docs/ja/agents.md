@@ -12,8 +12,12 @@ CredShim の失敗は、どれも詳しく見る方法を示す。CredShim が�
 
 上から順に見て、最初に当てはまったものに従う。
 
-1. **応答に `credshim-error` ヘッダーがあるか、ボディが `credshim:` で始まる。** CredShim がリクエストを止め、上流へは何も送っていない。1行目が理由。`docs:` はこの種類の拒否を説明するコマンド（`credshim docs troubleshooting#<種類>`）、`details:` はそのリクエストの監査ログの記録をすべて表示するコマンド。推奨構成では `details:` は管理者の権限が要る（`sudo -u` で始まる）ので、実行せずにその行を人に渡す。`limited` は再試行を繰り返さない。`deny` と `not_allowed` は、別のホストや別のキーで回避しない。許可するべきリクエストなら、ルールを変えるよう人に頼む。AWS の SDK と aws CLI では、同じ内容が `CredShim...` のエラーコードのメッセージとして出る。
-2. **API 自身がエラーを返し（401、403 など）、応答に `credshim-request-id` はあるが `credshim-error` が無い。** リクエストは CredShim を通り、上流が断った。人にその id を `tail --id` のコマンドで引いてもらう。`inject` なら本物のキーが送られているので、キーの権限かリクエスト自体の問題。`pass` なら、ルールが期待する場所にダミーが無かった（別のヘッダーに入れたなど）。
+1. **応答に `credshim-error` ヘッダーがあるか、ボディが `credshim:` で始まる。** CredShim がリクエストを止め、上流へは何も送っていない。AWS の SDK と aws CLI では、同じ内容が `CredShim...` のエラーコードのメッセージとして出る。
+   - 1行目が理由。
+   - `docs:` は、この種類の拒否を説明するコマンド（`credshim docs troubleshooting#<種類>`）。
+   - `details:` は、そのリクエストの監査ログの記録をすべて表示するコマンド。推奨構成では管理者の権限が要る（`sudo -u` で始まる）ので、実行せずにその行を人に渡す。
+   - `limited` は再試行を繰り返さない。`deny` と `not_allowed` は、別のホストや別のキーで回避しない。許可するべきリクエストなら、ルールを変えるよう人に頼む。
+2. **API 自身がエラーを返し（401、403、429 など）、応答に `credshim-request-id` はあるが `credshim-error` が無い。** リクエストは CredShim を通り、上流が断った。人にその id を `tail --id` のコマンドで引いてもらう。`inject` なら本物のキーが送られているので、キーの権限かリクエスト自体の問題。`pass` なら、ルールが期待する場所にダミーが無かった（別のヘッダーに入れたなど）。
 3. **キーが無効だという 401 で、`credshim-request-id` が無い。** CredShim はこのリクエストを見ていない。ツールがプロキシを通っていない（`HTTPS_PROXY` を見ていないか、このシェルで環境変数を読み込んでいない。`credshim doctor` を実行する）か、そのホストにルールが無くダミーがそのまま送られた（ルールの `host`・`port` を確かめるよう人に頼む）かのどちらか。
 4. **ルールのあるホストで TLS の証明書エラーになる。** ツールが開発用の CA を信頼していない。`credshim doctor` を実行する。macOS の Go 製ツールは `credshim docs troubleshooting#go-tools-on-macos` を参照。
 5. **SSH が `agent refused operation` と言う。** CredShim のエージェントが、そのホストかユーザーへの署名を断った。`credshim docs ssh` を参照。
@@ -24,7 +28,7 @@ CredShim の失敗は、どれも詳しく見る方法を示す。CredShim が�
 
 1. 足すセクションを自分のファイルに書く。よく使う API は `credshim preset <名前>` が出来合いのルールを表示する。それ以外は `credshim docs configuration#writing-rules` を参照。
 2. `credshim config check <ファイル>` を実行し、挙がった問題をすべて直す。どの問題にも読む節が付く。
-3. 下書きのパスと、`config check` が表示した手順を人に渡す。人は下書きをエージェントが変えられないファイルに写し、その写しに `config check` を実行し、各キーの行き先の表を自分の端末で読んでから写しを足す（コマンドは `credshim docs agent-setup#4-hand-over`）。手順のうち `secret set` や `aws sso login` などは端末の前の人が打つもので、値をパイプで渡したり端末を偽装したりしない。
+3. 下書きのパスと、`config check` が表示した手順を、`credshim docs agent-setup#4-hand-over` の形で人に渡す。手順のうち `secret set` や `aws sso login` などは端末の前の人が打つもので、値をパイプで渡したり端末を偽装したりしない。
 
 ## エージェントへの指示に入れる文
 

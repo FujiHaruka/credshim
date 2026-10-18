@@ -12,34 +12,29 @@
                                             └─ ダミーが登録外の宛先へ向かえば 403 で止める
 ```
 
-- `HTTPS_PROXY` で間に入る HTTPS プロキシ。HTTP/1.1、HTTP/2、SSE、WebSocket を中継し、SDK は改造なしで動く。
-- プロキシの環境変数や独自の CA を扱えないクライアント向けに、API の接続先（base URL）を差し替えて使うモードもある。
-- API キーのほかに、SSH の鍵（ssh-agent として動く）、AWS のアクセスキーと IAM Identity Center（SSO）、OAuth のトークンも同じ考え方で扱う。
+- アプリからは `HTTPS_PROXY` で使う HTTPS プロキシで、アプリは独自の開発用 CA を環境変数で信頼する。SDK は改造なしで動く。
+- [プリセット](#プリセット) は OpenAI、Anthropic、Gemini、GitHub、AWS（IAM Identity Center を含む）に対応する。ssh-agent としても動き、OAuth のトークンも扱う。それ以外の API はルールを自分で書く。
+
+## 構成を選ぶ
+
+| 構成 | 向いている用途 | 必要なこと | エージェントが本物の値を取り出せるか |
+| --- | --- | --- | --- |
+| [お試し構成](#お試し構成) | 5分で動きを見る | バイナリ1つを普段の OS ユーザーで動かす | 取り出せる |
+| [推奨構成](#推奨構成) | 本物のキーで日常的に使う | プロキシを専用の OS ユーザーで動かす。普段の OS ユーザー（エージェントやアプリが動く開発ユーザー）を管理者にせず、キーは別の管理者アカウントから登録する | 取り出せない |
+| [コンテナ分離](container.md) | 推奨構成に加え、エージェントの通信をすべてプロキシの判定と監査に通す | 推奨構成で、エージェントをコンテナで動かす | 取り出せない |
+
+ビルド済みのバイナリは macOS（Apple シリコン）と Linux（x86_64・aarch64、glibc 2.35 以降）向けにある。それ以外（Intel の Mac など）では Rust でソースからビルドする。
 
 ## 守れるもの、守れないもの
 
-プロキシを専用の OS ユーザーで動かす構成（推奨構成）なら、エージェントが暴走しても、プロンプトインジェクションで乗っ取られても、本物のキーの値は取り出せない。
+推奨構成なら、エージェントが暴走しても、プロンプトインジェクションで乗っ取られても、本物のキーの値は取り出せない。
 
 ただし次のものは守れない。
 
 - **キーを使うこと。** エージェントはプロキシ経由で、本物のキーを使ったリクエストを送れる。送れるのはルールで許した宛先、パス、操作、回数の範囲だけで、それ以外は 403 か 429 になる。
-- **開発ユーザーが管理者のとき。** エージェントは開発ユーザー（エージェントが動く普段の OS ユーザー）の権限で、シェルの設定に仕込みをして sudo のパスワードを盗み、root になって秘密を読める。開発ユーザーは管理者にしない。
-- **お試し構成。** プロキシを開発ユーザーのまま動かすので、エージェントは秘密ストアと設定に手が届く。
+- **開発ユーザーが管理者のとき。** エージェントは開発ユーザーの権限で動く。そのユーザーが root になれるなら、エージェントはシェルの設定に仕込みをして sudo のパスワードを盗み、秘密を読める。
 
 詳しくは [脅威モデル](threat-model.md)。
-
-## 対応環境
-
-- ビルド済みバイナリ：macOS（Apple シリコン）、Linux（x86_64・aarch64、glibc 2.35 以降）
-- それ以外（Intel の Mac など）：ソースからビルドする（Rust が要る）
-
-## 構成を選ぶ
-
-| 構成 | 向いている用途 | エージェントが本物の値を取り出せるか |
-| --- | --- | --- |
-| [お試し構成](#お試し構成) | 5分で動きを見る | 取り出せる |
-| [推奨構成](install.md) | 本物のキーを預けて普段使う。プロキシを専用の OS ユーザーで動かす | 取り出せない |
-| [コンテナ分離](container.md) | 推奨構成に加え、エージェントの通信をすべてプロキシの判定と監査に通す | 取り出せない |
 
 ## お試し構成
 
@@ -79,51 +74,49 @@ curl https://api.openai.com/v1/chat/completions \
 
 `$OPENAI_API_KEY` はダミーだが、応答は本物のキーで送ったときと同じになる。`credshim run` の端末には、差し替えたリクエストが記録される。
 
-設定は `~/.config/credshim/config.toml`（`$XDG_CONFIG_HOME` に従う）、秘密は macOS ではキーチェーン（サービス名 `credshim`）、それ以外では `~/.config/credshim/secrets.age` に入る。やめるときは `credshim run` を止め、`~/.config/credshim` を消す。macOS ではキーチェーンの項目も消す（`security delete-generic-password -s credshim -a openai`）。
+やめるときは `credshim run` を止め、`~/.config/credshim` を消す。macOS ではキーチェーンの項目も消す（`security delete-generic-password -s credshim -a openai`）。
 
 ## 推奨構成
 
-本物のキーを預けて普段使うなら、プロキシを専用の OS ユーザーのサービスとして動かす。おおまかな流れは次のとおり。
+本物のキーで日常的に使うなら、プロキシを専用の OS ユーザーのサービスとして動かす。おおまかな流れは次のとおり。
 
 1. 開発ユーザーを管理者でなくする
 2. 管理者のセッションでインストールの1行を実行し、専用ユーザーとサービスを作る
 3. 管理者のセッションでルールと本物のキーを登録する
 4. 開発ユーザーのセッションで環境変数を読み込んで使う
 
-手順は [docs/install.md](install.md)。
+手順は [docs/install.md](install.md)。手順のほとんどはコーディングエージェントに任せられる。[コーディングエージェントに導入を任せる](agent-setup.md) の1行をエージェントに渡せば、人がするのは、渡された管理者のコマンドの実行と本物のキーの入力になる。
 
 ## プリセット
 
 よく使うサービスのルールは `credshim preset <名前>` で生成できる。ダミーのキーは生成のたびにランダムに作られる。
 
-| 名前 | 宛先 | ダミーを入れる環境変数 | 説明 |
-| --- | --- | --- | --- |
-| `openai` | `api.openai.com` | `OPENAI_API_KEY` | |
-| `anthropic` | `api.anthropic.com` | `ANTHROPIC_API_KEY` | |
-| `gemini` | `generativelanguage.googleapis.com` | `GEMINI_API_KEY` | |
-| `github` | `api.github.com` | `GH_TOKEN` | [GitHub CLI](github.md) |
-| `github-ssh` | `github.com`（SSH） | | [SSH エージェント](ssh.md) |
-| `aws` | AWS の各サービス | `AWS_ACCESS_KEY_ID` など | [AWS](aws.md) |
-| `aws-sso` | AWS の各サービス | `AWS_ACCESS_KEY_ID` など | [AWS（SSO）](aws.md#aws-iam-identity-centersso) |
+| 名前 | 宛先 | ダミーを入れる環境変数 |
+| --- | --- | --- |
+| `openai` | `api.openai.com` | `OPENAI_API_KEY` |
+| `anthropic` | `api.anthropic.com` | `ANTHROPIC_API_KEY` |
+| `gemini` | `generativelanguage.googleapis.com` | `GEMINI_API_KEY` |
+| [`github`](github.md) | `api.github.com`（`gh` CLI） | `GH_TOKEN` |
+| [`github-ssh`](ssh.md) | `github.com`（SSH） | |
+| [`aws`](aws.md) | AWS の各サービス | `AWS_ACCESS_KEY_ID` など |
+| [`aws-sso`](aws.md#aws-iam-identity-centersso) | AWS の各サービス | `AWS_ACCESS_KEY_ID` など |
 
 それ以外の API は、ルールを自分で書いて登録する（[設定](configuration.md#ルールを書く)）。
 
 ## コーディングエージェントで使う
 
-エージェントを起動するシェルで、プロキシの環境変数とダミーのキーを読み込んでから起動する。エージェントが実行するコマンドやアプリは、その環境変数を引き継ぐ。
+プロキシの環境変数とダミーのキーを読み込んだシェルからエージェントを起動する。エージェントが実行するコマンドやアプリは、その環境変数を引き継ぐ。お試し構成では、代わりに [お試し構成](#お試し構成) のコマンドを使う。
 
 ```sh
-. /etc/credshim/env                              # 推奨構成。お試し構成なら eval "$(credshim env)"
-set -a; . /etc/credshim/keys.env; set +a         # ダミーのキー。お試し構成なら set -a; eval "$(credshim env --keys)"; set +a
+. /etc/credshim/env                              # プロキシと CA
+set -a; . /etc/credshim/keys.env; set +a         # ダミーのキー
 ```
 
-ルールのある宛先への通信は開発用の CA で中継するので、そこへ通信するエージェント自身も、この環境変数で CA を信頼している必要がある。ダミーを含まない通信は、本物のキーを使わずそのまま中継される。
+ダミーのキーは、エージェントを起動するシェルでだけ読み込み、シェルの設定には書かない。シェルにある変数はプロジェクトの .env より優先されるので、.env に書いた別のキーが黙って使われなくなる。プロジェクトごとの渡し方は [ダミーのキーをプロジェクトに渡す](install.md#ダミーのキーをプロジェクトに渡す)。
 
-ダミーのキーをすべてのシェルに入れると、プロジェクトの .env に書いた別のキーが使われなくなることがある。プロジェクトごとの渡し方は [docs/install.md](install.md#ダミーのキーをプロジェクトに渡す)。
+エージェント自身がルールのある宛先と通信するなら（たとえば `api.anthropic.com` にダミーの `ANTHROPIC_API_KEY` で）、この環境変数でエージェントも開発用の CA を信頼する。ダミーを含まない通信は、そのまま中継される。
 
-導入そのものもコーディングエージェントに任せられる。[コーディングエージェントに導入を任せる](agent-setup.md) の1行をエージェントに渡せば、人がするのは、渡された管理者のコマンドの実行と本物のキーの入力になる。
-
-リクエストが失敗すると、CredShim の応答が理由と、詳しく見るコマンドを示す。エージェントが何が起きたかを見分ける方法と、`AGENTS.md` や `CLAUDE.md` に入れる文は [コーディングエージェント](agents.md) にある。`credshim docs` は、入っているバージョンのこのドキュメントを表示する。
+リクエストが失敗すると、CredShim の応答が理由と、詳しく見るコマンドを示す。エージェントがそれをどう読むかと、`AGENTS.md` や `CLAUDE.md` に入れる文は [コーディングエージェント](agents.md) にある。`credshim docs` は、入っているバージョンのこのドキュメントを表示する。
 
 ## ドキュメント
 

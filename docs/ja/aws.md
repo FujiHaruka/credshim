@@ -6,6 +6,12 @@
 
 このページのコマンドは推奨構成で書いてあり、`$user`・`$bin`・`credshim-svc` は [導入手順の変数](install.md#変数を決める) を使う。お試し構成では [読み替え](install.md#お試し構成で読み替える) のとおりに読む。
 
+## 使えないもの
+
+- 認証情報を発行する操作（`sts:AssumeRole`・`GetSessionToken`、`iam:CreateAccessKey`、`s3:CreateSession` など37操作）は、ルールによらず拒否する。本物の認証情報が応答で返ってしまうため。
+- SSO OIDC、SSO ポータル、`aws login` の signin のホストへの接続は、AWS の設定が無くても常に拒否する。そのため `aws sso login`（代わりに `credshim aws sso login` を使う）は動かない。
+- AssumeRole するプロファイル、`aws s3 presign` などクライアント側で署名するもの、S3 Express One Zone は動かない。複数のアカウントやロールを使うなら、それぞれに `[[aws_key]]` か `[[aws_sso_role]]` を1つずつ足す。
+
 ## 静的アクセスキー
 
 ```sh
@@ -23,14 +29,9 @@ aws sts get-caller-identity
 
 AWS のルールが2つ以上あるときは、環境変数ではなく、`/etc/credshim/keys.env` のコメントにあるプロファイルを `~/.aws/credentials` に書いて `AWS_PROFILE` で選ぶ。
 
-`AWS_CA_BUNDLE` は信頼ストアを置き換えるので、開発用の CA 単体ではなく、結合バンドル（開発用の CA とシステムのルート証明書をまとめたファイル）を指す。`/etc/credshim/env` はそうなっている。
-
 ### 使えるサービスと操作を絞る
 
 ```toml
-[aws]
-max_body_bytes = 16777216   # S3 以外で署名のために読むボディの上限（既定 16MiB）
-
 [[aws_key]]
 name = "aws"
 dummy_access_key_id = "CREDSHIMAWS..."
@@ -48,25 +49,18 @@ limits = { per_minute = 120, per_day = 5000, concurrent = 8 }
 - 同じ形のリクエストに当てはまる操作が複数あるとき（たとえば `GetBucketLifecycle` と `GetBucketLifecycleConfiguration`）は、その両方を許可する必要がある。
 - `limits` を超えると `CredShimLimitExceeded` の 429。
 - `services`・`regions`・`operations`・`limits` は SSO のロールにも書ける。
-
-操作は、リクエストの形から botocore のモデルをもとに特定する（Query と EC2 は `Action`、JSON は `X-Amz-Target`、rpc-v2-cbor はパス、REST はメソッド、パス、必須のクエリとヘッダー）。
-
-### 使えないもの
-
-- 認証情報を発行する操作（`sts:AssumeRole`・`GetSessionToken`、`iam:CreateAccessKey`、`s3:CreateSession` など37操作）は、ルールによらず拒否する。本物の認証情報が応答で返ってしまうため。
-- SSO OIDC、SSO ポータル、`aws login` の signin のホストへの接続は、AWS の設定が無くても常に拒否する。そのため `aws sso login`（代わりに `credshim aws sso login` を使う）は動かない。
-- AssumeRole するプロファイル、`aws s3 presign` などクライアント側で署名するもの、S3 Express One Zone は動かない。
+- `[aws] max_body_bytes` は、S3 以外で署名のために読むボディの上限（既定 16MiB）。
 
 ## AWS IAM Identity Center（SSO）
 
-SSO のロールも、`~/.aws` にはダミーの静的アクセスキーだけを置いて使う。ログインは `aws sso login` ではなく `credshim aws sso login` で人間が行う。SSO のトークンは秘密ストアに、ロールの認証情報はプロキシのメモリにだけ置く。プロキシは期限の10分前にロールの認証情報と SSO のトークンを取り直す（リフレッシュトークンがあれば）。
+SSO でも、クライアントが持つのはダミーの静的アクセスキーだけ。ログインは `aws sso login` ではなく `credshim aws sso login` で人間が行う。SSO のトークンは秘密ストアに、ロールの認証情報はプロキシのメモリにだけ置く。プロキシは期限の10分前にロールの認証情報と SSO のトークンを取り直す（リフレッシュトークンがあれば）。
 
 ```sh
 # 管理者のセッション
 $bin preset aws-sso | sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/null
 sudo -u $user vi /var/lib/credshim/config.toml   # start_url、region、アカウント、ロールを書き換える
 sudo $bin service reload
-credshim-svc aws sso login sso   # 表示された URL をブラウザで開き、コードを確かめて承認する
+credshim-svc aws sso login sso   # 「sso」はセッション名。表示された URL をブラウザで開き、コードを確かめて承認する
 
 # 開発ユーザーのセッション
 . /etc/credshim/env

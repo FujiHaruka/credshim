@@ -18,7 +18,7 @@ This setup runs commands in two places (`$bin` and `credshim-svc` in the table b
 - **Admin session.** An admin terminal reached by a path the developer user cannot touch: an admin GUI session entered by switching users, an SSH login as the admin user, or a separate console.
 - **Developer session.** The terminal where everyday work and agents run.
 
-Processes of the developer user can read what is typed into that terminal (they can plant a function that hijacks `sudo`, or a keystroke logger, in the shell config). Do not type the admin password or the real keys you register into the developer user's terminal.
+Processes of the developer user can read what is typed into that terminal (they can plant a function that hijacks `sudo`, or a keystroke logger, in the shell config). Do not type the admin password or the real keys you register into the developer user's terminal. Create new keys from a browser in the admin session too, so that they never pass through the developer user's clipboard.
 
 | Admin session | Developer session |
 | --- | --- |
@@ -75,7 +75,7 @@ credshim run as the service user reads `/var/lib/credshim/config.toml` without `
 
 ## 3. Register rules and real keys (admin session)
 
-This example uses OpenAI. For other services, see [Presets](../README.md#presets) or [write the rules yourself](configuration.md#writing-rules).
+This example uses OpenAI. For other services, see [Presets](../README.md#presets) or [write the rules yourself](configuration.md#writing-rules). For several services, repeat `preset` and `secret set` for each, then reload once.
 
 ```sh
 # Add the rule (the dummy key is generated at random each time)
@@ -107,22 +107,14 @@ curl -N https://api.openai.com/v1/chat/completions \
 
 SDKs work as is.
 
-```sh
-uv run --with openai python -c '
-import openai
-for chunk in openai.OpenAI().chat.completions.create(
-    model="gpt-4o-mini", stream=True, messages=[{"role": "user", "content": "hi"}]):
-    print(chunk.choices[0].delta.content or "", end="", flush=True)
-'
-```
-
 You can put `. /etc/credshim/env` in your shell config (`~/.zshrc` or similar). Traffic that carries no dummy passes through the proxy unchanged, so loading it in any shell does no harm.
 
 `/etc/credshim/env` (the same as the output of `credshim env`) sets these environment variables.
 
 | Variable | Points to |
 | --- | --- |
-| `HTTPS_PROXY`, `HTTP_PROXY` (and lowercase), `NO_PROXY` | The proxy |
+| `HTTPS_PROXY`, `HTTP_PROXY` (and lowercase) | The proxy |
+| `NO_PROXY` (and lowercase) | Loopback (`localhost`, `127.0.0.1`, `::1`), which skips the proxy |
 | `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `AWS_CA_BUNDLE` | The combined bundle (one file with the development CA and the system root certificates) |
 | `NODE_EXTRA_CA_CERTS` | The development CA |
 | `NODE_USE_ENV_PROXY=1` | Makes Node's built-in fetch use `HTTPS_PROXY` |
@@ -130,7 +122,7 @@ You can put `. /etc/credshim/env` in your shell config (`~/.zshrc` or similar). 
 
 ### Giving the dummy keys to a project
 
-The dummy keys are kept separately in `/etc/credshim/keys.env` (the same as the output of `credshim env --keys`). Only the developer user given at install (`--user`) can read it. An install or upgrade without `--user` keeps the file's current owner. If no developer user was ever given, only root can read it, and `service reload` says how to give it to the developer user. It contains:
+The dummy keys are kept separately in `/etc/credshim/keys.env` (the same as the output of `credshim env --keys`). Only the developer user given at install (`--user`) can read it. It contains:
 
 - For each rule with `env`, its dummy key (`OPENAI_API_KEY` and so on)
 - If there is exactly one AWS rule, its dummy `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (with two or more, the profiles to write in `~/.aws/credentials`, as comments)
@@ -141,6 +133,8 @@ Putting the dummy keys in every shell is not recommended. python-dotenv, Node's 
 - Copy only the lines you need into the project's .env (they are in `KEY='value'` form, so you can paste them as is; they are dummies, so committing them is fine)
 - With direnv, `dotenv /etc/credshim/keys.env` in `.envrc`
 - To use all of them in that shell, `set -a; . /etc/credshim/keys.env; set +a`
+
+An install or upgrade without `--user` keeps the file's current owner. If no developer user was ever given, only root can read it, and `service reload` says how to give it to the developer user.
 
 ## 5. Verify the isolation (developer session)
 

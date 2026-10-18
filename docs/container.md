@@ -1,8 +1,6 @@
 # Container isolation
 
-Put the agent and apps in a container such as a devcontainer, and run the proxy on the host as the service user, as in the [recommended setup](install.md). If you limit the container's outbound traffic to the proxy alone, all traffic goes through the proxy's checks and audit, including direct connections to SSO OIDC and the portal.
-
-> The SSH setup ("SSH" below) has not been checked by hand yet. What is written here is a starting point.
+Put the agent and apps in a container such as a devcontainer, and run the proxy on the host as the service user, as in the [recommended setup](install.md). If you limit the container's outbound traffic to the proxy alone, all traffic goes through the proxy's checks and audit. The proxy refuses SSO OIDC and the portal by host name only, so a CONNECT by IP address still reaches them ([threat model](threat-model.md#aws-credentials)).
 
 ## Making the proxy reachable from containers
 
@@ -27,6 +25,8 @@ docker run --rm \
 ```
 
 ## SSH
+
+> This setup has not been checked by hand yet. What is written here is a starting point.
 
 Mount the SSH agent socket into the container, and send connections to port 22 out through the proxy's CONNECT. The proxy relays a CONNECT to a host that has no rule as plain TCP without looking at the contents, and records it in the audit log as `tunnel`.
 

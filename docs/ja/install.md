@@ -18,7 +18,7 @@
 - **管理者のセッション。** 開発ユーザーが触れない経路で入った管理者の端末。ユーザーの切り替えで入った管理者の GUI セッション、管理者ユーザーでの SSH ログイン、別のコンソールのどれか。
 - **開発ユーザーのセッション。** 普段の作業とエージェントが動く端末。
 
-開発ユーザーのプロセスは、その端末に打ち込まれた文字を読める（シェルの設定に `sudo` を横取りする関数やキー入力の記録を仕込める）。管理者のパスワードも、登録する本物のキーも、開発ユーザーの端末には打たない。
+開発ユーザーのプロセスは、その端末に打ち込まれた文字を読める（シェルの設定に `sudo` を横取りする関数やキー入力の記録を仕込める）。管理者のパスワードも、登録する本物のキーも、開発ユーザーの端末には打たない。新しいキーを作るのも管理者のセッションのブラウザで行い、開発ユーザーのクリップボードを通さない。
 
 | 管理者のセッション | 開発ユーザーのセッション |
 | --- | --- |
@@ -75,7 +75,7 @@ alias credshim-svc="sudo -u $user $bin"   # 専用ユーザーとして credshim
 
 ## 3. ルールと本物のキーを登録する（管理者のセッション）
 
-OpenAI を例にする。ほかのサービスは [プリセット](README.md#プリセット) か [ルールを自分で書く](configuration.md#ルールを書く)。
+OpenAI を例にする。ほかのサービスは [プリセット](README.md#プリセット) か [ルールを自分で書く](configuration.md#ルールを書く)。複数のサービスなら、サービスごとに `preset` と `secret set` を繰り返し、最後に1回だけ reload する。
 
 ```sh
 # ルールを追加する（ダミーのキーは毎回ランダムに作られる）
@@ -107,22 +107,14 @@ curl -N https://api.openai.com/v1/chat/completions \
 
 SDK もそのまま動く。
 
-```sh
-uv run --with openai python -c '
-import openai
-for chunk in openai.OpenAI().chat.completions.create(
-    model="gpt-4o-mini", stream=True, messages=[{"role": "user", "content": "hi"}]):
-    print(chunk.choices[0].delta.content or "", end="", flush=True)
-'
-```
-
 `. /etc/credshim/env` はシェルの設定（`~/.zshrc` など）に書いてよい。ダミーを含まない通信はプロキシをそのまま通るので、どのシェルで読み込んでも困らない。
 
 `/etc/credshim/env`（`credshim env` の出力と同じ）が設定する環境変数は次のとおり。
 
 | 変数 | 指す先 |
 | --- | --- |
-| `HTTPS_PROXY`・`HTTP_PROXY`（小文字も）、`NO_PROXY` | プロキシ |
+| `HTTPS_PROXY`・`HTTP_PROXY`（小文字も） | プロキシ |
+| `NO_PROXY`（小文字も） | プロキシを通さないループバック（`localhost`・`127.0.0.1`・`::1`） |
 | `SSL_CERT_FILE`・`REQUESTS_CA_BUNDLE`・`CURL_CA_BUNDLE`・`AWS_CA_BUNDLE` | 結合バンドル（開発用の CA とシステムのルート証明書をまとめたファイル） |
 | `NODE_EXTRA_CA_CERTS` | 開発用の CA |
 | `NODE_USE_ENV_PROXY=1` | Node の組み込みの fetch に `HTTPS_PROXY` を使わせる |
@@ -130,7 +122,7 @@ for chunk in openai.OpenAI().chat.completions.create(
 
 ### ダミーのキーをプロジェクトに渡す
 
-ダミーのキーは `/etc/credshim/keys.env`（`credshim env --keys` の出力と同じ）に別に置いてある。読めるのはインストールで指定した開発ユーザー（`--user`）だけ。`--user` を付けないインストールやアップグレードは、ファイルの今の持ち主を変えない。開発ユーザーを一度も指定していなければ root だけが読める。そのときは `service reload` が開発ユーザーに渡す方法を示す。中身は次のとおり。
+ダミーのキーは `/etc/credshim/keys.env`（`credshim env --keys` の出力と同じ）に別に置いてある。読めるのはインストールで指定した開発ユーザー（`--user`）だけ。中身は次のとおり。
 
 - ルールに `env` があれば、そのダミーのキー（`OPENAI_API_KEY` など）
 - AWS のルールがちょうど1つなら、そのダミーの `AWS_ACCESS_KEY_ID` と `AWS_SECRET_ACCESS_KEY`（2つ以上なら、`~/.aws/credentials` に書くプロファイルをコメントで出す）
@@ -141,6 +133,8 @@ for chunk in openai.OpenAI().chat.completions.create(
 - 要る行だけプロジェクトの .env に写す（`KEY='値'` の形なのでそのまま貼れる。ダミーなのでコミットしてもよい）
 - direnv なら `.envrc` に `dotenv /etc/credshim/keys.env`
 - そのシェルで全部使うなら `set -a; . /etc/credshim/keys.env; set +a`
+
+`--user` を付けないインストールやアップグレードは、ファイルの今の持ち主を変えない。開発ユーザーを一度も指定していなければ root だけが読める。そのときは `service reload` が開発ユーザーに渡す方法を示す。
 
 ## 5. 分離を確かめる（開発ユーザーのセッション）
 
