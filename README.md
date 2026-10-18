@@ -48,7 +48,7 @@ See the [threat model](docs/threat-model.md) for details.
 Get the binary.
 
 ```sh
-v=0.8.0
+v=0.8.1
 target=aarch64-apple-darwin   # on Linux, x86_64-unknown-linux-gnu or aarch64-unknown-linux-gnu
 curl -fsSL "https://github.com/FujiHaruka/credshim/releases/download/v$v/credshim-$v-$target.tar.gz" | tar -xzf - credshim
 mkdir -p ~/.local/bin && mv credshim ~/.local/bin/   # put it somewhere on PATH
