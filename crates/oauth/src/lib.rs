@@ -9,7 +9,9 @@ use std::time::{Duration, SystemTime};
 use credshim_core::{Rule, TokenResolver};
 use http::request::Parts;
 
-pub use provider::{ClientAuth, ClientSecretSpec, IdToken, Provider, ProviderError, ProviderSpec};
+pub use provider::{
+    ClientAuth, ClientSecretSpec, IdToken, Provider, ProviderError, ProviderSpec, endpoint_host,
+};
 pub use token_exchange::{EndpointKind, Exchange, ExchangeError};
 pub use vault::{EXPIRY_GRACE, Issued, TokenKind, Vault, VaultError};
 

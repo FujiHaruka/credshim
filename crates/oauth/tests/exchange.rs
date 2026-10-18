@@ -507,6 +507,7 @@ fn invalid_provider_configs_are_rejected() {
         "http://a.example.test/token",
         "https://a.example.test/token?x=1",
         "https://a.example.test",
+        "https://a.example.test:1@b.example.test/token",
         "not a url",
     ] {
         let mut spec = spec("a", "a.example.test");

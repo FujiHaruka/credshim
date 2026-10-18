@@ -65,11 +65,11 @@ The commands that `config check` prints follow the binary that ran it. Only the 
 
 1. If the developer user can administer the machine, or CredShim is not installed, first give the person [step 1 of the installation](install.md#1-make-the-developer-user-a-non-admin) as needed and the install one-liner from [step 2](install.md#2-install-admin-session), with `--user` set to the developer user. Wait until they say it is installed.
 2. Run `config check` on the draft again with the installed binary (`$bin` in [the install variables](install.md#set-the-variables)).
-3. Give the person one message with: the commands below for the admin session, with the draft's absolute path filled in (`$user` is the service user); a request to read the "Where it lets each real key go" table that the check prints in their terminal, confirm every line marked `!!`, and run the last command only after that; and the steps your run printed after the table (the `secret set`, `ssh keygen`, and `aws sso login` commands, and the reload). Do not put the table in the message: the person reads the one their own check prints, from a copy you cannot change.
+3. Give the person one message with: the commands below for the admin session, with the draft's absolute path and the developer user filled in (`$user` is the service user; reading the draft as the developer user keeps a symlink from pulling in a file only root can read); a request to read the "Where it lets each real key go" table that the check prints in their terminal, confirm every line marked `!!`, and run the last command only after that; and the steps your run printed after the table (the `secret set`, `ssh keygen`, and `aws sso login` commands, and the reload). Do not put the table in the message: the person reads the one their own check prints, from a copy you cannot change.
 
    ```sh
    draft=$(mktemp)                               # a copy the developer user cannot change
-   sudo cat /home/dev/draft.toml > "$draft"
+   sudo -u dev cat /home/dev/draft.toml > "$draft"
    $bin config check "$draft"
    sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/null < "$draft"
    ```

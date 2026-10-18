@@ -92,8 +92,10 @@ jobs:
           cat scripts/install.sh | $mirror -s -- --user devtest "$version"
           systemctl is-active --quiet credshim.service
           $mirror scripts/install.sh "$version" | grep -q "credshim $version is already installed"
-      - name: setup is idempotent when rerun with the installed binary
-        run: sudo /usr/local/libexec/credshim/credshim service install --user devtest
+      - name: setup is idempotent when rerun with the installed binary, and without --user keeps the dummy keys with the development user
+        run: |
+          sudo /usr/local/libexec/credshim/credshim service install
+          [ "$(stat -c %U /etc/credshim/keys.env)" = devtest ]
       - name: a different binary does not replace the installed one without --upgrade
         run: "! sudo target/release/credshim service install --user devtest"
       - name: an ssh key made as the service user is served to the development user

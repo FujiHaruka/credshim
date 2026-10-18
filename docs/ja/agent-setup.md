@@ -65,11 +65,11 @@ credshim config check draft.toml
 
 1. 開発ユーザーが管理者か、CredShim が入っていなければ、まず必要に応じて [導入の手順 1](install.md#1-開発ユーザーを管理者でなくする) と、[手順 2](install.md#2-インストールする管理者のセッション) のインストールの1行を人に渡す。`--user` には開発ユーザーを指定する。入ったと言われるまで待つ。
 2. 入っているバイナリ（[変数](install.md#変数を決める) の `$bin`）で、下書きにもう一度 `config check` を実行する。
-3. 次を1つのメッセージにして人に渡す。管理者のセッションで打つ下のコマンド（下書きの絶対パスを入れる。`$user` は専用ユーザー）。チェックが端末に表示する「Where it lets each real key go」の表を読み、`!!` の付いた行をすべて確かめ、そのあとで最後のコマンドを実行してほしいという依頼。自分の実行が表の後に表示した手順（`secret set`・`ssh keygen`・`aws sso login` のコマンドと、再読み込み）。表はメッセージに入れない。人が読むのは、エージェントが変えられない写しに対して自分で実行したチェックの表。
+3. 次を1つのメッセージにして人に渡す。管理者のセッションで打つ下のコマンド（下書きの絶対パスと開発ユーザーを入れる。`$user` は専用ユーザー。下書きを開発ユーザーとして読むので、シンボリックリンクで root しか読めないファイルを読み込ませることはできない）。チェックが端末に表示する「Where it lets each real key go」の表を読み、`!!` の付いた行をすべて確かめ、そのあとで最後のコマンドを実行してほしいという依頼。自分の実行が表の後に表示した手順（`secret set`・`ssh keygen`・`aws sso login` のコマンドと、再読み込み）。表はメッセージに入れない。人が読むのは、エージェントが変えられない写しに対して自分で実行したチェックの表。
 
    ```sh
    draft=$(mktemp)                               # 開発ユーザーが変えられない写し
-   sudo cat /home/dev/draft.toml > "$draft"
+   sudo -u dev cat /home/dev/draft.toml > "$draft"
    $bin config check "$draft"
    sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/null < "$draft"
    ```

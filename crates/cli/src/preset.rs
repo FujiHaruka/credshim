@@ -80,7 +80,7 @@ pub const AWS_SSO_PRESET: &str = "aws-sso";
 pub fn preset_for_host(host: &str) -> Option<&'static str> {
     PRESETS
         .iter()
-        .find(|preset| preset.host == host)
+        .find(|preset| preset.host.eq_ignore_ascii_case(host))
         .map(|preset| preset.name)
 }
 

@@ -331,6 +331,19 @@ fn a_dangling_escape_before_the_query_dummy_cannot_merge_with_the_secret() {
 }
 
 #[test]
+fn a_multibyte_character_before_the_query_dummy_is_kept() {
+    let mut parts = request(&format!("/v1/models?key=\u{20ac}{GEMINI_DUMMY}"), &[]);
+
+    let verdict = injector().apply(GEMINI, &mut parts).unwrap();
+
+    assert_eq!(verdict, Verdict::Injected(vec!["gemini".to_string()]));
+    assert_eq!(
+        parts.uri.to_string(),
+        "/v1/models?key=\u{20ac}real%20gemini%2Fsecret%26x%3D1"
+    );
+}
+
+#[test]
 fn percent_encoded_query_dummy_is_replaced() {
     let encoded: String = GEMINI_DUMMY.bytes().map(|b| format!("%{b:02x}")).collect();
     let mut parts = request(

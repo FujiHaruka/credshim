@@ -322,12 +322,12 @@ impl AwsRule {
     }
 
     pub fn refuses(&self, scope: &Scope) -> Option<ScopeRefusal> {
-        let listed = self
-            .services
-            .as_ref()
-            .map(|allowed| allowed.contains(&scope.service));
-        let customer_hosted = CUSTOMER_HOSTED_SERVICES.contains(&scope.service.as_str());
-        if listed == Some(false) || (customer_hosted && listed.is_none()) {
+        if !reaches_service(
+            self.services
+                .as_ref()
+                .map(|allowed| allowed.contains(&scope.service)),
+            &scope.service,
+        ) {
             return Some(ScopeRefusal::Service);
         }
         if self
@@ -339,6 +339,22 @@ impl AwsRule {
         }
         None
     }
+}
+
+fn reaches_service(listed: Option<bool>, service: &str) -> bool {
+    listed.unwrap_or_else(|| !CUSTOMER_HOSTED_SERVICES.contains(&service))
+}
+
+pub fn customer_hosted_reach(services: Option<&[String]>) -> Vec<&'static str> {
+    CUSTOMER_HOSTED_SERVICES
+        .into_iter()
+        .filter(|service| {
+            reaches_service(
+                services.map(|allowed| allowed.iter().any(|allowed| allowed == service)),
+                service,
+            )
+        })
+        .collect()
 }
 
 pub fn overlaps(a: &str, b: &str) -> bool {

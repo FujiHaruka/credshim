@@ -4,13 +4,14 @@ use std::path::Path;
 
 use anyhow::bail;
 
-use credshim_aws::hosts::CUSTOMER_HOSTED_SERVICES;
-use credshim_core::Limits;
+use credshim_aws::rule::customer_hosted_reach;
+use credshim_core::{DEFAULT_PORT, Limits};
 
 use crate::config::{self, Config};
 use crate::handoff::{Handoff, shell_word};
 use crate::preset;
 use crate::routing::RESTART_ONLY;
+use crate::terminal::printable_lines;
 
 pub const TOPIC: &str = "configuration#checking-a-draft";
 const RULES_TOPIC: &str = "configuration#writing-rules";
@@ -41,7 +42,7 @@ pub fn check(path: &Path, handoff: &Handoff) -> anyhow::Result<String> {
         "Check every destination above, then add it to the config (credshim docs {RULES_TOPIC})."
     )];
     steps.extend(apply_steps(&config, &table, handoff));
-    Ok(printable(&format!(
+    Ok(printable_lines(&format!(
         "{} is a valid config.\n\
          Not checked here: whether its secrets are stored, the CA, and file permissions. `credshim run --check` checks them, and `service reload` runs it before it applies anything.\n\n\
          {}\n\
@@ -52,25 +53,13 @@ pub fn check(path: &Path, handoff: &Handoff) -> anyhow::Result<String> {
     )))
 }
 
-fn printable(text: &str) -> String {
-    text.chars()
-        .flat_map(|c| {
-            if c.is_control() && c != '\n' {
-                c.escape_default().collect::<Vec<_>>()
-            } else {
-                vec![c]
-            }
-        })
-        .collect()
-}
-
 pub fn destinations(config: &Config) -> String {
     let mut out = String::from("Where it lets each real key go:\n");
     for rule in &config.rules {
         let target = format!(
             "{}:{}{}",
             rule.host,
-            rule.port.unwrap_or(443),
+            rule.port.unwrap_or(DEFAULT_PORT),
             rule.path_prefix.as_deref().unwrap_or_default()
         );
         let _ = writeln!(
@@ -170,8 +159,8 @@ pub fn destinations(config: &Config) -> String {
         for host in &provider.resource_hosts {
             let _ = writeln!(
                 out,
-                "      access tokens -> https://{host}:443{}",
-                origin(preset::preset_for_host(&host.to_ascii_lowercase()), "host")
+                "      access tokens -> https://{host}:{DEFAULT_PORT}{}",
+                origin(preset::preset_for_host(host), "host")
             );
         }
     }
@@ -189,18 +178,11 @@ fn origin(preset: Option<&str>, what: &str) -> String {
 }
 
 fn endpoint_preset(url: &str) -> Option<&'static str> {
-    let authority = url.strip_prefix("https://")?.split('/').next()?;
-    let host = authority.split(':').next()?;
-    preset::preset_for_host(&host.to_ascii_lowercase())
+    preset::preset_for_host(&credshim_oauth::endpoint_host(url)?)
 }
 
 fn aws_reach(services: Option<&[String]>) -> String {
-    let customer_hosted: Vec<&str> = services
-        .unwrap_or_default()
-        .iter()
-        .map(String::as_str)
-        .filter(|service| CUSTOMER_HOSTED_SERVICES.contains(service))
-        .collect();
+    let customer_hosted = customer_hosted_reach(services);
     if customer_hosted.is_empty() {
         "AWS endpoints only".to_string()
     } else {
@@ -332,17 +314,4 @@ pub fn numbered(steps: &[String]) -> String {
         }
     }
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn printed_text_keeps_its_lines_but_cannot_drive_the_terminal() {
-        assert_eq!(
-            printable("a\n\u{1b}[1A\r\u{1b}[2Kb\t"),
-            "a\n\\u{1b}[1A\\r\\u{1b}[2Kb\\t"
-        );
-    }
 }
