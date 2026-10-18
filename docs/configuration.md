@@ -13,7 +13,7 @@ A rule says which dummy to replace with which real value, and only when the requ
 name = "stripe"
 host = "api.stripe.com"
 secret = "stripe"                                  # name registered in the secret store
-dummy = "sk_credshim_stripe_0123456789abcdef"      # dummy given to the app (make it your own random string)
+dummy = "sk_credshim_stripe_0123456789abcdef"      # dummy given to the app (make it your own random string, for example with openssl rand -hex 16)
 env = "STRIPE_API_KEY"                             # variable in keys.env that carries the dummy
 inject = { header = "authorization" }              # where to look for the dummy and replace it
 allow_methods = ["GET", "POST"]
@@ -45,7 +45,7 @@ sudo $bin service reload
 
 ### How rules apply
 
-- The dummy is replaced with the real value only when the actual destination matches `host` and `port` (and `path_prefix`), and the destination's TLS certificate verifies against the system trust store. Plain HTTP is never replaced.
+- The dummy is replaced with the real value only when the actual destination matches `host` and `port` (and `path_prefix`), and the destination's TLS certificate verifies against the OS trust store (a private CA installed in the OS is accepted). Plain HTTP is never replaced.
 - If the dummy goes to another destination, the proxy returns 403 and does not replace it. Nothing is sent upstream.
 - If the destination matches but the request is outside `allow_methods` or `allow_paths`, the response is 403. If it exceeds `limits`, the response is 429. In both cases nothing is sent upstream.
 - If a response contains the real value, the proxy changes it back to the dummy before it returns the response to the client (scrub). `[scrub] enabled = false` turns this off, but leave it on.

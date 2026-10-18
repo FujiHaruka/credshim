@@ -1,6 +1,6 @@
 # GitHub CLI (gh)
 
-`git` over SSH works with the [SSH agent](ssh.md), but `gh` calls the GitHub API, which accepts only a token. The `github` preset binds a token to `api.github.com`. `gh` holds only a dummy in `GH_TOKEN`, and the proxy replaces it with the real token on the way to GitHub.
+`git` over SSH works with the [SSH agent](ssh.md), but `gh` calls the GitHub API, which accepts only a token. The `github` preset lets the real token go only to `api.github.com`. `gh` holds only a dummy in `GH_TOKEN`, and the proxy replaces it with the real token on the way to GitHub.
 
 The commands on this page are written for the recommended setup, and `$user`, `$bin`, and `credshim-svc` are [the install variables](install.md#set-the-variables). For the trial setup, read them as described in [adapting the commands to the trial setup](install.md#adapting-the-commands-to-the-trial-setup).
 
@@ -39,6 +39,8 @@ set -a; . /etc/credshim/keys.env; set +a
 gh api user --jq .login
 ```
 
+On macOS, if this fails with a certificate error, make `gh` trust the development CA as in [Go tools on macOS](troubleshooting.md#go-tools-on-macos) (`gh` is a Go program).
+
 ## Replacing an existing gh login
 
 `gh auth login` stores its token in `~/.config/gh/hosts.yml` or in the system keyring, where an agent running as the developer user can read it. `credshim doctor` reports both (`files`). Remove it; `gh` refuses to log out while `GH_TOKEN` is set, so clear it for the command:
@@ -55,5 +57,3 @@ Then revoke the old token on GitHub: Settings → Applications → Authorized OA
 - Paths `/graphql`, `/repos`, `/user`, `/users`, `/orgs`, `/search`, `/notifications`, `/gists`, `/rate_limit`, `/licenses`, and `/gitignore`. Most `gh` commands go through `/graphql`, so paths narrow little. The token's repositories and permissions are the real limit.
 - Only `api.github.com`. Anywhere else the dummy is not replaced, so GitHub answers 401. This includes `uploads.github.com`, so `gh release upload` and `gh release create` with files fail; publish releases from CI instead. `git` over HTTPS is not covered either; use SSH.
 - For GitHub Enterprise Server, write the rule yourself with your server's host ([Writing rules](configuration.md#writing-rules)).
-
-`gh` is a Go program. On macOS, see [Go tools on macOS](troubleshooting.md#go-tools-on-macos) for making it trust the development CA.

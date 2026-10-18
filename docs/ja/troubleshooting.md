@@ -1,6 +1,6 @@
 # うまく動かないとき
 
-まず開発ユーザーのセッションで `credshim doctor` を実行する。CredShim が止めたリクエストは、応答に理由と、監査ログの記録を表示するコマンドが入る（[止められたリクエスト](#止められたリクエスト)）。すべてのリクエストを見るには、管理者のセッションで `credshim-svc tail`（お試し構成では `credshim tail`）を使う。`credshim-svc` は [導入手順の変数](install.md#変数を決める) を参照。
+まず開発ユーザーのセッションで `credshim doctor` を実行する。CredShim が止めたリクエストは、応答に理由と、監査ログの記録を表示するコマンドが入る（[止められたリクエスト](#止められたリクエスト)）。すべてのリクエストを見るには、管理者のセッションで `credshim-svc tail`（お試し構成では `credshim tail`）を使う。`credshim-svc` は [導入手順の変数](install.md#変数を決める) を参照。症状（403、401、証明書のエラー）から原因をたどるには [リクエストが失敗したとき](agents.md#リクエストが失敗したとき)。
 
 ## credshim doctor
 
@@ -117,13 +117,15 @@ docs: credshim docs troubleshooting#not_allowed
 
 ## macOS の Go 製ツール
 
+Linux の Go は `SSL_CERT_FILE` を読むので、`gh` や Terraform などの Go 製ツールはそのまま動く。この節は macOS 向け。
+
 開発用の CA が要るのは、ルールのあるホスト（AWS のルールがあれば `amazonaws.com` 全体）への通信だけ。それ以外のホストへの通信は中身を見ずに中継し、本物の証明書が届くので、Go 製ツールでもそのまま動く。たとえば Terraform のレジストリやプロバイダーのダウンロードは通るが、AWS のルールがあるときの AWS プロバイダーの API 呼び出しは、開発用の CA を信頼できずに失敗する。
 
 macOS の Go は証明書の検証をキーチェーンに任せ、`SSL_CERT_FILE` を読まない。読むのは、Go 1.27 以降でビルドしたプログラムが go.mod の `go` 行が 1.27 以上のとき、または `GODEBUG=x509sslcertoverrideplatform=1` を付けて実行したときだけ。
 
 次の順に試す。
 
-1. Go 1.27 以降でビルドされたツールなら、`GODEBUG=x509sslcertoverrideplatform=1` を付けて実行する（`GODEBUG` にほかの設定があればカンマでつなぐ）。自分のプロジェクトなら、go.mod の `go` 行を 1.27 以上にすれば付けなくてよい。
+1. ツールを `GODEBUG=x509sslcertoverrideplatform=1` を付けて実行する（`GODEBUG` にほかの設定があればカンマでつなぐ）。Go 1.27 以降でビルドされたツールならこれで動く。証明書のエラーが残るなら次へ進む。自分のプロジェクトなら、go.mod の `go` 行を 1.27 以上にすれば付けなくてよい。
 2. ツールが API の接続先を変えられるなら、[base URL モード](configuration.md#base-url-モード) を使う（開発用の CA が要らない）。
 3. どちらもできない場合（古い Go でビルドされた配布バイナリなど）に限り、開発ユーザーのログインキーチェーンで開発用の CA を信頼させる。管理者権限は要らず、パスワードの確認が出る。
 

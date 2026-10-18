@@ -6,6 +6,12 @@ The real credentials are either a static access key of an IAM user or a role in 
 
 The commands on this page are for the recommended setup. `$user`, `$bin`, and `credshim-svc` are [the install variables](install.md#set-the-variables). For the trial setup, read them as described in [adapting the commands](install.md#adapting-the-commands-to-the-trial-setup).
 
+## What does not work
+
+- Operations that issue credentials (37 operations, such as `sts:AssumeRole`, `GetSessionToken`, `iam:CreateAccessKey`, and `s3:CreateSession`) are denied regardless of the rules, because the response would contain real credentials.
+- Connections to the SSO OIDC, SSO portal, and `aws login` signin hosts are always denied, even with no AWS configuration. So `aws sso login` does not work (use `credshim aws sso login` instead).
+- Profiles that use AssumeRole, client-side signing such as `aws s3 presign`, and S3 Express One Zone do not work. For several accounts or roles, add one `[[aws_key]]` or `[[aws_sso_role]]` for each.
+
 ## Static access keys
 
 ```sh
@@ -23,14 +29,9 @@ aws sts get-caller-identity
 
 When there are two or more AWS rules, do not use the environment variables. Write the profiles from the comments in `/etc/credshim/keys.env` into `~/.aws/credentials` and select one with `AWS_PROFILE`.
 
-`AWS_CA_BUNDLE` replaces the trust store, so point it at the combined bundle (one file with the development CA and the system root certificates), not at the development CA alone. `/etc/credshim/env` already does this.
-
 ### Restricting services and operations
 
 ```toml
-[aws]
-max_body_bytes = 16777216   # limit on the body read for signing, for services other than S3 (default 16MiB)
-
 [[aws_key]]
 name = "aws"
 dummy_access_key_id = "CREDSHIMAWS..."
@@ -48,25 +49,18 @@ limits = { per_minute = 120, per_day = 5000, concurrent = 8 }
 - When more than one operation matches the same request shape (for example `GetBucketLifecycle` and `GetBucketLifecycleConfiguration`), you must allow both.
 - Exceeding `limits` gives a 429 `CredShimLimitExceeded`.
 - `services`, `regions`, `operations`, and `limits` can also be set on SSO roles.
-
-The operation is identified from the shape of the request, based on the botocore models (`Action` for Query and EC2, `X-Amz-Target` for JSON, the path for rpc-v2-cbor, and for REST the method, the path, and the required query parameters and headers).
-
-### What does not work
-
-- Operations that issue credentials (37 operations, such as `sts:AssumeRole`, `GetSessionToken`, `iam:CreateAccessKey`, and `s3:CreateSession`) are denied regardless of the rules, because the response would contain real credentials.
-- Connections to the SSO OIDC, SSO portal, and `aws login` signin hosts are always denied, even with no AWS configuration. So `aws sso login` does not work (use `credshim aws sso login` instead).
-- Profiles that use AssumeRole, client-side signing such as `aws s3 presign`, and S3 Express One Zone do not work.
+- `[aws] max_body_bytes` limits the body read for signing, for services other than S3 (default 16 MiB).
 
 ## AWS IAM Identity Center (SSO)
 
-SSO roles also work with only a dummy static access key in `~/.aws`. A human logs in with `credshim aws sso login`, not `aws sso login`. The SSO token is kept in the secret store, and the role credentials only in the proxy's memory. The proxy fetches new role credentials and a new SSO token 10 minutes before they expire (if there is a refresh token).
+With SSO too, clients hold only a dummy static access key. A human logs in with `credshim aws sso login`, not `aws sso login`. The SSO token is kept in the secret store, and the role credentials only in the proxy's memory. The proxy fetches new role credentials and a new SSO token 10 minutes before they expire (if there is a refresh token).
 
 ```sh
 # admin session
 $bin preset aws-sso | sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/null
 sudo -u $user vi /var/lib/credshim/config.toml   # change start_url, region, account, and role
 sudo $bin service reload
-credshim-svc aws sso login sso   # open the URL shown in a browser, check the code, and approve
+credshim-svc aws sso login sso   # "sso" is the session name. Open the URL shown in a browser, check the code, and approve
 
 # developer session
 . /etc/credshim/env
