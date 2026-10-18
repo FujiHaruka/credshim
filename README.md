@@ -13,7 +13,7 @@ App / agent ──(dummy key)──▶ CredShim ──(real key)──▶ api.op
 ```
 
 - It is an HTTPS proxy that apps reach through `HTTPS_PROXY`, with its own development CA that apps trust through environment variables. SDKs work without modification.
-- [Presets](#presets) cover OpenAI, Anthropic, Gemini, GitHub, and AWS (including IAM Identity Center). It also runs as an ssh-agent and handles OAuth tokens. For other APIs, you write the rules.
+- [Presets](#presets) cover OpenAI, Anthropic, Gemini, GitHub, and AWS (including IAM Identity Center). CredShim also runs as an ssh-agent and handles OAuth tokens. For other APIs, you write the rules.
 
 ## Choosing a setup
 

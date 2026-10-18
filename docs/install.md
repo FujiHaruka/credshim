@@ -18,7 +18,7 @@ This setup runs commands in two places (`$bin` and `credshim-svc` in the table b
 - **Admin session.** An admin terminal reached by a path the developer user cannot touch: an admin GUI session entered by switching users, an SSH login as the admin user, or a separate console.
 - **Developer session.** The terminal where everyday work and agents run.
 
-Processes of the developer user can read what is typed into that terminal (they can plant a function that hijacks `sudo`, or a keystroke logger, in the shell config). Do not type the admin password or the real keys you register into the developer user's terminal. Create new keys from a browser in the admin session too, so that they never pass through the developer user's clipboard.
+Processes of the developer user can read what is typed into that terminal (they can plant a function that hijacks `sudo`, or a keystroke logger, in the shell config). Do not type the admin password or the real keys you register into the developer user's terminal. Create the new keys where the developer user's processes cannot read them, such as a browser in an admin GUI session or another device, so that they never pass through the developer user's clipboard.
 
 | Admin session | Developer session |
 | --- | --- |
