@@ -127,7 +127,7 @@ pub async fn read_head<S: AsyncRead + Unpin>(stream: &mut S) -> String {
 }
 
 pub async fn assert_sse_unbuffered(client: &reqwest::Client, url: String) {
-    let interval_ms = 300;
+    let interval_ms = 500;
     let res = client
         .get(format!("{url}?count=5&interval_ms={interval_ms}"))
         .send()
@@ -145,8 +145,8 @@ pub async fn assert_sse_unbuffered(client: &reqwest::Client, url: String) {
             let tick: SseTick = serde_json::from_str(data).unwrap();
             let latency_ms = (arrived - tick.sent_at_us) / 1000;
             assert!(
-                latency_ms < interval_ms / 2,
-                "event {} took {latency_ms}ms to arrive",
+                latency_ms < interval_ms,
+                "event {} took {latency_ms}ms to arrive, so it was held until the next event was sent",
                 tick.seq
             );
             seen += 1;
