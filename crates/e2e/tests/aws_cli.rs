@@ -59,7 +59,7 @@ impl Fixture {
         .unwrap();
         std::fs::write(
             aws_dir.join("config"),
-            format!("[default]\nregion = {REGION}\noutput = json\n"),
+            format!("[default]\nregion = {REGION}\noutput = json\ns3 =\n  preferred_transfer_client = classic\n"),
         )
         .unwrap();
 

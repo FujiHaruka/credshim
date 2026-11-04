@@ -1,4 +1,5 @@
 mod api;
+mod callback;
 mod login;
 mod provider;
 mod stored;
@@ -9,7 +10,7 @@ use credshim_core::rule::is_identifier;
 use serde::Deserialize;
 
 pub use api::{BoxFuture, RoleCredentials, Transport, TransportError};
-pub use login::{LoginError, LogoutError, LogoutOutcome, Prompt, login, logout};
+pub use login::{Flow, LoginError, LogoutError, LogoutOutcome, Prompt, login, logout};
 pub use provider::{CredentialError, SsoOptions, SsoProvider};
 pub use stored::StoredError;
 

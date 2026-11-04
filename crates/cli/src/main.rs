@@ -233,6 +233,11 @@ enum SsoCommand {
     Login {
         #[arg(help = "Name of the [[aws_sso_session]]")]
         session: String,
+        #[arg(
+            long,
+            help = "Approve a code in any browser, such as on another computer or a phone, instead of a browser on this computer"
+        )]
+        use_device_code: bool,
         #[arg(long, value_name = "FILE", help = CONFIG_HELP)]
         config: Option<PathBuf>,
     },
@@ -551,11 +556,16 @@ async fn dispatch(command: Command) -> anyhow::Result<()> {
         Command::Aws {
             command:
                 AwsCommand::Sso {
-                    command: SsoCommand::Login { session, config },
+                    command:
+                        SsoCommand::Login {
+                            session,
+                            use_device_code,
+                            config,
+                        },
                 },
         } => {
             init_logging(None)?;
-            aws_sso_login(config.as_deref(), &session).await
+            aws_sso_login(config.as_deref(), &session, use_device_code).await
         }
         Command::Aws {
             command:
@@ -906,7 +916,11 @@ fn sso_session(config: &config::Config, name: &str) -> anyhow::Result<SsoSession
         .with_context(|| format!("no [[aws_sso_session]] is named {name:?}"))
 }
 
-async fn aws_sso_login(config_path: Option<&Path>, name: &str) -> anyhow::Result<()> {
+async fn aws_sso_login(
+    config_path: Option<&Path>,
+    name: &str,
+    use_device_code: bool,
+) -> anyhow::Result<()> {
     if !std::io::stdin().is_terminal() {
         bail!(
             "`credshim aws sso login` is for a person at a terminal with a browser (stdin is not a TTY); ask them to run: {}",
@@ -920,17 +934,25 @@ async fn aws_sso_login(config_path: Option<&Path>, name: &str) -> anyhow::Result
     let session = sso_session(&config, name)?;
     let store = config.secrets()?.open()?;
     let transport = UpstreamTransport::new(Upstream::new()?);
-    credshim_aws::sso::login(&session, &transport, store.as_ref(), |prompt| {
-        let url = prompt
-            .verification_uri_complete
-            .as_deref()
-            .unwrap_or(&prompt.verification_uri);
-        let _ = writeln!(
-            std::io::stderr(),
-            "Open {url} in a browser and confirm the code {code}.\nWaiting up to {minutes} minutes for the approval...",
-            code = prompt.user_code,
-            minutes = prompt.expires_in.as_secs().div_ceil(60),
-        );
+    let flow = if use_device_code {
+        credshim_aws::sso::Flow::DeviceCode
+    } else {
+        credshim_aws::sso::Flow::browser()
+    };
+    credshim_aws::sso::login(&session, &transport, store.as_ref(), flow, |prompt| {
+        let minutes = prompt.expires_in.as_secs().div_ceil(60);
+        let _ = match &prompt.user_code {
+            Some(code) => writeln!(
+                std::io::stderr(),
+                "Open {url} in a browser and confirm the code {code}.\nWaiting up to {minutes} minutes for the approval...",
+                url = prompt.url,
+            ),
+            None => writeln!(
+                std::io::stderr(),
+                "Open this URL in a browser on this computer and allow the access:\n\n{url}\n\nAllow only the page you opened from this URL. If the browser is on another computer, stop and rerun with --use-device-code.\nWaiting up to {minutes} minutes for the approval...",
+                url = prompt.url,
+            ),
+        };
     })
     .await?;
     writeln!(

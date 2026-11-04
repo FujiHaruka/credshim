@@ -741,11 +741,13 @@ version = "0.8.2"
 dependencies = [
  "aws-credential-types",
  "aws-sigv4",
+ "base64 0.22.1",
  "bytes",
  "credshim-core",
  "credshim-secrets",
  "credshim-testkit",
  "form_urlencoded",
+ "getrandom 0.3.4",
  "hex",
  "http",
  "percent-encoding",

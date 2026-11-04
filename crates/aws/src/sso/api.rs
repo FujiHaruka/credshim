@@ -2,10 +2,13 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::{Duration, SystemTime};
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
 use http::{Method, Request, Response, StatusCode, header};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use super::SsoSession;
 use crate::rule::SsoRole;
@@ -26,8 +29,12 @@ pub struct TransportError(pub String);
 const BEARER_HEADER: &str = "x-amz-sso_bearer_token";
 const CLIENT_NAME: &str = "credshim";
 const SCOPE: &str = "sso:account:access";
+const REDIRECT_URI_WITHOUT_PORT: &str = "http://127.0.0.1/oauth/callback";
 const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
+const AUTHORIZATION_CODE_GRANT: &str = "authorization_code";
 const REFRESH_TOKEN_GRANT: &str = "refresh_token";
+const VERIFIER_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+const VERIFIER_LEN: usize = 64;
 
 #[derive(Clone)]
 pub(crate) struct Client {
@@ -40,6 +47,31 @@ pub(crate) struct Token {
     pub access_token: SecretString,
     pub expires_at: SystemTime,
     pub refresh_token: Option<SecretString>,
+}
+
+pub(crate) struct Pkce {
+    verifier: SecretString,
+    pub state: String,
+}
+
+impl Pkce {
+    pub fn generate() -> Self {
+        let mut raw = zeroize::Zeroizing::new([0u8; VERIFIER_LEN]);
+        getrandom::fill(raw.as_mut()).expect("the OS random number generator is unavailable");
+        let verifier: zeroize::Zeroizing<String> = zeroize::Zeroizing::new(
+            raw.iter()
+                .map(|byte| char::from(VERIFIER_CHARS[usize::from(*byte) % VERIFIER_CHARS.len()]))
+                .collect(),
+        );
+        Self {
+            verifier: SecretString::from(verifier.as_str()),
+            state: credshim_core::dummy::generate("state-"),
+        }
+    }
+
+    fn challenge(&self) -> String {
+        URL_SAFE_NO_PAD.encode(Sha256::digest(self.verifier.expose_secret().as_bytes()))
+    }
 }
 
 pub(crate) struct DeviceAuthorization {
@@ -137,13 +169,29 @@ struct OidcError {
 }
 
 impl Api<'_> {
-    pub async fn register_client(&self) -> Result<Client, ApiError> {
-        let body = serde_json::json!({
+    pub async fn register_device_client(&self) -> Result<Client, ApiError> {
+        self.register(serde_json::json!({
             "clientName": CLIENT_NAME,
             "clientType": "public",
             "scopes": [SCOPE],
             "grantTypes": [DEVICE_CODE_GRANT, REFRESH_TOKEN_GRANT],
-        });
+        }))
+        .await
+    }
+
+    pub async fn register_browser_client(&self) -> Result<Client, ApiError> {
+        self.register(serde_json::json!({
+            "clientName": CLIENT_NAME,
+            "clientType": "public",
+            "scopes": [SCOPE],
+            "grantTypes": [AUTHORIZATION_CODE_GRANT, REFRESH_TOKEN_GRANT],
+            "redirectUris": [REDIRECT_URI_WITHOUT_PORT],
+            "issuerUrl": self.session.start_url(),
+        }))
+        .await
+    }
+
+    async fn register(&self, body: serde_json::Value) -> Result<Client, ApiError> {
         let response: RegisterClientResponse = self.oidc("/client/register", &body).await?;
         Ok(Client {
             id: response.client_id,
@@ -151,6 +199,37 @@ impl Api<'_> {
             expires_at: SystemTime::UNIX_EPOCH
                 + Duration::from_secs(response.client_secret_expires_at),
         })
+    }
+
+    pub fn authorization_url(&self, client: &Client, pkce: &Pkce, redirect_uri: &str) -> String {
+        let query = form_urlencoded::Serializer::new(String::new())
+            .append_pair("response_type", "code")
+            .append_pair("client_id", &client.id)
+            .append_pair("redirect_uri", redirect_uri)
+            .append_pair("state", &pkce.state)
+            .append_pair("code_challenge_method", "S256")
+            .append_pair("scopes", SCOPE)
+            .append_pair("code_challenge", &pkce.challenge())
+            .finish();
+        format!("https://{}/authorize?{query}", self.session.oidc_host())
+    }
+
+    pub async fn create_token_from_code(
+        &self,
+        client: &Client,
+        code: &SecretString,
+        pkce: &Pkce,
+        redirect_uri: &str,
+    ) -> Result<Token, ApiError> {
+        let body = serde_json::json!({
+            "clientId": client.id,
+            "clientSecret": client.secret.expose_secret(),
+            "grantType": AUTHORIZATION_CODE_GRANT,
+            "redirectUri": redirect_uri,
+            "codeVerifier": pkce.verifier.expose_secret(),
+            "code": code.expose_secret(),
+        });
+        self.create_token(&body).await
     }
 
     pub async fn start_device_authorization(
