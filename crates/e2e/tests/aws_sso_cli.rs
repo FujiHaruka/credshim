@@ -148,14 +148,17 @@ impl Fixture {
 
     async fn login(&self) {
         let sso = &self.sso;
+        let mut browser = None;
         credshim_aws::sso::login(
             &self.session,
             self.transport.as_ref(),
             self.store.as_ref(),
-            |prompt| sso.approve(&prompt.user_code),
+            credshim_aws::sso::Flow::browser(),
+            |prompt| browser = Some(sso.approve_in_browser(&prompt.url)),
         )
         .await
         .unwrap();
+        assert_eq!(browser.unwrap().await.unwrap(), 200);
     }
 
     async fn aws(&self, args: &[&str]) -> Output {
@@ -254,7 +257,11 @@ fn quick(refresh_before: Duration) -> SsoOptions {
 #[ignore = "needs the aws CLI v2; run with `mise exec -- cargo test -p credshim-e2e -- --ignored`"]
 async fn aws_cli_uses_an_sso_role_after_a_credshim_login_with_only_a_dummy_profile() {
     let logs = capture_logs();
-    let f = Fixture::new(MockSsoConfig::default(), SsoOptions::default()).await;
+    let f = Fixture::new(
+        MockSsoConfig::default(),
+        quick(SsoOptions::default().refresh_before),
+    )
+    .await;
 
     let before = f.aws(&["sts", "get-caller-identity"]).await;
     failed_with_login_hint(&before);

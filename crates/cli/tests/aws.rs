@@ -207,17 +207,17 @@ async fn sso_login_is_for_a_person_at_a_terminal_and_logout_needs_no_network_wit
     let home = tempfile::tempdir().unwrap();
     let preset = aws_sso_config(home.path()).await;
 
-    let login = output(
-        home.path(),
-        &["aws", "sso", "login", "sso", "--config", &preset],
-    )
-    .await;
-    assert!(!login.status.success());
-    assert!(
-        stderr(&login).contains("stdin is not a TTY"),
-        "{}",
-        stderr(&login)
-    );
+    for extra in [&[][..], &["--use-device-code"][..]] {
+        let mut args = vec!["aws", "sso", "login", "sso", "--config", &preset];
+        args.extend_from_slice(extra);
+        let login = output(home.path(), &args).await;
+        assert!(!login.status.success());
+        assert!(
+            stderr(&login).contains("stdin is not a TTY"),
+            "{}",
+            stderr(&login)
+        );
+    }
 
     let unknown = output(
         home.path(),

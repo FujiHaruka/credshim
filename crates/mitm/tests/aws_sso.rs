@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use credshim_aws::sso::{LogoutOutcome, Transport};
+use credshim_aws::sso::{Flow, LoginError, LogoutOutcome, Transport};
 use credshim_aws::{
     Aws, AwsRule, AwsSsoRoleSpec, Signer, SsoOptions, SsoProvider, SsoSession, SsoSessionSpec,
 };
@@ -131,14 +131,39 @@ impl Fixture {
 
     async fn login(&self) {
         let sso = &self.sso;
+        let mut browser = None;
         credshim_aws::sso::login(
             &self.session,
             self.transport.as_ref(),
             self.store.as_ref(),
-            |prompt| sso.approve(&prompt.user_code),
+            Flow::browser(),
+            |prompt| browser = Some(sso.approve_in_browser(&prompt.url)),
         )
         .await
         .unwrap();
+        assert_eq!(browser.unwrap().await.unwrap(), 200);
+    }
+
+    async fn login_with(
+        &self,
+        flow: Flow,
+        browser: impl AsyncFnOnce(String),
+    ) -> Result<(), LoginError> {
+        let (url_tx, url_rx) = tokio::sync::oneshot::channel();
+        let login = credshim_aws::sso::login(
+            &self.session,
+            self.transport.as_ref(),
+            self.store.as_ref(),
+            flow,
+            |prompt| url_tx.send(prompt.clone()).unwrap(),
+        );
+        let act = async {
+            if let Ok(prompt) = url_rx.await {
+                browser(prompt.url).await;
+            }
+        };
+        let (result, ()) = tokio::join!(login, act);
+        result
     }
 
     fn client(&self) -> reqwest::Client {
@@ -263,7 +288,11 @@ fn quick(refresh_before: Duration) -> SsoOptions {
 #[tokio::test]
 async fn requests_need_a_login_then_use_role_credentials_that_never_reach_the_client() {
     let logs = capture_logs();
-    let f = Fixture::new(MockSsoConfig::default(), SsoOptions::default()).await;
+    let f = Fixture::new(
+        MockSsoConfig::default(),
+        quick(SsoOptions::default().refresh_before),
+    )
+    .await;
 
     let (status, body) = f.caller_identity().await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
@@ -357,7 +386,7 @@ async fn an_expiring_sso_token_is_refreshed_and_saved_back_encrypted() {
 
     let counts = f.sso.counts();
     assert!(counts.refreshes >= 1, "{counts:?}");
-    assert_eq!(counts.device_tokens, 1);
+    assert_eq!(counts.code_tokens, 1);
     assert_ne!(f.stored().unwrap(), first);
     f.assert_nothing_leaked(&logs, &[]);
 }
@@ -534,4 +563,163 @@ async fn failing_identity_center_calls_are_not_repeated_for_every_request() {
     }
     assert_eq!(f.sso.counts().refresh_attempts, attempts + 1);
     assert!(f.aws.requests().is_empty());
+}
+
+fn callback_port(url: &str) -> u16 {
+    let (_, query) = url.split_once('?').unwrap();
+    let redirect = form_urlencoded::parse(query.as_bytes())
+        .find(|(key, _)| key == "redirect_uri")
+        .unwrap()
+        .1
+        .into_owned();
+    redirect
+        .strip_prefix("http://127.0.0.1:")
+        .and_then(|rest| rest.strip_suffix("/oauth/callback"))
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+async fn raw_request(port: u16, request: &[u8]) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    let _ = stream.write_all(request).await;
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response).await;
+    response
+}
+
+#[tokio::test]
+async fn a_browser_login_ignores_local_requests_that_do_not_carry_its_state() {
+    let logs = capture_logs();
+    let f = Fixture::new(
+        MockSsoConfig::default(),
+        quick(SsoOptions::default().refresh_before),
+    )
+    .await;
+    let sso = &f.sso;
+
+    let result = f
+        .login_with(Flow::browser(), async |url| {
+            let port = callback_port(&url);
+            let idle = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            let forged = raw_request(
+                port,
+                b"GET /oauth/callback?code=forged&state=guessed HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n",
+            )
+            .await;
+            assert!(forged.starts_with("HTTP/1.1 400"), "{forged}");
+            let denied = raw_request(
+                port,
+                b"GET /oauth/callback?error=access_denied HTTP/1.1\r\n\r\n",
+            )
+            .await;
+            assert!(denied.starts_with("HTTP/1.1 400"), "{denied}");
+            let other = raw_request(port, b"GET / HTTP/1.1\r\n\r\n").await;
+            assert!(other.starts_with("HTTP/1.1 404"), "{other}");
+            let post = raw_request(port, b"POST /oauth/callback HTTP/1.1\r\n\r\n").await;
+            assert!(post.starts_with("HTTP/1.1 404"), "{post}");
+            let huge = raw_request(port, &vec![b'A'; 64 * 1024]).await;
+            assert!(huge.is_empty(), "{huge}");
+            assert_eq!(sso.approve_in_browser(&url).await.unwrap(), 200);
+            drop(idle);
+        })
+        .await;
+
+    result.unwrap();
+    assert_eq!(f.sso.counts().code_tokens, 1);
+    assert_eq!(f.sso.start_urls(), [START_URL]);
+    let (status, body) = f.caller_identity().await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    f.assert_nothing_leaked(&logs, &[&body]);
+}
+
+#[tokio::test]
+async fn a_browser_login_stops_listening_once_done() {
+    let f = Fixture::new(MockSsoConfig::default(), SsoOptions::default()).await;
+    let sso = &f.sso;
+    let mut port = 0;
+
+    f.login_with(Flow::browser(), async |url| {
+        port = callback_port(&url);
+        assert_eq!(sso.approve_in_browser(&url).await.unwrap(), 200);
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn a_login_refused_in_the_browser_stores_nothing() {
+    let f = Fixture::new(
+        MockSsoConfig {
+            deny_authorization: true,
+            ..MockSsoConfig::default()
+        },
+        SsoOptions::default(),
+    )
+    .await;
+    let sso = &f.sso;
+
+    let result = f
+        .login_with(Flow::browser(), async |url| {
+            assert_eq!(sso.approve_in_browser(&url).await.unwrap(), 200);
+        })
+        .await;
+
+    assert!(
+        matches!(&result, Err(LoginError::Denied(reason)) if reason == "access_denied"),
+        "{result:?}"
+    );
+    assert_eq!(f.stored(), None);
+    assert_eq!(f.sso.counts().code_tokens, 0);
+}
+
+#[tokio::test]
+async fn a_browser_login_nobody_approves_times_out_and_stores_nothing() {
+    let f = Fixture::new(MockSsoConfig::default(), SsoOptions::default()).await;
+
+    let result = f
+        .login_with(
+            Flow::Browser {
+                timeout: Duration::from_millis(300),
+            },
+            async |_| {},
+        )
+        .await;
+
+    assert!(matches!(result, Err(LoginError::TimedOut)), "{result:?}");
+    assert_eq!(f.stored(), None);
+}
+
+#[tokio::test]
+async fn the_device_code_flow_still_logs_in_for_a_browser_elsewhere() {
+    let logs = capture_logs();
+    let f = Fixture::new(MockSsoConfig::default(), SsoOptions::default()).await;
+    let sso = &f.sso;
+
+    credshim_aws::sso::login(
+        &f.session,
+        f.transport.as_ref(),
+        f.store.as_ref(),
+        Flow::DeviceCode,
+        |prompt| sso.approve(prompt.user_code.as_deref().unwrap()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(f.sso.counts().device_tokens, 1);
+    assert_eq!(f.sso.counts().code_tokens, 0);
+    let (status, body) = f.caller_identity().await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    f.assert_nothing_leaked(&logs, &[&body]);
 }

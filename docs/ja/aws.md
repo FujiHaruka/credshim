@@ -60,7 +60,7 @@ SSO でも、クライアントが持つのはダミーの静的アクセスキ�
 $bin preset aws-sso | sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/null
 sudo -u $user vi /var/lib/credshim/config.toml   # start_url、region、アカウント、ロールを書き換える
 sudo $bin service reload
-credshim-svc aws sso login sso   # 「sso」はセッション名。表示された URL をブラウザで開き、コードを確かめて承認する
+credshim-svc aws sso login sso   # 「sso」はセッション名。表示された URL をこのコンピューターのブラウザで開き、アクセスを許可する
 
 # 開発ユーザーのセッション
 . /etc/credshim/env
@@ -91,4 +91,6 @@ regions = ["ap-northeast-1"]
 - 動いているプロキシは、次の AWS のリクエストで新しいログインを読み込むので、ログインし直したあとの再起動は要らない。
 - `logout` のあとも、プロキシがすでに持っているロールの認証情報は、取り直しの時期まで使われる。
 - `login` は端末から実行する（標準入力が端末でなければ拒否する）。`sudo` は端末をそのまま渡すので、`credshim-svc` でも動く。
-- 覚えのないデバイスコードの承認を求められたら承認しない。エージェントが自分でログインを始めて、人間に承認させようとしている可能性がある。
+- `login` は既定で、同じコンピューターのブラウザで開く URL を表示する。アクセスを許可するとブラウザが `http://127.0.0.1:<port>/oauth/callback` に戻り、`login` はそれを最大10分待つ。推奨構成では、URL は管理者のセッションのブラウザで開く。
+- ブラウザが `login` を実行しているコンピューターに戻れないとき（管理者のセッションが別のコンピューターからの SSH ログインのときなど）は、`--use-device-code` を付ける。`login` は、スマートフォンなどどこのブラウザでも承認できる URL とコードを表示する。
+- `login` が表示した URL から自分で開いたページだけを許可する。エージェントは自分でログインを始めて、見た目が同じページを開発ユーザーのブラウザに開ける。`--use-device-code` では、覚えのないデバイスコードを承認しない。[脅威モデル](threat-model.md#aws-認証情報) を参照。

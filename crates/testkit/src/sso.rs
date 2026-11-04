@@ -8,11 +8,14 @@ use axum::body::Bytes;
 use axum::extract::{Request, State};
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use http_body_util::BodyExt;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
@@ -21,7 +24,10 @@ use crate::aws::{AwsKeys, Keyring, KeyringEntry};
 use crate::ca::LeafCert;
 
 const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
+const AUTHORIZATION_CODE_GRANT: &str = "authorization_code";
 const REFRESH_TOKEN_GRANT: &str = "refresh_token";
+const REDIRECT_URI_WITHOUT_PORT: &str = "http://127.0.0.1/oauth/callback";
+const SCOPE: &str = "sso:account:access";
 
 #[derive(Clone, Debug)]
 pub struct MockSsoConfig {
@@ -30,6 +36,7 @@ pub struct MockSsoConfig {
     pub issue_refresh_tokens: bool,
     pub interval_secs: u64,
     pub device_expires_in_secs: u64,
+    pub deny_authorization: bool,
 }
 
 impl Default for MockSsoConfig {
@@ -40,6 +47,7 @@ impl Default for MockSsoConfig {
             issue_refresh_tokens: true,
             interval_secs: 1,
             device_expires_in_secs: 600,
+            deny_authorization: false,
         }
     }
 }
@@ -48,6 +56,7 @@ impl Default for MockSsoConfig {
 pub struct SsoCounts {
     pub registrations: usize,
     pub device_tokens: usize,
+    pub code_tokens: usize,
     pub refreshes: usize,
     pub role_credentials: usize,
     pub role_requests: usize,
@@ -61,6 +70,19 @@ struct Device {
     refreshable: bool,
 }
 
+struct Registration {
+    secret: String,
+    refreshable: bool,
+    browser: Option<String>,
+}
+
+struct AuthCode {
+    client_id: String,
+    redirect_uri: String,
+    challenge: String,
+    refreshable: bool,
+}
+
 struct AccessToken {
     expires_at: SystemTime,
     revoked: bool,
@@ -68,8 +90,9 @@ struct AccessToken {
 
 #[derive(Default)]
 struct SsoState {
-    clients: HashMap<String, (String, bool)>,
+    clients: HashMap<String, Registration>,
     devices: HashMap<String, Device>,
+    codes: HashMap<String, AuthCode>,
     access_tokens: HashMap<String, AccessToken>,
     refresh_tokens: HashMap<String, String>,
     start_urls: Vec<String>,
@@ -144,6 +167,90 @@ impl MockSso {
                 device.approved = true;
             }
         }
+    }
+
+    pub fn authorize(&self, url: &str) -> Result<String, String> {
+        let deny = self.shared.config.lock().unwrap().deny_authorization;
+        let (base, query) = url.split_once('?').ok_or("no query")?;
+        let host = base
+            .strip_prefix("https://")
+            .and_then(|rest| rest.strip_suffix("/authorize"))
+            .ok_or("not an authorize URL")?;
+        if !host.starts_with("oidc.") || !host.ends_with(".amazonaws.com") {
+            return Err(format!("authorize URL on {host}"));
+        }
+        let params: HashMap<String, String> = form_urlencoded::parse(query.as_bytes())
+            .into_owned()
+            .collect();
+        let param = |name: &str| params.get(name).cloned().ok_or(format!("no {name}"));
+        let expect = |name: &str, value: &str| {
+            (param(name)? == value)
+                .then_some(())
+                .ok_or(format!("{name} is not {value}"))
+        };
+        expect("response_type", "code")?;
+        expect("code_challenge_method", "S256")?;
+        expect("scopes", SCOPE)?;
+        let state = param("state")?;
+        let challenge = param("code_challenge")?;
+        let client_id = param("client_id")?;
+        let redirect_uri = param("redirect_uri")?;
+        let port = redirect_uri
+            .strip_prefix("http://127.0.0.1:")
+            .and_then(|rest| rest.strip_suffix("/oauth/callback"))
+            .ok_or("redirect_uri is not a loopback callback")?;
+        port.parse::<u16>().map_err(|_| "redirect_uri port")?;
+        let mut state_guard = self.shared.state.lock().unwrap();
+        let registration = state_guard
+            .clients
+            .get(&client_id)
+            .ok_or("unknown client")?;
+        let issuer = registration
+            .browser
+            .clone()
+            .ok_or("client is not registered for the authorization code grant")?;
+        let refreshable = registration.refreshable;
+        state_guard.start_urls.push(issuer);
+        let mut callback = form_urlencoded::Serializer::new(String::new());
+        let callback = if deny {
+            callback
+                .append_pair("error", "access_denied")
+                .append_pair("state", &state)
+                .finish()
+        } else {
+            let code = random("auth-code-");
+            state_guard.secrets.push(code.clone());
+            state_guard.codes.insert(
+                code.clone(),
+                AuthCode {
+                    client_id,
+                    redirect_uri: redirect_uri.clone(),
+                    challenge,
+                    refreshable,
+                },
+            );
+            callback
+                .append_pair("code", &code)
+                .append_pair("state", &state)
+                .finish()
+        };
+        Ok(format!("{redirect_uri}?{callback}"))
+    }
+
+    pub fn approve_in_browser(&self, url: &str) -> JoinHandle<u16> {
+        let callback = self.authorize(url).expect("a valid authorize URL");
+        tokio::spawn(async move {
+            reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .get(callback)
+                .send()
+                .await
+                .expect("the login listens for the browser")
+                .status()
+                .as_u16()
+        })
     }
 
     pub fn expire_access_tokens(&self) {
@@ -262,17 +369,35 @@ fn register(shared: &Shared, input: &Value) -> Response {
     if input["clientType"] != "public" || input["clientName"].as_str().is_none() {
         return oidc_error("invalid_client_metadata");
     }
-    let refreshable = input["grantTypes"]
+    let grants: Vec<&str> = input["grantTypes"]
         .as_array()
-        .is_some_and(|grants| grants.iter().any(|grant| grant == REFRESH_TOKEN_GRANT));
+        .map(|grants| grants.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let refreshable = grants.contains(&REFRESH_TOKEN_GRANT);
+    let browser = if grants.contains(&AUTHORIZATION_CODE_GRANT) {
+        let redirect_ok = input["redirectUris"]
+            .as_array()
+            .is_some_and(|uris| uris.iter().any(|uri| uri == REDIRECT_URI_WITHOUT_PORT));
+        match input["issuerUrl"].as_str() {
+            Some(issuer) if redirect_ok => Some(issuer.to_string()),
+            _ => return oidc_error("invalid_redirect_uri"),
+        }
+    } else {
+        None
+    };
     let id = random("client-");
     let secret = random("client-secret-");
     let mut state = shared.state.lock().unwrap();
     state.counts.registrations += 1;
     state.secrets.push(secret.clone());
-    state
-        .clients
-        .insert(id.clone(), (secret.clone(), refreshable));
+    state.clients.insert(
+        id.clone(),
+        Registration {
+            secret: secret.clone(),
+            refreshable,
+            browser,
+        },
+    );
     ok(json!({
         "clientId": id,
         "clientSecret": secret,
@@ -283,8 +408,9 @@ fn register(shared: &Shared, input: &Value) -> Response {
 
 fn client_ok(state: &SsoState, input: &Value) -> Option<bool> {
     let id = input["clientId"].as_str()?;
-    let (secret, refreshable) = state.clients.get(id)?;
-    (input["clientSecret"].as_str() == Some(secret.as_str())).then_some(*refreshable)
+    let registration = state.clients.get(id)?;
+    (input["clientSecret"].as_str() == Some(registration.secret.as_str()))
+        .then_some(registration.refreshable)
 }
 
 fn device_authorization(shared: &Shared, host: &str, input: &Value) -> Response {
@@ -342,6 +468,22 @@ fn token(shared: &Shared, input: &Value) -> Response {
                     refreshable
                 }
             }
+        }
+        Some(AUTHORIZATION_CODE_GRANT) => {
+            let code = input["code"].as_str().unwrap_or_default();
+            let Some(issued) = state.codes.remove(code) else {
+                return oidc_error("invalid_grant");
+            };
+            let verifier = input["codeVerifier"].as_str().unwrap_or_default();
+            let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+            if input["clientId"].as_str() != Some(issued.client_id.as_str())
+                || input["redirectUri"].as_str() != Some(issued.redirect_uri.as_str())
+                || challenge != issued.challenge
+            {
+                return oidc_error("invalid_grant");
+            }
+            state.counts.code_tokens += 1;
+            issued.refreshable
         }
         Some(REFRESH_TOKEN_GRANT) => {
             state.counts.refresh_attempts += 1;
