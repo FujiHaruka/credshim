@@ -2,8 +2,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration as StdDuration;
 
+use moka::ops::compute::Op;
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
     Issuer, KeyPair, KeyUsagePurpose,
@@ -19,7 +19,8 @@ pub const BUNDLE_FILE: &str = "bundle.pem";
 const CA_VALIDITY: Duration = Duration::days(5 * 365);
 const LEAF_VALIDITY: Duration = Duration::hours(24);
 const LEAF_BACKDATE: Duration = Duration::hours(1);
-const LEAF_CACHE_TTL: StdDuration = StdDuration::from_secs(12 * 60 * 60);
+const LEAF_RENEW_BEFORE: Duration = Duration::hours(12);
+const _: () = assert!(LEAF_RENEW_BEFORE.whole_seconds() < LEAF_VALIDITY.whole_seconds());
 const LEAF_CACHE_CAPACITY: u64 = 1024;
 
 #[derive(Debug, thiserror::Error)]
@@ -37,7 +38,20 @@ pub enum CaError {
 pub struct CertificateAuthority {
     issuer: Issuer<'static, KeyPair>,
     cert_der: CertificateDer<'static>,
-    leaves: moka::sync::Cache<String, Arc<ServerConfig>>,
+    leaves: moka::sync::Cache<String, Leaf>,
+}
+
+#[derive(Clone)]
+struct Leaf {
+    config: Arc<ServerConfig>,
+    not_before: OffsetDateTime,
+    not_after: OffsetDateTime,
+}
+
+impl Leaf {
+    fn usable_at(&self, now: OffsetDateTime) -> bool {
+        self.not_before <= now && now + LEAF_RENEW_BEFORE < self.not_after
+    }
 }
 
 impl std::fmt::Debug for CertificateAuthority {
@@ -96,7 +110,6 @@ impl CertificateAuthority {
             cert_der,
             leaves: moka::sync::Cache::builder()
                 .max_capacity(LEAF_CACHE_CAPACITY)
-                .time_to_live(LEAF_CACHE_TTL)
                 .build(),
         })
     }
@@ -106,24 +119,46 @@ impl CertificateAuthority {
     }
 
     pub fn server_config(&self, host: &str) -> Result<Arc<ServerConfig>, CaError> {
+        self.server_config_at(host, OffsetDateTime::now_utc())
+    }
+
+    pub fn server_config_at(
+        &self,
+        host: &str,
+        now: OffsetDateTime,
+    ) -> Result<Arc<ServerConfig>, CaError> {
         let host = host.to_ascii_lowercase();
+        if let Some(leaf) = self.leaves.get(&host).filter(|leaf| leaf.usable_at(now)) {
+            return Ok(leaf.config);
+        }
         self.leaves
-            .try_get_with_by_ref(&host, || self.issue(&host))
-            .map_err(|err| CaError::Issue {
+            .entry_by_ref(&host)
+            .and_try_compute_with(|cached| match cached {
+                Some(entry) if entry.value().usable_at(now) => Ok(Op::Nop),
+                _ => self.issue(&host, now).map(Op::Put),
+            })
+            .and_then(|result| {
+                result
+                    .into_entry()
+                    .map(|entry| entry.into_value().config)
+                    .ok_or_else(|| "the certificate cache returned no entry".to_string())
+            })
+            .map_err(|reason| CaError::Issue {
                 host: host.clone(),
-                reason: err.to_string(),
+                reason,
             })
     }
 
-    fn issue(&self, host: &str) -> Result<Arc<ServerConfig>, String> {
+    fn issue(&self, host: &str, now: OffsetDateTime) -> Result<Leaf, String> {
         let mut params =
             CertificateParams::new(vec![host.to_string()]).map_err(|e| e.to_string())?;
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, host);
         params.distinguished_name = dn;
-        let now = OffsetDateTime::now_utc();
-        params.not_before = now - LEAF_BACKDATE;
-        params.not_after = now + LEAF_VALIDITY;
+        let not_before = now - LEAF_BACKDATE;
+        let not_after = now + LEAF_VALIDITY;
+        params.not_before = not_before;
+        params.not_after = not_after;
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         params.use_authority_key_identifier_extension = true;
@@ -142,7 +177,11 @@ impl CertificateAuthority {
         .with_single_cert(vec![cert.der().clone()], key_der)
         .map_err(|e| e.to_string())?;
         config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-        Ok(Arc::new(config))
+        Ok(Leaf {
+            config: Arc::new(config),
+            not_before,
+            not_after,
+        })
     }
 }
 
