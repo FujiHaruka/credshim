@@ -2,7 +2,6 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration as StdDuration;
 
 use moka::ops::compute::Op;
 use rcgen::{
@@ -20,8 +19,8 @@ pub const BUNDLE_FILE: &str = "bundle.pem";
 const CA_VALIDITY: Duration = Duration::days(5 * 365);
 const LEAF_VALIDITY: Duration = Duration::hours(24);
 const LEAF_BACKDATE: Duration = Duration::hours(1);
-const LEAF_CACHE_TTL: StdDuration = StdDuration::from_secs(12 * 60 * 60);
 const LEAF_RENEW_BEFORE: Duration = Duration::hours(12);
+const _: () = assert!(LEAF_RENEW_BEFORE.whole_seconds() < LEAF_VALIDITY.whole_seconds());
 const LEAF_CACHE_CAPACITY: u64 = 1024;
 
 #[derive(Debug, thiserror::Error)]
@@ -111,7 +110,6 @@ impl CertificateAuthority {
             cert_der,
             leaves: moka::sync::Cache::builder()
                 .max_capacity(LEAF_CACHE_CAPACITY)
-                .time_to_live(LEAF_CACHE_TTL)
                 .build(),
         })
     }
@@ -130,6 +128,9 @@ impl CertificateAuthority {
         now: OffsetDateTime,
     ) -> Result<Arc<ServerConfig>, CaError> {
         let host = host.to_ascii_lowercase();
+        if let Some(leaf) = self.leaves.get(&host).filter(|leaf| leaf.usable_at(now)) {
+            return Ok(leaf.config);
+        }
         self.leaves
             .entry_by_ref(&host)
             .and_try_compute_with(|cached| match cached {
