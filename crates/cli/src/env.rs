@@ -1,7 +1,7 @@
 use std::fmt::Write;
 use std::path::Path;
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use credshim_core::BaseUrls;
 
 use crate::config::Config;
@@ -43,6 +43,7 @@ pub fn render(config: &Config, ca: &CaFiles<'_>) -> anyhow::Result<String> {
         ("NODE_EXTRA_CA_CERTS", cert),
         ("NODE_USE_ENV_PROXY", "1"),
         ("AWS_CA_BUNDLE", bundle),
+        ("NIX_SSL_CERT_FILE", bundle),
     ];
     if let Some(socket) = ssh_socket {
         vars.push(("SSH_AUTH_SOCK", socket));
@@ -51,6 +52,14 @@ pub fn render(config: &Config, ca: &CaFiles<'_>) -> anyhow::Result<String> {
     for (name, value) in vars {
         writeln!(out, "export {name}={}", quote(value))?;
     }
+    if bundle.contains(['\n', '\r']) {
+        bail!("the CA bundle path {bundle:?} contains a line break");
+    }
+    let nix_line = quote(&format!("ssl-cert-file = {bundle}"));
+    writeln!(
+        out,
+        "case ${{NIX_CONFIG-}} in *{nix_line}*) ;; *) export NIX_CONFIG={nix_line}\"${{NIX_CONFIG:+\n$NIX_CONFIG}}\" ;; esac"
+    )?;
     Ok(out)
 }
 

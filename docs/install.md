@@ -118,6 +118,8 @@ You can put `. /etc/credshim/env` in your shell config (`~/.zshrc` or similar). 
 | `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `AWS_CA_BUNDLE` | The combined bundle (one file with the development CA and the system root certificates) |
 | `NODE_EXTRA_CA_CERTS` | The development CA |
 | `NODE_USE_ENV_PROXY=1` | Makes Node's built-in fetch use `HTTPS_PROXY` |
+| `NIX_SSL_CERT_FILE` | The combined bundle, for Nix and the tools Nixpkgs builds (they read it before `SSL_CERT_FILE`, and Nix's shell setup sets it to the system roots) |
+| `NIX_CONFIG` | Adds `ssl-cert-file = ` the combined bundle as its first line and keeps what was already in it, so Nix uses the bundle even when `nix.conf` sets `ssl-cert-file` (as Determinate Nix does). An `ssl-cert-file` you set in `NIX_CONFIG` yourself still wins, and loading the file again does not add the line twice |
 | `SSH_AUTH_SOCK` | CredShim's SSH agent (only when an SSH key is registered) |
 
 ### Giving the dummy keys to a project

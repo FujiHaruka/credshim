@@ -30,7 +30,7 @@
 
 ### `env`
 
-アプリに要る環境変数が無いか、違うファイルを指している。`. /etc/credshim/env`（お試し構成では `eval "$(credshim env)"`）で読み込む。`SSL_CERT_FILE` と `AWS_CA_BUNDLE` は信頼ストアを置き換えるので、CA 単体ではなく結合バンドルを指す必要がある。
+アプリに要る環境変数が無いか、違うファイルを指している。`. /etc/credshim/env`（お試し構成では `eval "$(credshim env)"`）で読み込む。`SSL_CERT_FILE`・`AWS_CA_BUNDLE`・`NIX_SSL_CERT_FILE`・`NIX_CONFIG` の `ssl-cert-file` の行は信頼ストアを置き換えるので、CA 単体ではなく結合バンドルを指す必要がある。
 
 ### `curl`
 

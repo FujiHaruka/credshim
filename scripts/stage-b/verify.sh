@@ -102,6 +102,9 @@ check "shell environment file exports none of the dummy keys" keys_absent_from_e
 env_value() { sed -n "s/^export $1='\(.*\)'\$/\1/p" "$public/env"; }
 check "shell environment points AWS_CA_BUNDLE at the readable trust bundle" \
   bash -c "[[ -r '$(env_value AWS_CA_BUNDLE)' && '$(env_value AWS_CA_BUNDLE)' == '$public/bundle.pem' ]]"
+check "shell environment points NIX_SSL_CERT_FILE at the trust bundle" test "$(env_value NIX_SSL_CERT_FILE)" = "$public/bundle.pem"
+nix_config_from_env() { env -u NIX_CONFIG sh -c ". '$public/env' && printf %s \"\$NIX_CONFIG\""; }
+check "shell environment sets Nix's ssl-cert-file to the trust bundle" test "$(nix_config_from_env)" = "ssl-cert-file = $public/bundle.pem"
 if grep -q '^export SSH_AUTH_SOCK=' "$public/env"; then
   check "shell environment points SSH_AUTH_SOCK at the agent socket" test "$(env_value SSH_AUTH_SOCK)" = "$agent/agent.sock"
 fi
