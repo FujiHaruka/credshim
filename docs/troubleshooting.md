@@ -30,7 +30,7 @@ doctor could not get an answer from `credshim.test` through the proxy, or the ce
 
 ### `env`
 
-An environment variable that apps need is missing or points at the wrong file. Load the variables with `. /etc/credshim/env` (in the trial setup, `eval "$(credshim env)"`). `SSL_CERT_FILE` and `AWS_CA_BUNDLE` must point at the combined bundle, not the CA alone, because they replace the trust store.
+An environment variable that apps need is missing or points at the wrong file. Load the variables with `. /etc/credshim/env` (in the trial setup, `eval "$(credshim env)"`). `SSL_CERT_FILE`, `AWS_CA_BUNDLE`, `NIX_SSL_CERT_FILE` and the `ssl-cert-file` line of `NIX_CONFIG` must point at the combined bundle, not the CA alone, because they replace the trust store.
 
 ### `curl`
 

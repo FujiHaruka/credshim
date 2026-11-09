@@ -71,6 +71,7 @@ impl Home {
                 || ["SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"]
                     .contains(&name.as_str())
                 || name.starts_with("NODE_")
+                || name.starts_with("NIX_")
                 || name.starts_with("AWS_")
                 || name.starts_with("GH_")
                 || name.starts_with("GITHUB_")
@@ -180,6 +181,10 @@ async fn env_prints_proxy_and_ca_variables_and_keys_prints_dummies_for_a_dotenv(
             ca.join("ca.pem").display()
         ),
         "export NODE_USE_ENV_PROXY='1'".to_string(),
+        format!(
+            "export NIX_SSL_CERT_FILE='{}'",
+            ca.join("bundle.pem").display()
+        ),
     ] {
         assert!(
             stdout.lines().any(|l| l == line),
@@ -200,6 +205,59 @@ async fn env_prints_proxy_and_ca_variables_and_keys_prints_dummies_for_a_dotenv(
         )
     );
     assert!(String::from_utf8_lossy(&keys.stderr).is_empty());
+}
+
+#[tokio::test]
+async fn env_puts_the_bundle_first_in_nix_config_and_keeps_what_was_there_once() {
+    let home = Home::new("").await;
+    let bin = home.bin_dir(&[]);
+    let reload = r#"eval "$("$CREDSHIM" env --config "$CONFIG")""#;
+
+    let shell = home
+        .fresh_shell(
+            &bin,
+            &format!(
+                "printf '%s|' \"$NIX_CONFIG\" && NIX_CONFIG='experimental-features = nix-command' && {reload} && {reload} && printf '%s|' \"$NIX_CONFIG\" && /bin/sh -c 'printf %s \"$NIX_CONFIG\"'"
+            ),
+        )
+        .await;
+
+    assert!(shell.status.success(), "{}", text(&shell));
+    let line = format!(
+        "ssl-cert-file = {}",
+        home.path().join("ca").join("bundle.pem").display()
+    );
+    let both = format!("{line}\nexperimental-features = nix-command");
+    assert_eq!(
+        String::from_utf8(shell.stdout).unwrap(),
+        format!("{line}|{both}|{both}")
+    );
+}
+
+#[tokio::test]
+async fn env_refuses_a_bundle_path_that_would_add_lines_to_nix_config() {
+    let home = Home::new("").await;
+    let bundle = home.path().join("bundle.pem\npost-build-hook = /tmp/x");
+
+    let env = output(
+        home.path(),
+        &[
+            "env",
+            "--config",
+            home.config(),
+            "--bundle",
+            bundle.to_str().unwrap(),
+        ],
+    )
+    .await;
+
+    assert!(!env.status.success());
+    assert!(
+        text(&env).contains("contains a line break"),
+        "{}",
+        text(&env)
+    );
+    assert!(env.stdout.is_empty());
 }
 
 #[tokio::test]

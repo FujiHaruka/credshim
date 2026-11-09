@@ -118,6 +118,8 @@ SDK もそのまま動く。
 | `SSL_CERT_FILE`・`REQUESTS_CA_BUNDLE`・`CURL_CA_BUNDLE`・`AWS_CA_BUNDLE` | 結合バンドル（開発用の CA とシステムのルート証明書をまとめたファイル） |
 | `NODE_EXTRA_CA_CERTS` | 開発用の CA |
 | `NODE_USE_ENV_PROXY=1` | Node の組み込みの fetch に `HTTPS_PROXY` を使わせる |
+| `NIX_SSL_CERT_FILE` | 結合バンドル。Nix と Nixpkgs でビルドしたツール向け（これらは `SSL_CERT_FILE` より先にこれを読み、Nix のシェル設定はこれをシステムのルート証明書に設定する） |
+| `NIX_CONFIG` | 先頭の行に結合バンドルを指す `ssl-cert-file = ` を足し、もとの中身は残す。`nix.conf` が `ssl-cert-file` を設定していても（Determinate Nix はそうする）Nix はバンドルを使う。自分で `NIX_CONFIG` に書いた `ssl-cert-file` はそのまま優先され、ファイルを読み直しても行は増えない |
 | `SSH_AUTH_SOCK` | CredShim の SSH エージェント（SSH の鍵を登録したときだけ） |
 
 ### ダミーのキーをプロジェクトに渡す
