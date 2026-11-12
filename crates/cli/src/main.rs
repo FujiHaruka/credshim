@@ -1,3 +1,4 @@
+mod browser;
 mod config;
 mod docs;
 mod doctor;
@@ -945,6 +946,11 @@ async fn aws_sso_login(
             Some(code) => writeln!(
                 std::io::stderr(),
                 "Open {url} in a browser and confirm the code {code}.\nWaiting up to {minutes} minutes for the approval...",
+                url = prompt.url,
+            ),
+            None if browser::open(&prompt.url) => writeln!(
+                std::io::stderr(),
+                "Opening this URL in a browser on this computer. If no page opens, open it yourself, then allow the access:\n\n{url}\n\nAllow only the page this login opened or you opened from this URL. If the browser is on another computer, stop and rerun with --use-device-code.\nWaiting up to {minutes} minutes for the approval...",
                 url = prompt.url,
             ),
             None => writeln!(

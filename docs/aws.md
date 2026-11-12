@@ -60,7 +60,7 @@ With SSO too, clients hold only a dummy static access key. A human logs in with 
 $bin preset aws-sso | sudo -u $user tee -a /var/lib/credshim/config.toml >/dev/null
 sudo -u $user vi /var/lib/credshim/config.toml   # change start_url, region, account, and role
 sudo $bin service reload
-credshim-svc aws sso login sso   # "sso" is the session name. Open the URL shown in a browser on this computer and allow the access
+credshim-svc aws sso login sso   # "sso" is the session name. Allow the access on the page that opens in a browser on this computer
 
 # developer session
 . /etc/credshim/env
@@ -91,6 +91,6 @@ regions = ["ap-northeast-1"]
 - A running proxy reads the new login on the next AWS request, so you do not need to restart after you log in again.
 - After `logout`, role credentials that the proxy already holds are still used until they are due to be fetched again.
 - Run `login` from a terminal (it refuses to run if standard input is not a terminal). `sudo` passes the terminal through, so it also works with `credshim-svc`.
-- By default `login` prints a URL to open in a browser on the same computer. After you allow the access, the browser comes back to `http://127.0.0.1:<port>/oauth/callback`, where `login` waits for up to 10 minutes. In the recommended setup, open the URL in the admin session's browser.
+- By default `login` prints a URL to open in a browser on the same computer. On macOS it also opens the URL in the default browser of the session that runs it; if no page opens, open the printed URL yourself. After you allow the access, the browser comes back to `http://127.0.0.1:<port>/oauth/callback`, where `login` waits for up to 10 minutes. In the recommended setup, open the URL in the admin session's browser.
 - When the browser cannot come back to the computer that runs `login` (for example, the admin session is an SSH login from another computer), add `--use-device-code`. `login` then shows a URL and a code that you can approve in a browser anywhere, such as on a phone.
-- Allow only the page you opened yourself from the URL that `login` printed. An agent can start a login of its own and open a page that looks the same in the developer user's browser. With `--use-device-code`, do not approve a device code you do not recognize. See the [threat model](threat-model.md#aws-credentials).
+- Allow only a page that opened in the admin session's browser right after you ran `login` there, or that you opened yourself from the URL that `login` printed. An agent can start a login of its own and open a page that looks the same in the developer user's browser, so never allow a login page that appears in the developer user's browser. With `--use-device-code`, do not approve a device code you do not recognize. See the [threat model](threat-model.md#aws-credentials).
