@@ -19,6 +19,7 @@ static INJECTOR: LazyLock<Injector> = LazyLock::new(|| {
         limits: Default::default(),
         base_url_prefix: None,
         env: None,
+        extra_hosts: Vec::new(),
         secret: "real".into(),
         dummy: dummy.into(),
         inject,
