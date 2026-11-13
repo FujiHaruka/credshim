@@ -158,6 +158,7 @@ fn base_url_spec() -> RuleSpec {
         limits: Default::default(),
         base_url_prefix: Some(BASE_URL_PREFIX.into()),
         env: None,
+        extra_hosts: Vec::new(),
         secret: "auth".into(),
         dummy: "credshim-oauth-base-url-dummy-0123456789".into(),
         inject: InjectSpec {

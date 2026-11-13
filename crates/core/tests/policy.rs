@@ -368,3 +368,51 @@ fn policy_without_lists_allows_everything() {
         &HeaderMap::new()
     ));
 }
+
+#[test]
+fn extra_hosts_take_the_real_key_under_the_same_allow_lists() {
+    let injector = injector(
+        r#"extra_hosts = ["uploads.openai.com"]
+allow_paths = ["/v1/files"]"#,
+    );
+    let send = |host: &str, path: &str| {
+        let (mut parts, ()) = Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header("authorization", format!("Bearer {DUMMY}"))
+            .body(())
+            .unwrap()
+            .into_parts();
+        let verdict = injector
+            .apply(Destination { host, port: 443 }, &mut parts)
+            .unwrap();
+        (verdict, parts.headers["authorization"].clone())
+    };
+
+    for host in ["api.openai.com", "uploads.openai.com"] {
+        assert_eq!(
+            send(host, "/v1/files"),
+            (
+                Verdict::Injected(vec!["openai".into()]),
+                "Bearer real-openai-key".parse().unwrap()
+            ),
+            "{host}"
+        );
+        assert_eq!(
+            send(host, "/v1/organization").0,
+            Verdict::NotAllowed("openai".into()),
+            "{host}"
+        );
+    }
+    assert_eq!(
+        send("uploads.example.test", "/v1/files").0,
+        Verdict::Denied("openai".into())
+    );
+}
+
+#[test]
+fn every_extra_host_must_be_a_dns_name() {
+    let err = RuleSet::new(vec![spec(r#"extra_hosts = ["Uploads.OpenAI.com:443"]"#)]).unwrap_err();
+
+    assert!(matches!(err, RuleError::InvalidHost { .. }), "{err:?}");
+}

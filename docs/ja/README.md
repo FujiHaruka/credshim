@@ -96,7 +96,7 @@ curl https://api.openai.com/v1/chat/completions \
 | `openai` | `api.openai.com` | `OPENAI_API_KEY` |
 | `anthropic` | `api.anthropic.com` | `ANTHROPIC_API_KEY` |
 | `gemini` | `generativelanguage.googleapis.com` | `GEMINI_API_KEY` |
-| [`github`](github.md) | `api.github.com`（`gh` CLI） | `GH_TOKEN` |
+| [`github`](github.md) | `api.github.com` と `uploads.github.com`（`gh` CLI） | `GH_TOKEN` |
 | [`github-ssh`](ssh.md) | `github.com`（SSH） | |
 | [`aws`](aws.md) | AWS の各サービス | `AWS_ACCESS_KEY_ID` など |
 | [`aws-sso`](aws.md#aws-iam-identity-centersso) | AWS の各サービス | `AWS_ACCESS_KEY_ID` など |

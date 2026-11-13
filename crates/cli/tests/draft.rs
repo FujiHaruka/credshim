@@ -118,12 +118,25 @@ async fn the_github_preset_sits_beside_github_ssh_and_lets_gh_change_pull_reques
     let stdout = text(&checked.stdout);
     assert!(
         stdout.contains(
-            "  rule \"github\": secret github -> https://api.github.com:443  (github preset host)\n      methods: GET, POST, PATCH, PUT, DELETE; paths: /graphql, /repos,"
+            "  rule \"github\": secret github -> https://api.github.com:443  (github preset host)\n      also -> https://uploads.github.com:443  (github preset host)\n      methods: GET, POST, PATCH, PUT, DELETE; paths: /graphql, /repos,"
         ),
         "{stdout}"
     );
     assert!(stdout.contains("(github-ssh preset host keys)"), "{stdout}");
     assert!(text(&api.stdout).contains("env = \"GH_TOKEN\""));
+    assert!(
+        stdout.contains("/gitignore, /user-attachments;"),
+        "{stdout}"
+    );
+    let dummy = text(&api.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("dummy = \""))
+        .and_then(|rest| rest.strip_suffix('"'))
+        .unwrap()
+        .to_string();
+    let body = dummy.strip_prefix("github_pat_").unwrap();
+    assert!(body.starts_with("credshim_"), "{dummy}");
+    assert!(body.len() < 82, "{dummy}");
 }
 
 #[tokio::test]

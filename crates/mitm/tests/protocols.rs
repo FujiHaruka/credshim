@@ -63,6 +63,7 @@ impl Setup {
             limits: Default::default(),
             base_url_prefix: None,
             env: None,
+            extra_hosts: Vec::new(),
             secret: "api".into(),
             dummy: DUMMY.into(),
             inject: InjectSpec {

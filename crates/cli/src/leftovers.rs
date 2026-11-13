@@ -301,6 +301,9 @@ fn unquoted(value: &str) -> &str {
 }
 
 fn is_real_github_token(value: &str) -> bool {
+    if value.starts_with(crate::preset::GITHUB_DUMMY_PREFIX) {
+        return false;
+    }
     GITHUB_TOKEN_PREFIXES
         .iter()
         .any(|prefix| value.starts_with(prefix))
@@ -365,6 +368,9 @@ mod tests {
             "0123456789abcdef0123456789abcdef01234567"
         ));
         assert!(!is_real_github_token("credshim-github-0123456789"));
+        assert!(!is_real_github_token(
+            "github_pat_credshim_0123456789abcdefghijABCDEFGHIJ0123456789"
+        ));
     }
 
     #[test]

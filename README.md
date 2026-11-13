@@ -96,7 +96,7 @@ The steps are in [docs/install.md](docs/install.md). A coding agent can do most 
 | `openai` | `api.openai.com` | `OPENAI_API_KEY` |
 | `anthropic` | `api.anthropic.com` | `ANTHROPIC_API_KEY` |
 | `gemini` | `generativelanguage.googleapis.com` | `GEMINI_API_KEY` |
-| [`github`](docs/github.md) | `api.github.com` (the `gh` CLI) | `GH_TOKEN` |
+| [`github`](docs/github.md) | `api.github.com` and `uploads.github.com` (the `gh` CLI) | `GH_TOKEN` |
 | [`github-ssh`](docs/ssh.md) | `github.com` (SSH) | |
 | [`aws`](docs/aws.md) | AWS services | `AWS_ACCESS_KEY_ID` and others |
 | [`aws-sso`](docs/aws.md#aws-iam-identity-center-sso) | AWS services | `AWS_ACCESS_KEY_ID` and others |

@@ -32,6 +32,7 @@ sudo $bin service reload
 | --- | --- | --- |
 | `name` | yes | Rule name. Letters, digits, `.`, `_`, and `-` |
 | `host` | yes | Destination host name (lowercase, no port) |
+| `extra_hosts` | | More host names that take the same dummy, with the same `port`, `path_prefix`, `inject`, and allow lists. For a service that splits one token across hosts, such as GitHub's `api.github.com` and `uploads.github.com` |
 | `port` | | Destination port. Default 443 |
 | `path_prefix` | | Limits the destination to paths under this prefix (with `/v1`, only `/v1/...`) |
 | `secret` | yes | Name in the secret store that holds the real value. Register it with `credshim-svc secret set <name>` |
@@ -45,7 +46,7 @@ sudo $bin service reload
 
 ### How rules apply
 
-- The dummy is replaced with the real value only when the actual destination matches `host` and `port` (and `path_prefix`), and the destination's TLS certificate verifies against the OS trust store (a private CA installed in the OS is accepted). Plain HTTP is never replaced.
+- The dummy is replaced with the real value only when the actual destination matches `host` or one of `extra_hosts`, and `port` (and `path_prefix`), and the destination's TLS certificate verifies against the OS trust store (a private CA installed in the OS is accepted). Plain HTTP is never replaced.
 - If the dummy goes to another destination, the proxy returns 403 and does not replace it. Nothing is sent upstream.
 - If the destination matches but the request is outside `allow_methods` or `allow_paths`, the response is 403. If it exceeds `limits`, the response is 429. In both cases nothing is sent upstream.
 - If a response contains the real value, the proxy changes it back to the dummy before it returns the response to the client (scrub). `[scrub] enabled = false` turns this off, but leave it on.

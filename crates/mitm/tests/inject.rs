@@ -22,10 +22,11 @@ use rustls::RootCertStore;
 use secrecy::SecretString;
 
 const OPENAI: &str = "api.openai.com";
+const OPENAI_UPLOADS: &str = "uploads.openai.com";
 const ANTHROPIC: &str = "api.anthropic.com";
 const GEMINI: &str = "generativelanguage.googleapis.com";
 const BASIC: &str = "basic.example.test";
-const HOSTS: [&str; 4] = [OPENAI, ANTHROPIC, GEMINI, BASIC];
+const HOSTS: [&str; 5] = [OPENAI, OPENAI_UPLOADS, ANTHROPIC, GEMINI, BASIC];
 
 const OPENAI_DUMMY: &str = "sk-credshim-openai-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const ANTHROPIC_DUMMY: &str = "sk-ant-credshim-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
@@ -52,6 +53,7 @@ fn rule(name: &str, host: &str, dummy: &str, inject: InjectSpec) -> RuleSpec {
         limits: Default::default(),
         base_url_prefix: None,
         env: None,
+        extra_hosts: Vec::new(),
         secret: name.to_string(),
         dummy: dummy.to_string(),
         inject,
@@ -89,7 +91,10 @@ impl Fixture {
         .unwrap();
 
         let rules = RuleSet::new(vec![
-            rule("openai", OPENAI, OPENAI_DUMMY, header("authorization")),
+            RuleSpec {
+                extra_hosts: vec![OPENAI_UPLOADS.to_string()],
+                ..rule("openai", OPENAI, OPENAI_DUMMY, header("authorization"))
+            },
             rule("anthropic", ANTHROPIC, ANTHROPIC_DUMMY, header("x-api-key")),
             rule(
                 "gemini",
@@ -203,6 +208,30 @@ async fn openai_bearer_dummy_reaches_the_upstream_as_the_real_secret() {
             Some(format!("Bearer {}", fixture.secret("openai")).as_str())
         );
         assert_eq!(echo.body, "{}");
+    }
+}
+
+#[tokio::test]
+async fn a_dummy_sent_to_an_extra_host_of_its_rule_reaches_it_as_the_real_secret() {
+    for (downstream, alpn) in COMBOS {
+        let fixture = Fixture::with(downstream, alpn).await;
+
+        let response = fixture
+            .client()
+            .post(format!("https://{OPENAI_UPLOADS}/v1/files?name=a.png"))
+            .bearer_auth(OPENAI_DUMMY)
+            .body("png")
+            .send()
+            .await
+            .unwrap();
+        let echo: Echo = response.json().await.unwrap();
+
+        assert_eq!(echo.authority.as_deref(), Some(OPENAI_UPLOADS));
+        assert_eq!(
+            echo.header("authorization"),
+            Some(format!("Bearer {}", fixture.secret("openai")).as_str())
+        );
+        assert_eq!(echo.body, "png");
     }
 }
 
