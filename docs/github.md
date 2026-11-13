@@ -56,7 +56,7 @@ Then revoke the old token on GitHub: Settings → Applications → Authorized OA
 
 ## Updating an older github rule
 
-A `github` rule from an older `credshim preset github` has a dummy that starts with `credshim-github-` and no `extra_hosts`. With it, `--attach` fails: GitHub answers 401 because the upload to `uploads.github.com` keeps the dummy, and gh 2.99.0 to 2.103.1 also refuse before sending, with `unsupported authentication type`, because they attach files only with a token that starts with `gho_`, `ghp_`, or `github_pat_`. The new dummy starts with `github_pat_credshim_`, which those versions accept and which does not have the shape of a real fine-grained token.
+A `github` rule from an older `credshim preset github` has a dummy that starts with `credshim-github-` and no `extra_hosts`. With it, `--attach` fails: GitHub answers 401 because the upload to `uploads.github.com` keeps the dummy, and gh 2.99.0 to 2.103.1 also refuse before sending, with `unsupported authentication type`, because they attach files only with a token that starts with `gho_`, `ghp_`, or `github_pat_`. The new dummy starts with `github_pat_credshim_`, which those versions accept and which does not have the shape of a real fine-grained token. If you write the dummy yourself, keep that prefix: `credshim doctor` reports any other value that starts with `github_pat_` as a real token.
 
 After [updating CredShim](install.md#updating-to-a-new-release-admin-session) to a release that has `extra_hosts`, replace the rule in the admin session. The stored token stays.
 

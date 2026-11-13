@@ -128,6 +128,23 @@ async fn the_github_preset_sits_beside_github_ssh_and_lets_gh_change_pull_reques
         stdout.contains("/gitignore, /user-attachments;"),
         "{stdout}"
     );
+
+    let widened = write_draft(
+        home.path(),
+        &text(&api.stdout).replace(
+            "extra_hosts = [\"uploads.github.com\"]",
+            "extra_hosts = [\"uploads.github.com\", \"uploads.example.test\"]",
+        ),
+    );
+    let checked = output(home.path(), &["config", "check", &widened]).await;
+    assert!(checked.status.success(), "{}", text(&checked.stderr));
+    assert!(
+        text(&checked.stdout).contains(
+            "      also -> https://uploads.example.test:443  !! host not from a preset: confirm with the service\n"
+        ),
+        "{}",
+        text(&checked.stdout)
+    );
     let dummy = text(&api.stdout)
         .lines()
         .find_map(|line| line.strip_prefix("dummy = \""))

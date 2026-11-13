@@ -56,7 +56,7 @@ env -u GH_TOKEN -u GITHUB_TOKEN gh auth logout --hostname github.com
 
 ## 古い github ルールを更新する
 
-古い `credshim preset github` で作った `github` ルールは、ダミーが `credshim-github-` で始まり、`extra_hosts` が無い。このままだと `--attach` は失敗する。`uploads.github.com` へのアップロードがダミーのまま届くので GitHub が 401 を返し、さらに gh 2.99.0〜2.103.1 は、`gho_`・`ghp_`・`github_pat_` で始まるトークンでしかファイルを付けないので、送る前に `unsupported authentication type` で止まる。新しいダミーは `github_pat_credshim_` で始まり、これらの版でも通り、本物の fine-grained トークンの形にはならない。
+古い `credshim preset github` で作った `github` ルールは、ダミーが `credshim-github-` で始まり、`extra_hosts` が無い。このままだと `--attach` は失敗する。`uploads.github.com` へのアップロードがダミーのまま届くので GitHub が 401 を返し、さらに gh 2.99.0〜2.103.1 は、`gho_`・`ghp_`・`github_pat_` で始まるトークンでしかファイルを付けないので、送る前に `unsupported authentication type` で止まる。新しいダミーは `github_pat_credshim_` で始まり、これらの版でも通り、本物の fine-grained トークンの形にはならない。ダミーを自分で書くときもこの接頭辞を残す。`github_pat_` で始まるほかの値は、`credshim doctor` が本物のトークンとして報告する。
 
 `extra_hosts` のある版に [CredShim を更新](install.md#新しいリリースに更新する管理者のセッション) したあと、管理者のセッションでルールを入れ替える。登録したトークンはそのまま使う。
 
