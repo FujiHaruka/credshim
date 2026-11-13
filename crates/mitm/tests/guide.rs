@@ -49,6 +49,7 @@ impl Setup {
             limits,
             base_url_prefix: None,
             env: None,
+            extra_hosts: Vec::new(),
             secret: "openai".into(),
             dummy: DUMMY.into(),
             inject: InjectSpec {
@@ -234,6 +235,7 @@ async fn a_dummy_over_plain_http_is_refused_with_the_reason() {
         limits: Limits::default(),
         base_url_prefix: None,
         env: None,
+        extra_hosts: Vec::new(),
         secret: "openai".into(),
         dummy: DUMMY.into(),
         inject: InjectSpec {

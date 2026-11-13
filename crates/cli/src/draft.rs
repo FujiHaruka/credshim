@@ -69,6 +69,15 @@ pub fn destinations(config: &Config) -> String {
             rule.secret,
             origin(preset::preset_for_host(&rule.host), "host")
         );
+        for host in &rule.extra_hosts {
+            let _ = writeln!(
+                out,
+                "      also -> https://{host}:{}{}{}",
+                rule.port.unwrap_or(DEFAULT_PORT),
+                rule.path_prefix.as_deref().unwrap_or_default(),
+                origin(preset::preset_for_host(host), "host")
+            );
+        }
         let _ = writeln!(
             out,
             "      methods: {}; paths: {}; limits: {}",

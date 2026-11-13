@@ -32,6 +32,7 @@ sudo $bin service reload
 | --- | --- | --- |
 | `name` | ○ | ルールの名前。英数字と `.`・`_`・`-` |
 | `host` | ○ | 宛先のホスト名（小文字、ポートなし） |
+| `extra_hosts` | | 同じダミーを受け付けるほかのホスト名。`port`・`path_prefix`・`inject`・許可リストは同じものを使う。GitHub の `api.github.com` と `uploads.github.com` のように、1つのトークンを複数のホストで使うサービス向け |
 | `port` | | 宛先のポート。既定は 443 |
 | `path_prefix` | | 宛先をこのパスの下に絞る（`/v1` なら `/v1/...` だけ） |
 | `secret` | ○ | 本物の値を入れる秘密ストアの名前。`credshim-svc secret set <名前>` で登録する |
@@ -45,7 +46,7 @@ sudo $bin service reload
 
 ### ルールの効き方
 
-- ダミーを本物に差し替えるのは、実際の接続先が `host`・`port`（と `path_prefix`）に一致し、その宛先の TLS 証明書を OS の信頼ストアで検証できたときだけ（OS に入れた社内の CA も使える）。平文の HTTP には差し替えない。
+- ダミーを本物に差し替えるのは、実際の接続先が `host` か `extra_hosts` のどれか、`port`（と `path_prefix`）に一致し、その宛先の TLS 証明書を OS の信頼ストアで検証できたときだけ（OS に入れた社内の CA も使える）。平文の HTTP には差し替えない。
 - ダミーが別の宛先に向かえば、差し替えずに 403 を返す。上流には何も送らない。
 - 宛先は合っていても、`allow_methods`・`allow_paths` の外なら 403、`limits` を超えれば 429。どちらも上流には送らない。
 - 応答に本物の値が含まれていれば、クライアントに返す前にダミーに戻す（スクラブ）。`[scrub] enabled = false` で止められるが、止めない方がよい。

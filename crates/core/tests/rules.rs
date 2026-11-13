@@ -43,6 +43,7 @@ fn spec(name: &str, host: &str, dummy: &str, inject: InjectSpec) -> RuleSpec {
         limits: Default::default(),
         base_url_prefix: None,
         env: None,
+        extra_hosts: Vec::new(),
         secret: name.to_string(),
         dummy: dummy.to_string(),
         inject,

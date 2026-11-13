@@ -223,6 +223,7 @@ fn static_dummies_may_not_use_issued_token_prefixes() {
         limits: Default::default(),
         base_url_prefix: None,
         env: None,
+        extra_hosts: Vec::new(),
         secret: "x".to_string(),
         dummy: format!("prefix-{}", dummy::generate(ACCESS_TOKEN_PREFIX)),
         inject: InjectSpec {

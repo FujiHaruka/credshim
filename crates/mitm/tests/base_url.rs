@@ -27,6 +27,7 @@ fn spec(name: &str, host: &str, dummy: &str, prefix: Option<&str>) -> RuleSpec {
         limits: Default::default(),
         base_url_prefix: prefix.map(Into::into),
         env: None,
+        extra_hosts: Vec::new(),
         secret: name.into(),
         dummy: dummy.into(),
         inject: InjectSpec {

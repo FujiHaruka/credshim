@@ -40,6 +40,7 @@ fn rule(name: &str, host: &str, dummy: &str, limits: Limits) -> RuleSpec {
         limits,
         base_url_prefix: None,
         env: None,
+        extra_hosts: Vec::new(),
         secret: name.into(),
         dummy: dummy.into(),
         inject: InjectSpec {

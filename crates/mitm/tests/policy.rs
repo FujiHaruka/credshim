@@ -45,6 +45,7 @@ impl Setup {
             limits,
             base_url_prefix: None,
             env: None,
+            extra_hosts: Vec::new(),
             secret: "openai".into(),
             dummy: DUMMY.into(),
             inject: InjectSpec {

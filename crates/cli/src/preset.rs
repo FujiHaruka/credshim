@@ -3,6 +3,7 @@ use credshim_core::dummy;
 pub struct Preset {
     pub name: &'static str,
     host: &'static str,
+    extra_hosts: &'static [&'static str],
     dummy_prefix: &'static str,
     inject: &'static str,
     allow_methods: &'static str,
@@ -11,12 +12,15 @@ pub struct Preset {
     base_url_prefix: &'static str,
 }
 
+pub const GITHUB_DUMMY_PREFIX: &str = "github_pat_credshim_";
+
 const GET_POST: &str = r#"["GET", "POST"]"#;
 
 pub const PRESETS: &[Preset] = &[
     Preset {
         name: "openai",
         host: "api.openai.com",
+        extra_hosts: &[],
         dummy_prefix: "sk-credshim-openai-",
         allow_methods: GET_POST,
         inject: r#"{ header = "authorization" }"#,
@@ -27,6 +31,7 @@ pub const PRESETS: &[Preset] = &[
     Preset {
         name: "anthropic",
         host: "api.anthropic.com",
+        extra_hosts: &[],
         dummy_prefix: "sk-ant-credshim-",
         allow_methods: GET_POST,
         inject: r#"{ header = "x-api-key" }"#,
@@ -37,6 +42,7 @@ pub const PRESETS: &[Preset] = &[
     Preset {
         name: "gemini",
         host: "generativelanguage.googleapis.com",
+        extra_hosts: &[],
         dummy_prefix: "credshim-gemini-",
         allow_methods: GET_POST,
         inject: r#"{ header = "x-goog-api-key", query = "key" }"#,
@@ -47,10 +53,11 @@ pub const PRESETS: &[Preset] = &[
     Preset {
         name: "github",
         host: "api.github.com",
-        dummy_prefix: "credshim-github-",
+        extra_hosts: &["uploads.github.com"],
+        dummy_prefix: GITHUB_DUMMY_PREFIX,
         allow_methods: r#"["GET", "POST", "PATCH", "PUT", "DELETE"]"#,
         inject: r#"{ header = "authorization" }"#,
-        allow_paths: r#"["/graphql", "/repos", "/user", "/users", "/orgs", "/search", "/notifications", "/gists", "/rate_limit", "/licenses", "/gitignore"]"#,
+        allow_paths: r#"["/graphql", "/repos", "/user", "/users", "/orgs", "/search", "/notifications", "/gists", "/rate_limit", "/licenses", "/gitignore", "/user-attachments"]"#,
         env: "GH_TOKEN",
         base_url_prefix: "/github",
     },
@@ -80,7 +87,11 @@ pub const AWS_SSO_PRESET: &str = "aws-sso";
 pub fn preset_for_host(host: &str) -> Option<&'static str> {
     PRESETS
         .iter()
-        .find(|preset| preset.host.eq_ignore_ascii_case(host))
+        .find(|preset| {
+            std::iter::once(&preset.host)
+                .chain(preset.extra_hosts)
+                .any(|known| known.eq_ignore_ascii_case(host))
+        })
         .map(|preset| preset.name)
 }
 
@@ -139,13 +150,6 @@ fn render_aws_sso() -> String {
 
 impl SshPreset {
     fn render(&self) -> String {
-        let quoted = |values: &[&str]| {
-            values
-                .iter()
-                .map(|value| format!("\"{value}\""))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
         format!(
             "[[ssh_key]]\nname = \"{rule}\"\nsecret = \"ssh-{rule}\"\nusers = [{users}]\nhost_keys = [{host_keys}]\n",
             rule = self.rule,
@@ -158,8 +162,13 @@ impl SshPreset {
 impl Preset {
     fn render(&self) -> String {
         let dummy = dummy::generate(self.dummy_prefix);
+        let extra_hosts = if self.extra_hosts.is_empty() {
+            String::new()
+        } else {
+            format!("extra_hosts = [{}]\n", quoted(self.extra_hosts))
+        };
         format!(
-            "[[rule]]\nname = \"{name}\"\nhost = \"{host}\"\nsecret = \"{name}\"\ndummy = \"{dummy}\"\nenv = \"{env}\"\ninject = {inject}\nallow_methods = {allow_methods}\nallow_paths = {allow_paths}\nbase_url_prefix = \"{base_url_prefix}\"\n",
+            "[[rule]]\nname = \"{name}\"\nhost = \"{host}\"\n{extra_hosts}secret = \"{name}\"\ndummy = \"{dummy}\"\nenv = \"{env}\"\ninject = {inject}\nallow_methods = {allow_methods}\nallow_paths = {allow_paths}\nbase_url_prefix = \"{base_url_prefix}\"\n",
             env = self.env,
             name = self.name,
             host = self.host,
@@ -169,4 +178,12 @@ impl Preset {
             base_url_prefix = self.base_url_prefix,
         )
     }
+}
+
+fn quoted(values: &[&str]) -> String {
+    values
+        .iter()
+        .map(|value| format!("\"{value}\""))
+        .collect::<Vec<_>>()
+        .join(", ")
 }

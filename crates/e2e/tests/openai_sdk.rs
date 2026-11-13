@@ -52,6 +52,7 @@ impl Fixture {
             limits: Default::default(),
             base_url_prefix: Some("/openai".into()),
             env: None,
+            extra_hosts: Vec::new(),
             secret: "openai".into(),
             dummy: DUMMY.into(),
             inject: InjectSpec {

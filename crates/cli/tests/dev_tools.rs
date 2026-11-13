@@ -693,7 +693,7 @@ async fn doctor_reports_an_unreachable_agent_an_old_openssh_and_leftover_credent
         .fresh_shell(
             &bin,
             &format!(
-                "SSH_AUTH_SOCK=\"$HOME/missing.sock\" AWS_SESSION_TOKEN=x GITHUB_TOKEN={gh_token} GH_TOKEN=credshim-github-dummy \"$CREDSHIM\" doctor"
+                "SSH_AUTH_SOCK=\"$HOME/missing.sock\" AWS_SESSION_TOKEN=x GITHUB_TOKEN={gh_token} GH_TOKEN=github_pat_credshim_0123456789abcdefghij \"$CREDSHIM\" doctor"
             ),
         )
         .await;

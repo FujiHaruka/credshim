@@ -17,6 +17,8 @@ pub const MAX_DUMMY_LEN: usize = 256;
 pub struct RuleSpec {
     pub name: String,
     pub host: String,
+    #[serde(default)]
+    pub extra_hosts: Vec<String>,
     pub port: Option<u16>,
     pub path_prefix: Option<String>,
     pub secret: String,
@@ -229,6 +231,7 @@ impl Rule {
         let RuleSpec {
             name,
             host,
+            extra_hosts,
             port,
             path_prefix,
             secret,
@@ -244,25 +247,35 @@ impl Rule {
             return Err(RuleError::InvalidName(name));
         }
         let locations = locations(&name, inject)?;
-        let binding = Binding::new(&host, port.unwrap_or(DEFAULT_PORT), path_prefix, locations)
-            .map_err(|err| match err {
-                BindingError::InvalidHost(host) => RuleError::InvalidHost {
-                    rule: name.clone(),
+        let bindings = std::iter::once(&host)
+            .chain(&extra_hosts)
+            .map(|host| {
+                Binding::new(
                     host,
-                },
-                BindingError::InvalidPort => RuleError::InvalidPort(name.clone()),
-                BindingError::InvalidPathPrefix(prefix) => RuleError::InvalidPathPrefix {
-                    rule: name.clone(),
-                    prefix,
-                },
-            })?;
+                    port.unwrap_or(DEFAULT_PORT),
+                    path_prefix.clone(),
+                    locations.clone(),
+                )
+                .map_err(|err| match err {
+                    BindingError::InvalidHost(host) => RuleError::InvalidHost {
+                        rule: name.clone(),
+                        host,
+                    },
+                    BindingError::InvalidPort => RuleError::InvalidPort(name.clone()),
+                    BindingError::InvalidPathPrefix(prefix) => RuleError::InvalidPathPrefix {
+                        rule: name.clone(),
+                        prefix,
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let policy = Policy::new(allow_methods, allow_paths, limits).map_err(|source| {
             RuleError::InvalidPolicy {
                 rule: name.clone(),
                 source,
             }
         })?;
-        Ok(Self::new(name, dummy, SecretRef::Named(secret), vec![binding])?.with_policy(policy))
+        Ok(Self::new(name, dummy, SecretRef::Named(secret), bindings)?.with_policy(policy))
     }
 
     pub fn name(&self) -> &str {
