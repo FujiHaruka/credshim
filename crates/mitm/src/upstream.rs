@@ -14,6 +14,7 @@ use rustls::ClientConfig;
 use rustls_pki_types::ServerName;
 use rustls_platform_verifier::Verifier;
 use tokio::net::TcpStream;
+use tokio::task::JoinSet;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
@@ -79,6 +80,70 @@ fn is_off_limits(ip: IpAddr) -> bool {
     }
 }
 
+const ATTEMPT_STAGGER: Duration = Duration::from_millis(250);
+
+fn interleave_families(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
+    let Some(first) = addrs.first() else {
+        return Vec::new();
+    };
+    let (lead, other): (Vec<SocketAddr>, Vec<SocketAddr>) = addrs
+        .iter()
+        .copied()
+        .partition(|addr| addr.is_ipv6() == first.is_ipv6());
+    let mut lead = lead.into_iter();
+    let mut other = other.into_iter();
+    let mut ordered = Vec::with_capacity(addrs.len());
+    loop {
+        match (lead.next(), other.next()) {
+            (None, None) => return ordered,
+            (a, b) => ordered.extend(a.into_iter().chain(b)),
+        }
+    }
+}
+
+async fn race<T, C, F>(addrs: Vec<SocketAddr>, stagger: Duration, connect: C) -> io::Result<T>
+where
+    T: Send + 'static,
+    C: Fn(SocketAddr) -> F,
+    F: Future<Output = io::Result<T>> + Send + 'static,
+{
+    let mut pending = addrs.into_iter();
+    let mut attempts = JoinSet::new();
+    let mut last_error: Option<io::Error> = None;
+    loop {
+        if attempts.is_empty() {
+            let Some(addr) = pending.next() else {
+                return Err(last_error.unwrap_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "could not resolve to any address",
+                    )
+                }));
+            };
+            attempts.spawn(connect(addr));
+        }
+        let failure = tokio::select! {
+            biased;
+            Some(joined) = attempts.join_next() => match joined {
+                Ok(Ok(stream)) => return Ok(stream),
+                Ok(Err(err)) => Some(err),
+                Err(err) => Some(io::Error::other(err)),
+            },
+            () = tokio::time::sleep(stagger), if !pending.as_slice().is_empty() => None,
+        };
+        if failure.is_some() {
+            last_error = failure;
+        }
+        if let Some(addr) = pending.next() {
+            attempts.spawn(connect(addr));
+        }
+    }
+}
+
+pub async fn connect_first(addrs: &[SocketAddr], stagger: Duration) -> io::Result<TcpStream> {
+    race(interleave_families(addrs), stagger, TcpStream::connect).await
+}
+
 impl Upstream {
     pub fn new() -> anyhow::Result<Self> {
         let verifier = Verifier::new(crypto_provider())?;
@@ -134,7 +199,7 @@ impl Upstream {
                 port,
             });
         }
-        TcpStream::connect(allowed.as_slice())
+        connect_first(&allowed, ATTEMPT_STAGGER)
             .await
             .map_err(tcp_error)
     }
@@ -319,5 +384,104 @@ impl tower_service::Service<Uri> for TargetConnector {
             };
             Ok(UpstreamIo::new(tls))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn addr(text: &str) -> SocketAddr {
+        text.parse().unwrap()
+    }
+
+    #[test]
+    fn families_alternate_starting_with_the_resolvers_first_choice() {
+        let ordered = interleave_families(&[
+            addr("[2001:db8::1]:443"),
+            addr("[2001:db8::2]:443"),
+            addr("192.0.2.1:443"),
+            addr("192.0.2.2:443"),
+            addr("192.0.2.3:443"),
+        ]);
+
+        assert_eq!(
+            ordered,
+            vec![
+                addr("[2001:db8::1]:443"),
+                addr("192.0.2.1:443"),
+                addr("[2001:db8::2]:443"),
+                addr("192.0.2.2:443"),
+                addr("192.0.2.3:443"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hanging_first_address_does_not_block_the_next_one() {
+        let addrs = vec![addr("[2001:db8::1]:443"), addr("192.0.2.1:443")];
+
+        let winner = tokio::time::timeout(
+            Duration::from_secs(5),
+            race(addrs, Duration::from_millis(20), |addr| async move {
+                if addr.is_ipv6() {
+                    std::future::pending::<()>().await;
+                }
+                Ok::<_, io::Error>(addr)
+            }),
+        )
+        .await
+        .expect("the second address is tried while the first hangs")
+        .unwrap();
+
+        assert_eq!(winner, addr("192.0.2.1:443"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_address_moves_on_without_waiting_for_the_stagger() {
+        let addrs = vec![addr("192.0.2.1:443"), addr("192.0.2.2:443")];
+
+        let winner = tokio::time::timeout(
+            Duration::from_secs(5),
+            race(addrs, Duration::from_secs(3600), |addr| async move {
+                if addr == "192.0.2.1:443".parse().unwrap() {
+                    return Err(io::Error::from(io::ErrorKind::ConnectionRefused));
+                }
+                Ok(addr)
+            }),
+        )
+        .await
+        .expect("the second address is tried as soon as the first fails")
+        .unwrap();
+
+        assert_eq!(winner, addr("192.0.2.2:443"));
+    }
+
+    #[tokio::test]
+    async fn when_every_address_fails_the_last_error_is_returned() {
+        let addrs = vec![addr("192.0.2.1:443"), addr("192.0.2.2:443")];
+
+        let err = race(addrs, Duration::from_millis(20), |addr| async move {
+            Err::<SocketAddr, _>(io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                addr.to_string(),
+            ))
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionRefused);
+        assert_eq!(err.to_string(), "192.0.2.2:443");
+    }
+
+    #[tokio::test]
+    async fn no_addresses_is_an_error() {
+        let err = race(Vec::new(), Duration::from_millis(20), |addr| async move {
+            Ok::<_, io::Error>(addr)
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 }
