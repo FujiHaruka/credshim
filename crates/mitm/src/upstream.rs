@@ -123,6 +123,7 @@ where
             attempts.spawn(connect(addr));
         }
         let failure = tokio::select! {
+            biased;
             Some(joined) = attempts.join_next() => match joined {
                 Ok(Ok(stream)) => return Ok(stream),
                 Ok(Err(err)) => Some(err),
